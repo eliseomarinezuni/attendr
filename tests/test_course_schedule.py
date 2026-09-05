@@ -42,6 +42,32 @@ class CourseScheduleTests(unittest.TestCase):
         )
         self.assertEqual(item.due_at_local.isoformat(), "2026-09-07T23:59:00-04:00")
 
+    def test_full_term_expands_all_class_types_and_skips_no_class_week(self):
+        items = self.schedule.scheduled_class_items()
+
+        self.assertEqual(len(items), 156)
+        self.assertEqual({item.kind for item in items}, {"lecture", "lab", "tutorial"})
+        self.assertFalse(
+            any(
+                item.due_at_local.date().isoformat() in {
+                    "2026-10-12",
+                    "2026-10-13",
+                    "2026-10-14",
+                    "2026-10-15",
+                    "2026-10-16",
+                }
+                for item in items
+            )
+        )
+        ethics = next(
+            item
+            for item in items
+            if item.course_name.startswith("Ethics")
+            and item.due_at_local.date().isoformat() == "2026-09-10"
+        )
+        self.assertEqual(ethics.due_at_local.strftime("%H:%M"), "11:10")
+        self.assertEqual(ethics.end_at.astimezone(self.schedule.timezone).strftime("%H:%M"), "14:00")
+
 
 if __name__ == "__main__":
     unittest.main()

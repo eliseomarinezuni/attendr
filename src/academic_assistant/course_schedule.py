@@ -17,6 +17,7 @@ UTC = timezone.utc
 @dataclass(frozen=True, slots=True)
 class ClassSession:
     course_key: str
+    course_name: str
     course_match: tuple[str, ...]
     weekday: int
     start: time
@@ -52,6 +53,10 @@ class CourseSchedule:
         self.sessions = tuple(
             ClassSession(
                 course_key=str(course["key"]),
+                course_name=str(
+                    course.get("name")
+                    or str(course["key"]).replace("-", " ").title()
+                ),
                 course_match=tuple(str(value).casefold() for value in course["match"]),
                 weekday=int(session["weekday"]),
                 start=time.fromisoformat(session["start"]),
@@ -151,3 +156,43 @@ class CourseSchedule:
                 )
             )
         return tuple(items)
+
+    def scheduled_class_items(self) -> tuple[AcademicItem, ...]:
+        """Expand the timetable into every lecture, lab, and tutorial event."""
+        items: list[AcademicItem] = []
+        day = self.term_start
+        while day <= self.term_end:
+            if not self.is_no_class_day(day):
+                for session in self.sessions:
+                    if session.weekday != day.weekday():
+                        continue
+                    start_local = datetime.combine(day, session.start, tzinfo=self.timezone)
+                    end_local = datetime.combine(day, session.end, tzinfo=self.timezone)
+                    source_id = (
+                        f"{day.isoformat()}:{session.course_key}:"
+                        f"{session.activity}:{session.start.strftime('%H%M')}"
+                    )
+                    items.append(
+                        AcademicItem(
+                            uid=f"attendr:class-session:{source_id}",
+                            source="class_schedule",
+                            source_id=source_id,
+                            course_id=0,
+                            course_name=session.course_name,
+                            title=session.activity.title(),
+                            kind=session.activity,
+                            due_at=start_local.astimezone(UTC),
+                            due_at_local=start_local,
+                            end_at=end_local.astimezone(UTC),
+                            all_day=False,
+                            html_url=None,
+                            updated_at=None,
+                            points_possible=None,
+                            submission_types=(),
+                            description_html=(
+                                "Scheduled from the verified Fall 2026 timetable."
+                            ),
+                        )
+                    )
+            day += timedelta(days=1)
+        return tuple(sorted(items, key=lambda item: (item.due_at, item.uid)))

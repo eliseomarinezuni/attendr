@@ -423,6 +423,7 @@ class GoogleCalendarSync:
             "syllabus_deadline",
             "announcement_deadline",
             "university_schedule",
+            "class_schedule",
         } and item.description_html:
             description_lines.append(item.description_html[:800])
         safe_url = self._safe_url(item.html_url)
