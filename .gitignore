@@ -3,6 +3,9 @@
 !.env.example
 
 .venv/
+worker/node_modules/
+.wrangler/
+worker/.wrangler/
 .DS_Store
 __pycache__/
 *.py[cod]

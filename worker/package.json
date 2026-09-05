@@ -1,0 +1,15 @@
+{
+  "name": "attendr-interactions",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "deploy": "wrangler deploy",
+    "db:init:local": "wrangler d1 execute attendr-study --local --file=schema.sql"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260903.1",
+    "typescript": "^5.9.2",
+    "wrangler": "^4.129.0"
+  }
+}

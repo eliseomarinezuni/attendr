@@ -40,7 +40,7 @@ class CalendarAPIError(RuntimeError):
     """Raised when a Google Calendar API operation fails."""
 
 
-SyncAction = Literal["created", "updated", "skipped"]
+SyncAction = Literal["created", "updated", "skipped", "deleted"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +69,10 @@ class CalendarSyncReport:
     @property
     def skipped(self) -> tuple[CalendarSyncEntry, ...]:
         return tuple(entry for entry in self.entries if entry.action == "skipped")
+
+    @property
+    def deleted(self) -> tuple[CalendarSyncEntry, ...]:
+        return tuple(entry for entry in self.entries if entry.action == "deleted")
 
 
 class GoogleCalendarAuthenticator:
@@ -188,6 +192,8 @@ class GoogleCalendarSync:
         mark_submitted: bool = True,
         submitted_color_id: str = "10",
         event_duration_minutes: int = 30,
+        source_tag: str = "canvas",
+        prune_missing: bool = False,
     ) -> None:
         if not calendar_id and calendar_name is not None and not calendar_name.strip():
             calendar_name = None
@@ -213,6 +219,8 @@ class GoogleCalendarSync:
         self._mark_submitted = mark_submitted
         self._submitted_color_id = submitted_color_id
         self._event_duration = timedelta(minutes=event_duration_minutes)
+        self._source_tag = source_tag
+        self._prune_missing = prune_missing
         self._resolved_calendar: tuple[str, str] | None = None
 
     @classmethod
@@ -299,6 +307,30 @@ class GoogleCalendarSync:
 
             entries.append(self._entry(item, action, result))
 
+        if self._prune_missing:
+            for uid, event in existing_by_uid.items():
+                if uid in unique_items:
+                    continue
+                try:
+                    self._service.events().delete(
+                        calendarId=calendar_id,
+                        eventId=event["id"],
+                        sendUpdates="none",
+                    ).execute()
+                except HttpError as error:
+                    raise self._api_error(
+                        f"Could not remove obsolete Attendr event {uid}", error
+                    ) from None
+                entries.append(
+                    CalendarSyncEntry(
+                        canvas_uid=uid,
+                        title=str(event.get("summary") or uid),
+                        action="deleted",
+                        google_event_id=str(event.get("id")) if event.get("id") else None,
+                        html_link=None,
+                    )
+                )
+
         return CalendarSyncReport(
             calendar_id=calendar_id,
             calendar_name=calendar_name,
@@ -382,7 +414,7 @@ class GoogleCalendarSync:
                     self._service.events()
                     .list(
                         calendarId=calendar_id,
-                        privateExtendedProperty="attendr_source=canvas",
+                        privateExtendedProperty=f"attendr_source={self._source_tag}",
                         showDeleted=False,
                         maxResults=2500,
                         pageToken=page_token,
@@ -431,7 +463,7 @@ class GoogleCalendarSync:
             description_lines.append(f"Canvas: {safe_url}")
 
         private_properties = {
-            "attendr_source": "canvas",
+            "attendr_source": self._source_tag,
             "canvas_uid": item.uid,
             "canvas_source": item.source,
             "canvas_source_id": item.source_id,
@@ -441,7 +473,7 @@ class GoogleCalendarSync:
         body: dict[str, Any] = {
             "summary": summary,
             "description": "\n".join(description_lines),
-            "transparency": "transparent",
+            "transparency": "opaque" if self._source_tag == "study_plan" else "transparent",
             "extendedProperties": {"private": private_properties},
         }
         if safe_url:

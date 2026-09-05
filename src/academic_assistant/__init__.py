@@ -59,6 +59,13 @@ from .notifier import (
     NotificationReport,
     NotificationState,
 )
+from .study_planner import (
+    BusyInterval,
+    StudyPlanReport,
+    StudyPlanner,
+    StudyRemoteState,
+    StudyTemplate,
+)
 
 __all__ = [
     "AIAssistant",
@@ -108,6 +115,11 @@ __all__ = [
     "QuizQuestion",
     "SyllabusEntry",
     "SyllabusMaterial",
+    "BusyInterval",
+    "StudyPlanReport",
+    "StudyPlanner",
+    "StudyRemoteState",
+    "StudyTemplate",
     "extract_pdf_text_chunks",
     "extract_powerpoint_text_chunks",
     "hybrid_quiz_discord_payload",
