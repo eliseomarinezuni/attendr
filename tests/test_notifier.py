@@ -1,0 +1,277 @@
+from __future__ import annotations
+
+import unittest
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+import sys
+
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+from academic_assistant.canvas_client import (
+    AcademicItem,
+    Announcement,
+    CanvasSnapshot,
+)
+from academic_assistant.notifier import (
+    DiscordConfigurationError,
+    DiscordNotificationError,
+    DiscordNotifier,
+    DiscordRateLimitError,
+)
+
+UTC = timezone.utc
+NOW = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
+WEBHOOK_URL = "https://discord.com/api/webhooks/123456/test-token"
+
+
+class FakeResponse:
+    def __init__(self, status_code=204, body=None, headers=None):
+        self.status_code = status_code
+        self._body = body
+        self.headers = headers or {}
+
+    def json(self):
+        if self._body is None:
+            raise ValueError("not JSON")
+        return self._body
+
+
+class FakeSession:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
+def make_item(**overrides):
+    due_at = NOW + timedelta(hours=24)
+    values = {
+        "uid": "canvas:assignment:1:10",
+        "source": "assignment",
+        "source_id": "10",
+        "course_id": 1,
+        "course_name": "Algorithms",
+        "title": "Problem Set 1",
+        "kind": "assignment",
+        "due_at": due_at,
+        "due_at_local": due_at.astimezone(),
+        "end_at": None,
+        "all_day": False,
+        "html_url": "https://canvas.example/courses/1/assignments/10",
+        "updated_at": NOW,
+        "points_possible": 20.0,
+        "submission_types": ("online_upload",),
+        "description_html": "<p>Solve all problems.</p>",
+    }
+    values.update(overrides)
+    return AcademicItem(**values)
+
+
+def make_announcement(**overrides):
+    posted_at = NOW - timedelta(hours=1)
+    values = {
+        "uid": "canvas:announcement:1:20",
+        "source_id": "20",
+        "course_id": 1,
+        "course_name": "Algorithms",
+        "title": "Room update",
+        "message_html": (
+            "<p>Hello <strong>class</strong>.</p>"
+            "<script>alert('secret')</script><p>@everyone New room.</p>"
+        ),
+        "message_text": "Hello class. @everyone New room.",
+        "posted_at": posted_at,
+        "posted_at_local": posted_at.astimezone(),
+        "html_url": "https://canvas.example/courses/1/announcements/20",
+        "author_name": "Professor Example",
+        "read_state": "unread",
+    }
+    values.update(overrides)
+    return Announcement(**values)
+
+
+class DiscordNotifierTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = TemporaryDirectory()
+        self.state_path = Path(self.temporary_directory.name) / "state.db"
+
+    def tearDown(self):
+        self.temporary_directory.cleanup()
+
+    def make_notifier(self, responses=None, **overrides):
+        session = overrides.pop(
+            "session",
+            FakeSession(responses if responses is not None else [FakeResponse()]),
+        )
+        sleeps = []
+        notifier = DiscordNotifier(
+            WEBHOOK_URL,
+            state_path=self.state_path,
+            app_timezone="America/Toronto",
+            session=session,
+            sleep=sleeps.append,
+            now_provider=lambda: NOW,
+            **overrides,
+        )
+        return notifier, session, sleeps
+
+    def test_assignment_embed_contains_required_fields_and_disables_mentions(self):
+        notifier, _, _ = self.make_notifier()
+        payload = notifier.assignment_payload(make_item())
+        embed = payload["embeds"][0]
+
+        self.assertEqual(embed["title"], "Problem Set 1")
+        self.assertEqual(
+            embed["url"], "https://canvas.example/courses/1/assignments/10"
+        )
+        self.assertEqual(embed["fields"][0]["value"], "Algorithms")
+        self.assertEqual(embed["fields"][2]["value"], "20")
+        self.assertEqual(payload["allowed_mentions"], {"parse": []})
+
+    def test_announcement_embed_removes_html_and_active_content(self):
+        notifier, _, _ = self.make_notifier()
+        payload = notifier.announcement_payload(make_announcement())
+        description = payload["embeds"][0]["description"]
+
+        self.assertEqual(description, "Hello class. @everyone New room.")
+        self.assertNotIn("<", description)
+        self.assertNotIn("alert", description)
+        self.assertEqual(payload["allowed_mentions"], {"parse": []})
+
+    def test_digest_only_lists_deadlines_inside_requested_window(self):
+        notifier, _, _ = self.make_notifier()
+        inside = make_item()
+        outside = make_item(
+            uid="canvas:assignment:1:11",
+            source_id="11",
+            title="Later work",
+            due_at=NOW + timedelta(hours=73),
+            due_at_local=(NOW + timedelta(hours=73)).astimezone(),
+        )
+
+        payload = notifier.daily_digest_payload([outside, inside], hours=72, now=NOW)
+        description = payload["embeds"][0]["description"]
+
+        self.assertIn("Problem Set 1", description)
+        self.assertNotIn("Later work", description)
+
+    def test_unchanged_alert_is_sent_once_but_changed_alert_is_sent_again(self):
+        notifier, session, _ = self.make_notifier([FakeResponse(), FakeResponse()])
+        item = make_item()
+
+        self.assertTrue(notifier.send_assignment_alert(item))
+        self.assertFalse(notifier.send_assignment_alert(item))
+        self.assertTrue(
+            notifier.send_assignment_alert(replace(item, title="Problem Set 1 updated"))
+        )
+        self.assertEqual(len(session.calls), 2)
+
+    def test_forced_test_send_does_not_consume_deduplication_state(self):
+        notifier, session, _ = self.make_notifier([FakeResponse(), FakeResponse()])
+        item = make_item()
+
+        self.assertTrue(notifier.send_assignment_alert(item, force=True))
+        self.assertTrue(notifier.send_assignment_alert(item))
+        self.assertEqual(len(session.calls), 2)
+
+    def test_rate_limit_uses_retry_after_then_retries(self):
+        notifier, session, sleeps = self.make_notifier(
+            [FakeResponse(429, {"retry_after": 1.25}), FakeResponse(204)]
+        )
+
+        self.assertTrue(notifier.send_announcement_alert(make_announcement()))
+        self.assertEqual(sleeps, [1.25])
+        self.assertEqual(len(session.calls), 2)
+
+    def test_long_rate_limit_stops_without_marking_notification_seen(self):
+        notifier, session, _ = self.make_notifier(
+            [FakeResponse(429, {"retry_after": 120}), FakeResponse(204)],
+            max_rate_limit_wait_seconds=60,
+        )
+        item = make_item()
+
+        with self.assertRaises(DiscordRateLimitError):
+            notifier.send_assignment_alert(item)
+        self.assertTrue(notifier.send_assignment_alert(item))
+        self.assertEqual(len(session.calls), 2)
+
+    def test_error_message_does_not_expose_webhook_secret(self):
+        notifier, _, _ = self.make_notifier([FakeResponse(404)])
+
+        with self.assertRaises(DiscordNotificationError) as caught:
+            notifier.send_assignment_alert(make_item())
+        self.assertNotIn("test-token", str(caught.exception))
+
+    def test_daily_digest_is_only_sent_once_per_local_day(self):
+        notifier, session, _ = self.make_notifier([FakeResponse()])
+
+        self.assertTrue(notifier.send_daily_digest([make_item()]))
+        self.assertFalse(notifier.send_daily_digest([make_item(title="Changed")]))
+        self.assertEqual(len(session.calls), 1)
+
+    def test_json_state_persists_deduplication_across_notifier_instances(self):
+        state_path = Path(self.temporary_directory.name) / "seen_ids.json"
+        first_session = FakeSession([FakeResponse()])
+        second_session = FakeSession([])
+        first = DiscordNotifier(
+            WEBHOOK_URL,
+            state_path=state_path,
+            session=first_session,
+            now_provider=lambda: NOW,
+        )
+        second = DiscordNotifier(
+            WEBHOOK_URL,
+            state_path=state_path,
+            session=second_session,
+            now_provider=lambda: NOW,
+        )
+
+        self.assertTrue(first.send_announcement_alert(make_announcement()))
+        self.assertFalse(second.send_announcement_alert(make_announcement()))
+        self.assertEqual(len(first_session.calls), 1)
+        self.assertEqual(len(second_session.calls), 0)
+
+    def test_snapshot_flow_sends_each_alert_once(self):
+        notifier, session, _ = self.make_notifier(
+            [FakeResponse(), FakeResponse(), FakeResponse()]
+        )
+        snapshot = CanvasSnapshot(
+            user_id="42",
+            user_name="Ada Student",
+            courses=(),
+            items=(make_item(),),
+            announcements=(make_announcement(),),
+            warnings=(),
+            fetched_at=NOW,
+        )
+
+        first = notifier.notify_snapshot(snapshot)
+        second = notifier.notify_snapshot(snapshot)
+
+        self.assertEqual(first.assignments_sent, 1)
+        self.assertEqual(first.announcements_sent, 1)
+        self.assertTrue(first.digest_sent)
+        self.assertEqual(second.assignments_skipped, 1)
+        self.assertEqual(second.announcements_skipped, 1)
+        self.assertFalse(second.digest_sent)
+        self.assertEqual(len(session.calls), 3)
+
+    def test_webhook_validation_rejects_non_discord_and_query_urls(self):
+        with self.assertRaises(DiscordConfigurationError):
+            DiscordNotifier("https://example.com/api/webhooks/1/token")
+        with self.assertRaises(DiscordConfigurationError):
+            DiscordNotifier(f"{WEBHOOK_URL}?leak=yes")
+
+
+if __name__ == "__main__":
+    unittest.main()
