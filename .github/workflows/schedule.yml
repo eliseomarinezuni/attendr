@@ -53,6 +53,10 @@ jobs:
             printf 'CANVAS_MATERIALS_INDEX=data/materials_index.json\n'
             printf 'CANVAS_MATERIAL_MAX_MB=25\n'
             printf 'CANVAS_MATERIAL_FUTURE_DAYS=550\n'
+            printf 'COURSE_SCHEDULE_FILE=data/course_schedule.json\n'
+            printf 'ANNOUNCEMENT_DATES_INDEX=data/announcement_dates_index.json\n'
+            printf 'LECTURE_QUIZ_STATE_FILE=data/lecture_quiz_state.json\n'
+            printf 'LECTURE_QUIZ_RETRY_HOURS=30\n'
             printf 'DISCORD_WEBHOOK_URL=%s\n' "$DISCORD_WEBHOOK_URL"
             printf 'NOTIFICATION_STATE_FILE=data/seen_ids.json\n'
             printf 'GOOGLE_CREDENTIALS_FILE=credentials.json\n'
@@ -70,14 +74,14 @@ jobs:
       - name: Run pipeline
         id: pipeline
         continue-on-error: true
-        run: python main.py --daily-quiz
+        run: python main.py
 
       - name: Persist notification state
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/seen_ids.json data/materials_index.json
+          git add data/seen_ids.json data/materials_index.json data/announcement_dates_index.json data/lecture_quiz_state.json
           if ! git diff --cached --quiet; then
             git commit -m "chore: persist notification state [skip ci]"
             git push

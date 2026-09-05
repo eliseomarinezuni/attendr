@@ -19,6 +19,8 @@ from academic_assistant import (
     AIInputError,
     AIProviderError,
     extract_pdf_text_chunks,
+    extract_powerpoint_text_chunks,
+    hybrid_quiz_discord_payload,
     quiz_discord_payload,
     send_quiz_to_discord,
 )
@@ -74,6 +76,37 @@ class FakeNotifier:
 
 
 class AIAssistantTests(unittest.TestCase):
+    def test_hybrid_quiz_contains_two_mcq_and_one_short_answer(self):
+        response = [
+            {**question(1), "question_type": "multiple_choice"},
+            {**question(2), "question_type": "multiple_choice"},
+            {
+                "question_type": "short_answer",
+                "question": "Explain the invariant.",
+                "options": [],
+                "correct_answer": "The invariant remains true after every operation.",
+                "explanation": "It supports the correctness proof.",
+            },
+        ]
+        assistant = AIAssistant("test-key", client=FakeClient([json.dumps(response)]))
+        result = assistant.generate_hybrid_quiz("Lecture content")
+        payload = hybrid_quiz_discord_payload("Algorithms", result)
+        self.assertEqual([item["question_type"] for item in result], [
+            "multiple_choice", "multiple_choice", "short_answer"
+        ])
+        self.assertEqual(len(payload["embeds"]), 3)
+
+    def test_powerpoint_text_extraction(self):
+        from pptx import Presentation
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "lecture.pptx"
+            deck = Presentation()
+            slide = deck.slides.add_slide(deck.slide_layouts[1])
+            slide.shapes.title.text = "Binary Search Trees"
+            slide.placeholders[1].text = "The left subtree contains smaller keys."
+            deck.save(path)
+            chunks = extract_powerpoint_text_chunks(path)
+        self.assertIn("Binary Search Trees", chunks[0].text)
     def test_generate_quiz_uses_structured_schema_and_returns_exact_count(self):
         fake = FakeClient([json.dumps([question(1), question(2), question(3)])])
         assistant = AIAssistant("test-key", client=fake)

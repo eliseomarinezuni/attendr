@@ -24,9 +24,11 @@ from pydantic import (
     TypeAdapter,
     ValidationError,
     field_validator,
+    model_validator,
 )
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
+from pptx import Presentation
 
 from .notifier import DiscordNotifier
 
@@ -91,6 +93,27 @@ class QuizQuestion(BaseModel):
         return cleaned
 
 
+class HybridQuizQuestion(BaseModel):
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    question_type: Literal["multiple_choice", "short_answer"]
+    question: str = Field(min_length=1, max_length=1_500)
+    options: list[str] = Field(max_length=4)
+    correct_answer: str = Field(min_length=1, max_length=1_000)
+    explanation: str = Field(min_length=1, max_length=2_000)
+
+    @model_validator(mode="after")
+    def validate_format(self) -> HybridQuizQuestion:
+        if self.question_type == "multiple_choice":
+            if len(self.options) != 4:
+                raise ValueError("multiple-choice questions need four options")
+            if self.correct_answer not in {"A", "B", "C", "D"}:
+                raise ValueError("multiple-choice answer must be A, B, C, or D")
+        elif self.options:
+            raise ValueError("short-answer questions cannot contain options")
+        return self
+
+
 class MajorDeadline(BaseModel):
     """Grounded major course deadline extracted from syllabus material."""
 
@@ -99,7 +122,10 @@ class MajorDeadline(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     due_date: str = Field(min_length=10, max_length=10)
     due_time: str | None = Field(default=None, max_length=5)
-    kind: Literal["exam", "quiz", "assignment", "project", "presentation", "other"]
+    kind: Literal[
+        "exam", "quiz", "assignment", "project", "presentation", "lab",
+        "tutorial", "reading", "class", "other"
+    ]
     source_evidence: str = Field(min_length=1, max_length=500)
 
     @field_validator("due_date")
@@ -124,6 +150,7 @@ class MajorDeadline(BaseModel):
 SYLLABUS_ADAPTER = TypeAdapter(list[SyllabusEntry])
 QUIZ_ADAPTER = TypeAdapter(list[QuizQuestion])
 DEADLINE_ADAPTER = TypeAdapter(list[MajorDeadline])
+HYBRID_QUIZ_ADAPTER = TypeAdapter(list[HybridQuizQuestion])
 
 
 def extract_pdf_text_chunks(
@@ -219,6 +246,58 @@ def extract_pdf_text_chunks(
         raise PDFExtractionError(
             "No readable text was found. The PDF may contain scanned images and require OCR."
         )
+    return tuple(chunks)
+
+
+def extract_powerpoint_text_chunks(
+    pptx_path: str | os.PathLike[str],
+    *,
+    max_chars: int = DEFAULT_CHUNK_CHARS,
+) -> tuple[PDFTextChunk, ...]:
+    """Extract slide text, tables, and speaker notes from a PowerPoint deck."""
+    path = Path(pptx_path).expanduser().resolve()
+    if not path.is_file() or path.suffix.casefold() != ".pptx":
+        raise AIInputError(f"PowerPoint file was not found: {path}")
+    try:
+        presentation = Presentation(path)
+    except (OSError, ValueError, KeyError) as error:
+        raise AIInputError("The PowerPoint is damaged or cannot be opened.") from error
+
+    chunks: list[PDFTextChunk] = []
+    for slide_number, slide in enumerate(presentation.slides, start=1):
+        parts: list[str] = []
+        for shape in slide.shapes:
+            if getattr(shape, "has_text_frame", False):
+                text = " ".join(str(shape.text).split())
+                if text:
+                    parts.append(text)
+            if getattr(shape, "has_table", False):
+                for row in shape.table.rows:
+                    row_text = " | ".join(
+                        " ".join(cell.text.split())
+                        for cell in row.cells
+                        if cell.text.strip()
+                    )
+                    if row_text:
+                        parts.append(row_text)
+        try:
+            notes = " ".join(slide.notes_slide.notes_text_frame.text.split())
+        except (AttributeError, ValueError):
+            notes = ""
+        if notes:
+            parts.append(f"Speaker notes: {notes}")
+        slide_text = "\n".join(parts).strip()
+        if slide_text:
+            chunks.append(
+                PDFTextChunk(
+                    index=len(chunks) + 1,
+                    page_start=slide_number,
+                    page_end=slide_number,
+                    text=f"[Slide {slide_number}]\n{slide_text[:max_chars]}",
+                )
+            )
+    if not chunks:
+        raise AIInputError("No readable text was found in the PowerPoint.")
     return tuple(chunks)
 
 
@@ -326,6 +405,41 @@ class AIAssistant:
             )
         return [question.model_dump(mode="json") for question in questions]
 
+    def generate_hybrid_quiz(self, topic_or_text: str) -> list[dict[str, Any]]:
+        """Generate two conceptual MCQs and one active-recall short answer."""
+        source_text = self._prepare_source_text(topic_or_text)
+        prompt = (
+            "Create exactly three challenging questions using only the lecture material "
+            "below. Questions 1 and 2 must be multiple_choice with exactly four distinct "
+            "options and correct_answer set to A, B, C, or D. Question 3 must be "
+            "short_answer with an empty options list and a concise model answer in "
+            "correct_answer. Emphasize application, causal reasoning, comparison, and "
+            "misconceptions rather than trivia. Give a concise teaching explanation for "
+            "every answer.\n\n"
+            f"LECTURE MATERIAL (JSON string):\n{json.dumps(source_text)}"
+        )
+        questions = self._generate_validated(
+            prompt,
+            response_schema=list[HybridQuizQuestion],
+            adapter=HYBRID_QUIZ_ADAPTER,
+            temperature=0.4,
+            task_name="hybrid quiz generation",
+            expected_keys={
+                "question_type",
+                "question",
+                "options",
+                "correct_answer",
+                "explanation",
+            },
+        )
+        if len(questions) != 3 or [item.question_type for item in questions] != [
+            "multiple_choice",
+            "multiple_choice",
+            "short_answer",
+        ]:
+            raise AIProviderError("Gemini returned an invalid hybrid quiz sequence.")
+        return [question.model_dump(mode="json") for question in questions]
+
     def extract_major_deadlines(
         self,
         syllabus_text: str | Sequence[PDFTextChunk],
@@ -334,14 +448,14 @@ class AIAssistant:
         source_title: str,
         current_date: date | None = None,
     ) -> list[dict[str, Any]]:
-        """Extract validated exams and major graded deadlines from a syllabus."""
+        """Extract validated dated academic items from course material."""
         source_text = self._prepare_source_text(syllabus_text)
         today = current_date or datetime.now(timezone.utc).date()
         prompt = (
-            "Extract only explicitly stated exams and major graded deadlines from the "
-            "syllabus material below. Include midterms, finals, tests, quizzes, projects, "
-            "presentations, and major assignments. Exclude ordinary class meetings, "
-            "readings, office hours, holidays, and dates that are merely examples. "
+            "Extract every explicitly dated academic item from the course material below. "
+            "Include assignments, exams, quizzes, projects, presentations, labs, tutorials, "
+            "readings, and one-off class schedule changes. Exclude recurring weekly meetings, "
+            "office hours, holidays, and dates that are merely examples. "
             "Return ISO dates as YYYY-MM-DD. Return due_time as 24-hour HH:MM only when "
             "the material states a time; otherwise use null. Resolve a missing year only "
             "when the document's term/year makes it unambiguous. Omit ambiguous or "
@@ -620,6 +734,77 @@ def send_quiz_to_discord(
         utc_date = datetime.now(timezone.utc).date().isoformat()
         event_key = f"daily-quiz:{utc_date}:{topic_hash}"
     return notifier.send_custom_notification(event_key, payload, force=force)
+
+
+def hybrid_quiz_discord_payload(
+    topic: str, questions: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Build a Discord quiz with two MCQs and one short-answer challenge."""
+    try:
+        validated = HYBRID_QUIZ_ADAPTER.validate_python(list(questions))
+    except ValidationError:
+        raise AIInputError("Hybrid quiz data is invalid.") from None
+    if len(validated) != 3:
+        raise AIInputError("A hybrid quiz must contain exactly three questions.")
+    labels = ("A", "B", "C", "D")
+    embeds: list[dict[str, Any]] = []
+    for index, item in enumerate(validated, start=1):
+        fields: list[dict[str, Any]] = []
+        if item.question_type == "multiple_choice":
+            fields.append(
+                {
+                    "name": "Options",
+                    "value": "\n".join(
+                        f"**{label}.** {_discord_text(option, 230)}"
+                        for label, option in zip(labels, item.options)
+                    ),
+                    "inline": False,
+                }
+            )
+            answer = f"{item.correct_answer}. {item.options[labels.index(item.correct_answer)]}"
+        else:
+            answer = item.correct_answer
+        fields.append(
+            {
+                "name": "Reveal answer",
+                "value": (
+                    f"||**{_discord_text(answer, 900)}**\n"
+                    f"{_discord_text(item.explanation, 650)}||"
+                ),
+                "inline": False,
+            }
+        )
+        embeds.append(
+            {
+                "title": (
+                    f"{'Multiple choice' if item.question_type == 'multiple_choice' else 'Active recall'} "
+                    f"{index}/3"
+                ),
+                "description": _discord_text(item.question, 1_500),
+                "color": 0x5865F2,
+                "fields": fields,
+                "footer": {"text": "Attendr • Lecture review"},
+            }
+        )
+    return {
+        "username": "Attendr",
+        "content": f"🧠 **Post-lecture quiz: {_discord_text(topic, 150)}**",
+        "embeds": embeds,
+        "allowed_mentions": {"parse": []},
+    }
+
+
+def send_hybrid_quiz_to_discord(
+    notifier: DiscordNotifier,
+    topic: str,
+    questions: Sequence[Mapping[str, Any]],
+    *,
+    event_key: str,
+    force: bool = False,
+) -> bool:
+    return notifier.send_custom_notification(
+        event_key, hybrid_quiz_discord_payload(topic, questions), force=force
+    )
 
 
 def _clean_pdf_text(text: str) -> str:

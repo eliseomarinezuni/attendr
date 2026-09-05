@@ -6,13 +6,17 @@ from .ai_assistant import (
     AIInputError,
     AIProviderError,
     MajorDeadline,
+    HybridQuizQuestion,
     PDFExtractionError,
     PDFTextChunk,
     QuizQuestion,
     SyllabusEntry,
     extract_pdf_text_chunks,
+    extract_powerpoint_text_chunks,
+    hybrid_quiz_discord_payload,
     quiz_discord_payload,
     send_quiz_to_discord,
+    send_hybrid_quiz_to_discord,
 )
 from .calendar_sync import (
     CalendarAPIError,
@@ -33,8 +37,13 @@ from .canvas_client import (
     CanvasSnapshot,
     CourseSummary,
     MaterialDownloadReport,
+    LectureMaterial,
+    LectureMaterialDownloadReport,
     SyllabusMaterial,
 )
+from .announcement_dates import AnnouncementDatesReport, AnnouncementDatesSync
+from .course_schedule import AcademicDate, ClassSession, CourseSchedule
+from .lecture_quiz import LectureQuizReport, LectureQuizRunner
 from .materials_sync import (
     CourseMaterialsSync,
     MaterialsConfigurationError,
@@ -58,6 +67,8 @@ __all__ = [
     "AIProviderError",
     "AcademicItem",
     "Announcement",
+    "AnnouncementDatesReport",
+    "AnnouncementDatesSync",
     "CalendarAPIError",
     "CalendarAuthenticationError",
     "CalendarConfigurationError",
@@ -69,6 +80,9 @@ __all__ = [
     "CanvasConfigurationError",
     "CanvasSnapshot",
     "CourseMaterialsSync",
+    "CourseSchedule",
+    "ClassSession",
+    "AcademicDate",
     "CourseSummary",
     "DiscordConfigurationError",
     "DiscordNotificationError",
@@ -78,6 +92,11 @@ __all__ = [
     "GoogleCalendarSync",
     "JsonNotificationState",
     "MajorDeadline",
+    "HybridQuizQuestion",
+    "LectureMaterial",
+    "LectureMaterialDownloadReport",
+    "LectureQuizReport",
+    "LectureQuizRunner",
     "MaterialDownloadReport",
     "MaterialsConfigurationError",
     "MaterialsStateError",
@@ -90,6 +109,9 @@ __all__ = [
     "SyllabusEntry",
     "SyllabusMaterial",
     "extract_pdf_text_chunks",
+    "extract_powerpoint_text_chunks",
+    "hybrid_quiz_discord_payload",
     "quiz_discord_payload",
     "send_quiz_to_discord",
+    "send_hybrid_quiz_to_discord",
 ]

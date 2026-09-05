@@ -27,6 +27,7 @@ from .ai_assistant import (
 from .canvas_client import AcademicItem, CanvasClient, SyllabusMaterial
 
 UTC = timezone.utc
+EXTRACTION_VERSION = 2
 
 
 class MaterialsConfigurationError(ValueError):
@@ -45,6 +46,7 @@ class CachedMaterial(BaseModel):
     course_name: str
     title: str
     deadlines: list[MajorDeadline]
+    extraction_version: int = 1
 
 
 class MaterialsIndex(BaseModel):
@@ -164,7 +166,11 @@ class CourseMaterialsSync:
 
         for material in downloads.materials:
             cached = index.sources.get(material.uid)
-            if cached and cached.content_sha256 == material.content_sha256:
+            if (
+                cached
+                and cached.content_sha256 == material.content_sha256
+                and cached.extraction_version == EXTRACTION_VERSION
+            ):
                 deadlines = cached.deadlines
                 reused += 1
             else:
@@ -196,6 +202,7 @@ class CourseMaterialsSync:
                     course_name=material.course_name,
                     title=material.title,
                     deadlines=deadlines,
+                    extraction_version=EXTRACTION_VERSION,
                 )
                 analyzed += 1
                 changed = True
@@ -266,13 +273,17 @@ class CourseMaterialsSync:
                 candidates, key=lambda candidate: candidate[1].due_time is not None
             )
             deadline_date = date.fromisoformat(deadline.due_date)
-            parsed_time = (
-                time.fromisoformat(deadline.due_time) if deadline.due_time else time.min
-            )
+            effective_date = deadline_date
+            if deadline.due_time:
+                parsed_time = time.fromisoformat(deadline.due_time)
+            else:
+                # A missing time becomes an advance safety reminder.
+                effective_date -= timedelta(days=1)
+                parsed_time = time(23, 59)
             due_local = datetime.combine(
-                deadline_date, parsed_time, tzinfo=self.timezone
+                effective_date, parsed_time, tzinfo=self.timezone
             )
-            all_day = deadline.due_time is None
+            all_day = False
             duration = timedelta(hours=2 if deadline.kind == "exam" else 1)
             normalized_kind = (
                 deadline.kind
@@ -290,7 +301,7 @@ class CourseMaterialsSync:
                     kind=normalized_kind,
                     due_at=due_local.astimezone(UTC),
                     due_at_local=due_local,
-                    end_at=None if all_day else (due_local + duration).astimezone(UTC),
+                    end_at=(due_local + duration).astimezone(UTC),
                     all_day=all_day,
                     html_url=material.html_url,
                     updated_at=material.updated_at,

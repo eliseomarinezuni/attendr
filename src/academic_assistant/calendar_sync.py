@@ -410,7 +410,7 @@ class GoogleCalendarSync:
 
         due_local = item.due_at.astimezone(self.timezone)
         description_lines = [
-            "Synced from Canvas by Attendr.",
+            "Synced by Attendr.",
             f"Course: {item.course_name}",
             f"Type: {item.kind.replace('_', ' ').title()}",
             f"Due: {due_local.strftime('%Y-%m-%d %H:%M %Z')}",
@@ -419,7 +419,11 @@ class GoogleCalendarSync:
             description_lines.append(f"Points: {item.points_possible:g}")
         if item.submission_state:
             description_lines.append(f"Canvas submission: {item.submission_state}")
-        if item.source == "syllabus_deadline" and item.description_html:
+        if item.source in {
+            "syllabus_deadline",
+            "announcement_deadline",
+            "university_schedule",
+        } and item.description_html:
             description_lines.append(item.description_html[:800])
         safe_url = self._safe_url(item.html_url)
         if safe_url:
