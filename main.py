@@ -43,6 +43,7 @@ from academic_assistant import (
     MaterialsConfigurationError,
     MaterialsStateError,
     LectureQuizRunner,
+    StudyPlanner,
     PDFExtractionError,
     extract_pdf_text_chunks,
     send_quiz_to_discord,
@@ -77,6 +78,7 @@ class RunPlan:
     digest: bool
     quiz: bool
     lecture_quizzes: bool
+    study_plan: bool
 
     @property
     def needs_canvas(self) -> bool:
@@ -86,6 +88,7 @@ class RunPlan:
             or self.calendar
             or self.digest
             or self.lecture_quizzes
+            or self.study_plan
         )
 
 
@@ -126,6 +129,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Send quizzes for lecture sessions that recently ended.",
     )
+    modes.add_argument(
+        "--study-plan-only",
+        action="store_true",
+        help="Only create or update focused study sessions.",
+    )
     parser.add_argument(
         "--daily-quiz",
         action="store_true",
@@ -135,6 +143,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-materials",
         action="store_true",
         help="Skip automatic Canvas syllabus download and deadline extraction.",
+    )
+    parser.add_argument(
+        "--no-study-plan",
+        action="store_true",
+        help="Skip automatic focused study-session planning.",
     )
     quiz_source = parser.add_mutually_exclusive_group()
     quiz_source.add_argument("--topic", help="Lecture topic or text used for the quiz.")
@@ -151,15 +164,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def resolve_plan(arguments: argparse.Namespace) -> RunPlan:
     if arguments.sync_only:
-        return RunPlan(False, not arguments.no_materials, True, False, False, False)
+        return RunPlan(False, not arguments.no_materials, True, False, False, False, not arguments.no_study_plan)
     if arguments.announcements_only:
-        return RunPlan(True, False, False, False, False, False)
+        return RunPlan(True, False, False, False, False, False, False)
     if arguments.digest_only:
-        return RunPlan(False, False, False, True, False, False)
+        return RunPlan(False, False, False, True, False, False, False)
     if arguments.quiz_only:
-        return RunPlan(False, False, False, False, True, False)
+        return RunPlan(False, False, False, False, True, False, False)
     if arguments.lecture_quizzes:
-        return RunPlan(False, False, False, False, False, True)
+        return RunPlan(False, False, False, False, False, True, False)
+    if arguments.study_plan_only:
+        return RunPlan(False, not arguments.no_materials, False, False, False, False, True)
     return RunPlan(
         True,
         not arguments.no_materials,
@@ -167,6 +182,7 @@ def resolve_plan(arguments: argparse.Namespace) -> RunPlan:
         True,
         bool(arguments.daily_quiz),
         True,
+        not arguments.no_study_plan,
     )
 
 
@@ -489,6 +505,29 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 )
 
             results.append(run_step("Calendar", sync_calendar))
+
+    if plan.study_plan:
+        if snapshot is None:
+            results.append(StepResult("Study plan", "skipped", "Canvas data unavailable"))
+        else:
+            def sync_study_plan() -> str:
+                derived = prefer_announcement_dates(
+                    material_items, announcement_date_items
+                )
+                derived = filter_material_duplicates(snapshot.items, derived)
+                report = StudyPlanner.from_env(PROJECT_ROOT / ".env").sync(
+                    snapshot.items + derived
+                )
+                return (
+                    f"{len(report.sessions)} active sessions; "
+                    f"{len(report.calendar.created)} created, "
+                    f"{len(report.calendar.updated)} updated, "
+                    f"{len(report.calendar.skipped)} unchanged, "
+                    f"{len(report.calendar.deleted)} removed, "
+                    f"{len(report.warnings)} warnings"
+                )
+
+            results.append(run_step("Study plan", sync_study_plan))
 
     if plan.digest:
         if snapshot is None:

@@ -21,6 +21,7 @@ Useful modes:
 .venv/bin/python main.py --quiz-only --topic "Binary search trees"
 .venv/bin/python main.py --daily-quiz
 .venv/bin/python main.py --lecture-quizzes
+.venv/bin/python main.py --study-plan-only
 .venv/bin/python main.py --quiz-only --quiz-pdf data/materials/lecture.pdf
 ```
 
@@ -38,6 +39,10 @@ The older manual `--daily-quiz` mode uses `DAILY_QUIZ_TOPIC`, `--topic`, `--quiz
 ```
 
 Discord sends are recorded only after success. `data/seen_ids.json` is used in GitHub Actions. Google Calendar deduplicates independently with each Canvas UID in `extendedProperties.private` and updates an existing event when its Canvas data changes.
+
+Attendr also creates a separate `Attendr Study Plan` calendar. It places a small number of conflict-free study blocks before each assignment, quiz, project, presentation, midterm, or exam. Regular work uses 30–45 minute sessions; exams use 60 minutes. Thursday is excluded, Wednesday/Friday 6–8 PM is blocked, and existing readable Google calendars are respected. One study block is scheduled per day.
+
+The free Cloudflare Worker under `worker/` stays online when the computer is off. Every five minutes it checks D1 for sessions that are starting and posts buttons in `#study-sessions`: **Session complete**, **Reschedule**, and **Task complete**. Completion removes the corresponding Calendar block; task completion removes all remaining blocks for that task. The Python planner and Worker share only opaque IDs and session metadata through an authenticated endpoint.
 
 Attendr first reads the Canvas Syllabus tab, then searches Files, Modules, module-linked files/Pages, and standalone syllabus/course-outline Pages. Explicit syllabus links are fetched directly even when Canvas hides the source from the general Files area. PDF and Word (`.docx`) syllabuses are supported, including Word tables. Not finding a syllabus is non-fatal. Downloads are stored under `data/materials/course-<id>/` and excluded from Git. `data/materials_index.json` stores only content hashes and validated extracted deadlines, so unchanged documents do not consume Gemini quota again. Live Canvas assignments win over matching syllabus findings. Conflicting extracted dates are skipped and reported rather than guessed. Date changes for the same course/deadline title update the existing Google event; Attendr never automatically deletes Calendar events.
 
@@ -84,6 +89,7 @@ Required repository secrets:
 - `GOOGLE_CREDENTIALS_B64`
 - `GOOGLE_TOKEN_B64`
 - Optional: `GOOGLE_CALENDAR_NAME`, `DAILY_QUIZ_TOPIC`
+- For study controls: `GOOGLE_STUDY_CALENDAR_NAME`, `STUDY_WORKER_URL`, `STUDY_SYNC_SECRET`
 
 After authenticating GitHub CLI, upload them directly from the local `.env` and OAuth files without displaying their values:
 

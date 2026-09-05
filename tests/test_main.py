@@ -18,7 +18,7 @@ class MainRunnerTests(unittest.TestCase):
 
         self.assertEqual(
             attendr_main.resolve_plan(arguments),
-            attendr_main.RunPlan(True, True, True, True, False, True),
+            attendr_main.RunPlan(True, True, True, True, False, True, True),
         )
 
     def test_sync_only_disables_unrelated_steps(self):
@@ -26,7 +26,7 @@ class MainRunnerTests(unittest.TestCase):
 
         self.assertEqual(
             attendr_main.resolve_plan(arguments),
-            attendr_main.RunPlan(False, True, True, False, False, False),
+            attendr_main.RunPlan(False, True, True, False, False, False, True),
         )
 
     def test_no_materials_disables_syllabus_sync(self):

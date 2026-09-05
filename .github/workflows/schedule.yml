@@ -37,6 +37,9 @@ jobs:
           GOOGLE_TOKEN_B64: ${{ secrets.GOOGLE_TOKEN_B64 }}
           GOOGLE_CALENDAR_NAME: ${{ secrets.GOOGLE_CALENDAR_NAME }}
           DAILY_QUIZ_TOPIC: ${{ secrets.DAILY_QUIZ_TOPIC }}
+          STUDY_WORKER_URL: ${{ secrets.STUDY_WORKER_URL }}
+          STUDY_SYNC_SECRET: ${{ secrets.STUDY_SYNC_SECRET }}
+          GOOGLE_STUDY_CALENDAR_NAME: ${{ secrets.GOOGLE_STUDY_CALENDAR_NAME }}
         run: |
           test -n "$GOOGLE_CREDENTIALS_B64"
           test -n "$GOOGLE_TOKEN_B64"
@@ -64,6 +67,9 @@ jobs:
             printf 'GOOGLE_CALENDAR_NAME=%s\n' "$GOOGLE_CALENDAR_NAME"
             printf 'GOOGLE_CREATE_CALENDAR_IF_MISSING=true\n'
             printf 'GOOGLE_MARK_SUBMITTED=true\n'
+            printf 'GOOGLE_STUDY_CALENDAR_NAME=%s\n' "${GOOGLE_STUDY_CALENDAR_NAME:-Attendr Study Plan}"
+            printf 'STUDY_WORKER_URL=%s\n' "$STUDY_WORKER_URL"
+            printf 'STUDY_SYNC_SECRET=%s\n' "$STUDY_SYNC_SECRET"
             printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"
             printf 'GEMINI_MODEL=gemini-3.6-flash\n'
             printf 'DAILY_QUIZ_TOPIC=%s\n' "$DAILY_QUIZ_TOPIC"

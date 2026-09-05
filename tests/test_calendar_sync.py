@@ -80,6 +80,11 @@ class FakeEventsResource:
         self.service.event_store[event_id] = result
         return FakeRequest(result)
 
+    def delete(self, **kwargs):
+        self.service.event_delete_calls.append(kwargs)
+        self.service.event_store.pop(kwargs["eventId"], None)
+        return FakeRequest({})
+
 
 class FakeCalendarService:
     def __init__(self, calendars=()):
@@ -90,6 +95,7 @@ class FakeCalendarService:
         self.event_list_calls = []
         self.event_insert_calls = []
         self.event_update_calls = []
+        self.event_delete_calls = []
 
     def calendarList(self):
         return FakeCalendarListResource(self)
@@ -223,6 +229,26 @@ class GoogleCalendarSyncTests(unittest.TestCase):
         body = service.event_insert_calls[0]["body"]
         self.assertEqual(body["start"], {"date": "2026-09-20"})
         self.assertEqual(body["end"], {"date": "2026-09-21"})
+
+    def test_study_calendar_prunes_only_managed_missing_events(self):
+        service = FakeCalendarService()
+        calendar = GoogleCalendarSync(
+            service,
+            calendar_id="study",
+            source_tag="study_plan",
+            prune_missing=True,
+        )
+        item = academic_item(uid="attendr:study:abc:1", source="study_plan")
+        calendar.sync_items([item])
+
+        report = calendar.sync_items([])
+
+        self.assertEqual(len(report.deleted), 1)
+        self.assertEqual(len(service.event_delete_calls), 1)
+        self.assertEqual(
+            service.event_list_calls[0]["privateExtendedProperty"],
+            "attendr_source=study_plan",
+        )
 
 
 class GoogleCalendarAuthenticatorTests(unittest.TestCase):
