@@ -333,6 +333,7 @@ class CanvasClient:
             course_directory = destination / f"course-{course.id}"
             syllabus_html = str(self._attr(context.resource, "syllabus_body", "") or "")
             linked_file_ids = set(CANVAS_FILE_ID_PATTERN.findall(syllabus_html))
+            file_resources: dict[str, Any] = {}
 
             if self._html_to_text(syllabus_html):
                 body = syllabus_html.encode("utf-8")
@@ -363,6 +364,7 @@ class CanvasClient:
                 )
                 for file_resource in files:
                     source_id = str(self._attr(file_resource, "id", ""))
+                    file_resources[source_id] = file_resource
                     display_name = str(
                         self._attr(file_resource, "display_name", None)
                         or self._attr(file_resource, "filename", None)
@@ -383,70 +385,275 @@ class CanvasClient:
                     )
                     if not is_pdf or not is_candidate:
                         continue
-                    if bool(
-                        self._attr(file_resource, "hidden_for_user", False)
-                    ) or bool(self._attr(file_resource, "locked", False)):
-                        continue
-                    declared_size = int(self._attr(file_resource, "size", 0) or 0)
-                    if declared_size > max_file_bytes:
-                        warnings.append(
-                            f"Skipped oversized syllabus PDF in {course.name}: "
-                            f"{display_name}."
-                        )
-                        continue
-                    try:
-                        content = file_resource.get_contents(binary=True)
-                    except (CanvasException, RequestException):
-                        warnings.append(
-                            f"Could not download syllabus PDF in {course.name}: "
-                            f"{display_name}."
-                        )
-                        continue
-                    if not isinstance(content, bytes) or len(content) > max_file_bytes:
-                        warnings.append(
-                            f"Skipped invalid or oversized syllabus PDF in {course.name}: "
-                            f"{display_name}."
-                        )
-                        continue
-                    if not content.lstrip().startswith(b"%PDF-"):
-                        warnings.append(
-                            f"Skipped non-PDF syllabus content in {course.name}: "
-                            f"{display_name}."
-                        )
-                        continue
-
-                    safe_name = self._safe_filename(
-                        display_name, fallback="syllabus.pdf"
+                    material = self._syllabus_file_material(
+                        file_resource,
+                        course,
+                        course_directory,
+                        max_file_bytes,
+                        warnings,
                     )
-                    path = course_directory / f"{source_id}-{safe_name}"
-                    self._atomic_write(path, content)
-                    materials.append(
-                        SyllabusMaterial(
-                            uid=f"canvas:syllabus-file:{course.id}:{source_id}",
-                            source_id=source_id,
-                            course_id=course.id,
-                            course_name=course.name,
-                            title=display_name,
-                            content_type="application/pdf",
-                            local_path=path,
-                            content_sha256=sha256(content).hexdigest(),
-                            updated_at=self._parse_datetime(
-                                self._attr(file_resource, "updated_at", None),
-                                required=False,
-                            ),
-                            html_url=(
-                                f"{self.base_url}/courses/{course.id}/files/{source_id}"
-                            ),
-                        )
-                    )
+                    if material:
+                        materials.append(material)
             except (CanvasException, RequestException) as error:
                 warnings.append(self._course_warning("syllabus files", course, error))
+
+            self._discover_syllabus_in_modules(
+                context.resource,
+                course,
+                course_directory,
+                file_resources,
+                max_file_bytes,
+                materials,
+                warnings,
+            )
+            self._discover_syllabus_in_pages(
+                context.resource,
+                course,
+                course_directory,
+                file_resources,
+                max_file_bytes,
+                materials,
+                warnings,
+            )
 
         unique = {material.uid: material for material in materials}
         return MaterialDownloadReport(
             materials=tuple(sorted(unique.values(), key=lambda item: item.uid)),
             warnings=tuple(warnings),
         )
+
+    def _syllabus_file_material(
+        self,
+        file_resource: Any,
+        course: CourseSummary,
+        course_directory: Path,
+        max_file_bytes: int,
+        warnings: list[str],
+    ) -> SyllabusMaterial | None:
+        source_id = str(self._attr(file_resource, "id", ""))
+        display_name = str(
+            self._attr(file_resource, "display_name", None)
+            or self._attr(file_resource, "filename", None)
+            or f"Canvas file {source_id}"
+        )
+        content_type = str(
+            self._attr(file_resource, "content-type", None)
+            or self._attr(file_resource, "content_type", None)
+            or ""
+        ).casefold()
+        if content_type != "application/pdf" and not display_name.casefold().endswith(".pdf"):
+            return None
+        if bool(self._attr(file_resource, "hidden_for_user", False)) or bool(
+            self._attr(file_resource, "locked", False)
+        ):
+            return None
+        if int(self._attr(file_resource, "size", 0) or 0) > max_file_bytes:
+            warnings.append(
+                f"Skipped oversized syllabus PDF in {course.name}: {display_name}."
+            )
+            return None
+        try:
+            content = file_resource.get_contents(binary=True)
+        except (CanvasException, RequestException):
+            warnings.append(
+                f"Could not download syllabus PDF in {course.name}: {display_name}."
+            )
+            return None
+        if (
+            not isinstance(content, bytes)
+            or len(content) > max_file_bytes
+            or not content.lstrip().startswith(b"%PDF-")
+        ):
+            warnings.append(
+                f"Skipped invalid syllabus PDF in {course.name}: {display_name}."
+            )
+            return None
+        safe_name = self._safe_filename(display_name, fallback="syllabus.pdf")
+        path = course_directory / f"{source_id}-{safe_name}"
+        self._atomic_write(path, content)
+        return SyllabusMaterial(
+            uid=f"canvas:syllabus-file:{course.id}:{source_id}",
+            source_id=source_id,
+            course_id=course.id,
+            course_name=course.name,
+            title=display_name,
+            content_type="application/pdf",
+            local_path=path,
+            content_sha256=sha256(content).hexdigest(),
+            updated_at=self._parse_datetime(
+                self._attr(file_resource, "updated_at", None), required=False
+            ),
+            html_url=f"{self.base_url}/courses/{course.id}/files/{source_id}",
+        )
+
+    def _syllabus_page_material(
+        self,
+        page: Any,
+        course: CourseSummary,
+        course_directory: Path,
+    ) -> SyllabusMaterial | None:
+        page_url = str(
+            self._attr(page, "url", None)
+            or self._attr(page, "page_url", None)
+            or "syllabus"
+        )
+        title = str(self._attr(page, "title", None) or "Course syllabus")
+        html = str(self._attr(page, "body", "") or "")
+        if not self._html_to_text(html):
+            return None
+        content = html.encode("utf-8")
+        safe_name = self._safe_filename(title, fallback="syllabus-page")
+        path = course_directory / f"page-{safe_name}.html"
+        self._atomic_write(path, content)
+        return SyllabusMaterial(
+            uid=f"canvas:syllabus-content-page:{course.id}:{page_url}",
+            source_id=page_url,
+            course_id=course.id,
+            course_name=course.name,
+            title=title,
+            content_type="text/html",
+            local_path=path,
+            content_sha256=sha256(content).hexdigest(),
+            updated_at=self._parse_datetime(
+                self._attr(page, "updated_at", None), required=False
+            ),
+            html_url=f"{self.base_url}/courses/{course.id}/pages/{page_url}",
+        )
+
+    def _discover_syllabus_in_modules(
+        self,
+        resource: Any,
+        course: CourseSummary,
+        course_directory: Path,
+        file_resources: dict[str, Any],
+        max_file_bytes: int,
+        materials: list[SyllabusMaterial],
+        warnings: list[str],
+    ) -> None:
+        try:
+            modules = resource.get_modules(include=["items", "content_details"])
+            for module in modules:
+                if bool(self._attr(module, "locked_for_user", False)):
+                    continue
+                module_name = str(self._attr(module, "name", "") or "")
+                items = self._attr(module, "items", None)
+                if items is None:
+                    items = module.get_module_items(include=["content_details"])
+                for item in items:
+                    title = str(self._attr(item, "title", "") or "")
+                    if not SYLLABUS_FILE_PATTERN.search(f"{module_name} {title}"):
+                        continue
+                    item_type = str(self._attr(item, "type", "") or "")
+                    source_id = str(
+                        self._attr(item, "content_id", None)
+                        or self._attr(item, "page_url", None)
+                        or ""
+                    )
+                    try:
+                        if item_type == "File" and source_id:
+                            file = file_resources.get(source_id) or resource.get_file(source_id)
+                            material = self._syllabus_file_material(
+                                file, course, course_directory, max_file_bytes, warnings
+                            )
+                            if material:
+                                materials.append(material)
+                        elif item_type == "Page" and source_id:
+                            page = resource.get_page(source_id)
+                            material = self._syllabus_page_material(
+                                page, course, course_directory
+                            )
+                            if material:
+                                materials.append(material)
+                            self._download_page_linked_syllabus_files(
+                                page,
+                                resource,
+                                course,
+                                course_directory,
+                                file_resources,
+                                max_file_bytes,
+                                materials,
+                                warnings,
+                            )
+                    except (CanvasException, RequestException, OSError, ValueError):
+                        warnings.append(
+                            f"Could not read syllabus module item in {course.name}: {title}."
+                        )
+        except (CanvasException, RequestException) as error:
+            warnings.append(self._course_warning("syllabus modules", course, error))
+
+    def _discover_syllabus_in_pages(
+        self,
+        resource: Any,
+        course: CourseSummary,
+        course_directory: Path,
+        file_resources: dict[str, Any],
+        max_file_bytes: int,
+        materials: list[SyllabusMaterial],
+        warnings: list[str],
+    ) -> None:
+        try:
+            pages = resource.get_pages(sort="title")
+            for summary in pages:
+                title = str(self._attr(summary, "title", "") or "")
+                page_url = str(
+                    self._attr(summary, "url", None)
+                    or self._attr(summary, "page_url", None)
+                    or ""
+                )
+                if not page_url:
+                    continue
+                try:
+                    page = resource.get_page(page_url)
+                    html = str(self._attr(page, "body", "") or "")
+                    searchable = f"{title} {self._html_to_text(html)}"
+                    if not SYLLABUS_FILE_PATTERN.search(searchable):
+                        continue
+                    material = self._syllabus_page_material(
+                        page, course, course_directory
+                    )
+                    if material:
+                        materials.append(material)
+                    self._download_page_linked_syllabus_files(
+                        page,
+                        resource,
+                        course,
+                        course_directory,
+                        file_resources,
+                        max_file_bytes,
+                        materials,
+                        warnings,
+                    )
+                except (CanvasException, RequestException, OSError, ValueError):
+                    warnings.append(
+                        f"Could not read syllabus page in {course.name}: {title}."
+                    )
+        except (CanvasException, RequestException) as error:
+            warnings.append(self._course_warning("syllabus pages", course, error))
+
+    def _download_page_linked_syllabus_files(
+        self,
+        page: Any,
+        resource: Any,
+        course: CourseSummary,
+        course_directory: Path,
+        file_resources: dict[str, Any],
+        max_file_bytes: int,
+        materials: list[SyllabusMaterial],
+        warnings: list[str],
+    ) -> None:
+        html = str(self._attr(page, "body", "") or "")
+        for source_id in set(CANVAS_FILE_ID_PATTERN.findall(html)):
+            try:
+                file = file_resources.get(source_id) or resource.get_file(source_id)
+                material = self._syllabus_file_material(
+                    file, course, course_directory, max_file_bytes, warnings
+                )
+                if material:
+                    materials.append(material)
+            except (CanvasException, RequestException, OSError, ValueError):
+                warnings.append(
+                    f"Could not download a syllabus-linked file in {course.name}."
+                )
 
     def download_lecture_materials(
         self,

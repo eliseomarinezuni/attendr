@@ -40,6 +40,8 @@ class FakeCourse(SimpleNamespace):
         return iter(getattr(self, "files", []))
 
     def get_modules(self, **kwargs):
+        if getattr(self, "module_error", None):
+            raise self.module_error
         self.module_kwargs = kwargs
         return iter(getattr(self, "modules", []))
 
@@ -48,6 +50,12 @@ class FakeCourse(SimpleNamespace):
 
     def get_page(self, page_url, **kwargs):
         return self.pages[page_url]
+
+    def get_pages(self, **kwargs):
+        if getattr(self, "page_error", None):
+            raise self.page_error
+        self.pages_kwargs = kwargs
+        return iter(getattr(self, "page_summaries", []))
 
 
 class FakeFile(SimpleNamespace):
@@ -133,6 +141,7 @@ def course(course_id=1, name="Algorithms", **overrides):
         "files": [],
         "modules": [],
         "pages": {},
+        "page_summaries": [],
         "syllabus_body": "",
     }
     values.update(overrides)
@@ -235,6 +244,63 @@ class CanvasClientTests(unittest.TestCase):
             self.assertEqual(
                 active_course.file_kwargs["content_types"], ["application/pdf"]
             )
+
+    def test_finds_generic_pdf_linked_from_syllabus_module(self):
+        pdf = b"%PDF-1.4\ncourse dates"
+        generic = FakeFile(
+            id=31,
+            display_name="document.pdf",
+            content_type="application/pdf",
+            size=len(pdf),
+            content=pdf,
+            updated_at="2026-09-01T10:00:00Z",
+        )
+        active_course = course(
+            files=[generic],
+            modules=[
+                SimpleNamespace(
+                    name="Course Syllabus",
+                    locked_for_user=False,
+                    items=[
+                        {
+                            "type": "File",
+                            "content_id": 31,
+                            "title": "Download document",
+                        }
+                    ],
+                )
+            ],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(directory)
+        self.assertEqual(len(report.materials), 1)
+        self.assertEqual(report.materials[0].title, "document.pdf")
+
+    def test_finds_syllabus_content_inside_generically_named_page(self):
+        page = SimpleNamespace(
+            url="home",
+            title="Home",
+            body="<p>Course syllabus: Midterm October 20, 2026</p>",
+            updated_at="2026-09-01T10:00:00Z",
+        )
+        active_course = course(
+            pages={"home": page},
+            page_summaries=[SimpleNamespace(url="home", title="Home")],
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(directory)
+        self.assertEqual(len(report.materials), 1)
+        self.assertEqual(report.materials[0].content_type, "text/html")
+
+    def test_missing_syllabus_areas_are_nonfatal(self):
+        active_course = course(
+            module_error=CanvasException("blocked"),
+            page_error=CanvasException("blocked"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(directory)
+        self.assertEqual(report.materials, ())
+        self.assertEqual(len(report.warnings), 2)
 
     def test_downloads_lecture_module_material_but_excludes_lab(self):
         pdf = b"%PDF-1.4\nlecture content"
