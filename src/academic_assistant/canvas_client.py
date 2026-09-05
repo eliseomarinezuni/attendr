@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta, timezone
-from html.parser import HTMLParser
 import os
 import re
-from typing import Any, Callable, Iterable
+import tempfile
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
+from hashlib import sha256
+from html.parser import HTMLParser
+from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -16,10 +20,15 @@ from canvasapi.exceptions import CanvasException, InvalidAccessToken
 from dotenv import load_dotenv
 from requests import RequestException
 
-
 UTC = timezone.utc
 EXAM_PATTERN = re.compile(r"\b(exam|midterm|final|test)\b", re.IGNORECASE)
 QUIZ_PATTERN = re.compile(r"\bquiz\b", re.IGNORECASE)
+SYLLABUS_FILE_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(syllabus|course[\s_-]*outline|course[\s_-]*schedule|"
+    r"course[\s_-]*plan)(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
+CANVAS_FILE_ID_PATTERN = re.compile(r"/files/(\d+)")
 
 
 class CanvasConfigurationError(ValueError):
@@ -92,6 +101,26 @@ class CanvasSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class SyllabusMaterial:
+    uid: str
+    source_id: str
+    course_id: int
+    course_name: str
+    title: str
+    content_type: str
+    local_path: Path
+    content_sha256: str
+    updated_at: datetime | None
+    html_url: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class MaterialDownloadReport:
+    materials: tuple[SyllabusMaterial, ...]
+    warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _CourseContext:
     summary: CourseSummary
     resource: Any
@@ -156,11 +185,13 @@ class CanvasClient:
 
         self.lookahead_days = lookahead_days
         self.announcement_days = announcement_days
-        self._canvas = canvas if canvas is not None else Canvas(self.base_url, api_token.strip())
+        self._canvas = (
+            canvas if canvas is not None else Canvas(self.base_url, api_token.strip())
+        )
         self._now_provider = now_provider or (lambda: datetime.now(UTC))
 
     @classmethod
-    def from_env(cls, env_file: str | os.PathLike[str] | None = None) -> "CanvasClient":
+    def from_env(cls, env_file: str | os.PathLike[str] | None = None) -> CanvasClient:
         """Create a client from environment variables, optionally loading a .env file."""
         load_dotenv(dotenv_path=env_file, override=False)
         base_url = os.getenv("CANVAS_BASE_URL", "")
@@ -234,12 +265,148 @@ class CanvasClient:
             fetched_at=self._now_utc(),
         )
 
+    def download_syllabus_materials(
+        self,
+        directory: str | os.PathLike[str],
+        *,
+        max_file_bytes: int = 25 * 1024 * 1024,
+    ) -> MaterialDownloadReport:
+        """Download accessible syllabus pages and syllabus-like PDFs read-only."""
+        if max_file_bytes < 1:
+            raise CanvasConfigurationError(
+                "Canvas material size limit must be positive."
+            )
+        destination = Path(directory).expanduser().resolve()
+        contexts = self._get_active_course_contexts()
+        materials: list[SyllabusMaterial] = []
+        warnings: list[str] = []
+
+        for context in contexts:
+            course = context.summary
+            course_directory = destination / f"course-{course.id}"
+            syllabus_html = str(self._attr(context.resource, "syllabus_body", "") or "")
+            linked_file_ids = set(CANVAS_FILE_ID_PATTERN.findall(syllabus_html))
+
+            if self._html_to_text(syllabus_html):
+                body = syllabus_html.encode("utf-8")
+                path = course_directory / "canvas-syllabus.html"
+                self._atomic_write(path, body)
+                materials.append(
+                    SyllabusMaterial(
+                        uid=f"canvas:syllabus-page:{course.id}",
+                        source_id="syllabus-page",
+                        course_id=course.id,
+                        course_name=course.name,
+                        title="Canvas syllabus page",
+                        content_type="text/html",
+                        local_path=path,
+                        content_sha256=sha256(body).hexdigest(),
+                        updated_at=None,
+                        html_url=(
+                            f"{self.base_url}/courses/{course.id}/assignments/syllabus"
+                        ),
+                    )
+                )
+
+            try:
+                files = context.resource.get_files(
+                    content_types=["application/pdf"],
+                    sort="updated_at",
+                    order="desc",
+                )
+                for file_resource in files:
+                    source_id = str(self._attr(file_resource, "id", ""))
+                    display_name = str(
+                        self._attr(file_resource, "display_name", None)
+                        or self._attr(file_resource, "filename", None)
+                        or f"Canvas file {source_id}"
+                    )
+                    content_type = str(
+                        self._attr(file_resource, "content-type", None)
+                        or self._attr(file_resource, "content_type", None)
+                        or ""
+                    ).casefold()
+                    is_pdf = (
+                        content_type == "application/pdf"
+                        or display_name.casefold().endswith(".pdf")
+                    )
+                    is_candidate = (
+                        bool(SYLLABUS_FILE_PATTERN.search(display_name))
+                        or source_id in linked_file_ids
+                    )
+                    if not is_pdf or not is_candidate:
+                        continue
+                    if bool(
+                        self._attr(file_resource, "hidden_for_user", False)
+                    ) or bool(self._attr(file_resource, "locked", False)):
+                        continue
+                    declared_size = int(self._attr(file_resource, "size", 0) or 0)
+                    if declared_size > max_file_bytes:
+                        warnings.append(
+                            f"Skipped oversized syllabus PDF in {course.name}: "
+                            f"{display_name}."
+                        )
+                        continue
+                    try:
+                        content = file_resource.get_contents(binary=True)
+                    except (CanvasException, RequestException):
+                        warnings.append(
+                            f"Could not download syllabus PDF in {course.name}: "
+                            f"{display_name}."
+                        )
+                        continue
+                    if not isinstance(content, bytes) or len(content) > max_file_bytes:
+                        warnings.append(
+                            f"Skipped invalid or oversized syllabus PDF in {course.name}: "
+                            f"{display_name}."
+                        )
+                        continue
+                    if not content.lstrip().startswith(b"%PDF-"):
+                        warnings.append(
+                            f"Skipped non-PDF syllabus content in {course.name}: "
+                            f"{display_name}."
+                        )
+                        continue
+
+                    safe_name = self._safe_filename(
+                        display_name, fallback="syllabus.pdf"
+                    )
+                    path = course_directory / f"{source_id}-{safe_name}"
+                    self._atomic_write(path, content)
+                    materials.append(
+                        SyllabusMaterial(
+                            uid=f"canvas:syllabus-file:{course.id}:{source_id}",
+                            source_id=source_id,
+                            course_id=course.id,
+                            course_name=course.name,
+                            title=display_name,
+                            content_type="application/pdf",
+                            local_path=path,
+                            content_sha256=sha256(content).hexdigest(),
+                            updated_at=self._parse_datetime(
+                                self._attr(file_resource, "updated_at", None),
+                                required=False,
+                            ),
+                            html_url=(
+                                f"{self.base_url}/courses/{course.id}/files/{source_id}"
+                            ),
+                        )
+                    )
+            except (CanvasException, RequestException) as error:
+                warnings.append(self._course_warning("syllabus files", course, error))
+
+        unique = {material.uid: material for material in materials}
+        return MaterialDownloadReport(
+            materials=tuple(sorted(unique.values(), key=lambda item: item.uid)),
+            warnings=tuple(warnings),
+        )
+
     def _get_active_course_contexts(self) -> tuple[_CourseContext, ...]:
         try:
             resources = self._canvas.get_courses(
                 enrollment_state="active",
                 enrollment_type="student",
-                include=["term"],
+                include=["term", "syllabus_body"],
             )
             contexts = []
             for course in resources:
@@ -264,7 +431,9 @@ class CanvasClient:
                         resource=course,
                     )
                 )
-            return tuple(sorted(contexts, key=lambda item: item.summary.name.casefold()))
+            return tuple(
+                sorted(contexts, key=lambda item: item.summary.name.casefold())
+            )
         except (CanvasException, RequestException) as error:
             if self._is_auth_error(error):
                 raise CanvasAuthenticationError(
@@ -321,7 +490,10 @@ class CanvasClient:
 
         unique = {item.uid: item for item in items}
         return tuple(
-            sorted(unique.values(), key=lambda item: (item.due_at, item.course_name, item.title))
+            sorted(
+                unique.values(),
+                key=lambda item: (item.due_at, item.course_name, item.title),
+            )
         )
 
     def _fetch_announcements(
@@ -422,9 +594,7 @@ class CanvasClient:
             start_at = self._parse_all_day_date(all_day_date)
         if start_at is None:
             raise ValueError(f"calendar event {source_id} has no start date")
-        end_at = self._parse_datetime(
-            self._attr(event, "end_at", None), required=False
-        )
+        end_at = self._parse_datetime(self._attr(event, "end_at", None), required=False)
         return AcademicItem(
             uid=f"canvas:event:{course.id}:{source_id}",
             source="calendar_event",
@@ -438,22 +608,17 @@ class CanvasClient:
             end_at=end_at,
             all_day=all_day,
             html_url=self._optional_str(
-                self._attr(event, "html_url", None)
-                or self._attr(event, "url", None)
+                self._attr(event, "html_url", None) or self._attr(event, "url", None)
             ),
             updated_at=self._parse_datetime(
                 self._attr(event, "updated_at", None), required=False
             ),
             points_possible=None,
             submission_types=(),
-            description_html=self._optional_str(
-                self._attr(event, "description", None)
-            ),
+            description_html=self._optional_str(self._attr(event, "description", None)),
         )
 
-    def _topic_to_announcement(
-        self, topic: Any, course: CourseSummary
-    ) -> Announcement:
+    def _topic_to_announcement(self, topic: Any, course: CourseSummary) -> Announcement:
         source_id = str(self._attr(topic, "id"))
         posted_at = self._parse_datetime(self._attr(topic, "posted_at", None))
         if posted_at is None:
@@ -486,7 +651,9 @@ class CanvasClient:
     def _now_utc(self) -> datetime:
         current = self._now_provider()
         if current.tzinfo is None:
-            raise CanvasConfigurationError("now_provider must return a timezone-aware datetime.")
+            raise CanvasConfigurationError(
+                "now_provider must return a timezone-aware datetime."
+            )
         return current.astimezone(UTC)
 
     @staticmethod
@@ -499,7 +666,12 @@ class CanvasClient:
             raise CanvasConfigurationError(
                 "CANVAS_BASE_URL must be a complete URL such as https://school.instructure.com."
             )
-        if parsed.path not in {"", "/"} or parsed.params or parsed.query or parsed.fragment:
+        if (
+            parsed.path not in {"", "/"}
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
             raise CanvasConfigurationError(
                 "CANVAS_BASE_URL must be the Canvas origin only, without /api/v1 or course paths."
             )
@@ -513,7 +685,9 @@ class CanvasClient:
         try:
             value = int(raw)
         except ValueError as error:
-            raise CanvasConfigurationError(f"{name} must be a positive integer.") from error
+            raise CanvasConfigurationError(
+                f"{name} must be a positive integer."
+            ) from error
         if value < 1:
             raise CanvasConfigurationError(f"{name} must be a positive integer.")
         return value
@@ -549,8 +723,12 @@ class CanvasClient:
     def _parse_all_day_date(self, value: Any) -> datetime | None:
         if value in {None, ""}:
             return None
-        parsed_date = value if isinstance(value, date) else date.fromisoformat(str(value))
-        return datetime.combine(parsed_date, time.min, tzinfo=self.timezone).astimezone(UTC)
+        parsed_date = (
+            value if isinstance(value, date) else date.fromisoformat(str(value))
+        )
+        return datetime.combine(parsed_date, time.min, tzinfo=self.timezone).astimezone(
+            UTC
+        )
 
     @staticmethod
     def _classify(title: str, submission_types: Iterable[str], *, source: str) -> str:
@@ -566,6 +744,29 @@ class CanvasClient:
         parser.feed(value)
         parser.close()
         return parser.text()
+
+    @staticmethod
+    def _safe_filename(value: str, *, fallback: str) -> str:
+        filename = Path(value.replace("\\", "/")).name
+        filename = re.sub(r"[^A-Za-z0-9._ -]+", "_", filename).strip(" .")
+        return filename[:180] or fallback
+
+    @staticmethod
+    def _atomic_write(path: Path, content: bytes) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Path | None = None
+        try:
+            descriptor, raw_path = tempfile.mkstemp(
+                prefix=f".{path.name}.", dir=path.parent
+            )
+            temporary_path = Path(raw_path)
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(content)
+            temporary_path.replace(path)
+        except OSError:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+            raise
 
     @staticmethod
     def _is_auth_error(error: BaseException) -> bool:

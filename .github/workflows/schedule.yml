@@ -49,6 +49,10 @@ jobs:
             printf 'CANVAS_LOOKAHEAD_DAYS=30\n'
             printf 'CANVAS_ANNOUNCEMENT_DAYS=14\n'
             printf 'APP_TIMEZONE=America/Toronto\n'
+            printf 'CANVAS_MATERIALS_DIR=data/materials\n'
+            printf 'CANVAS_MATERIALS_INDEX=data/materials_index.json\n'
+            printf 'CANVAS_MATERIAL_MAX_MB=25\n'
+            printf 'CANVAS_MATERIAL_FUTURE_DAYS=550\n'
             printf 'DISCORD_WEBHOOK_URL=%s\n' "$DISCORD_WEBHOOK_URL"
             printf 'NOTIFICATION_STATE_FILE=data/seen_ids.json\n'
             printf 'GOOGLE_CREDENTIALS_FILE=credentials.json\n'
@@ -73,7 +77,7 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/seen_ids.json
+          git add data/seen_ids.json data/materials_index.json
           if ! git diff --cached --quiet; then
             git commit -m "chore: persist notification state [skip ci]"
             git push

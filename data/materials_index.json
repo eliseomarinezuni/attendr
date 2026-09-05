@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "sources": {
+    "canvas:syllabus-page:40515": {
+      "content_sha256": "80bc642ff56862d97d4d06aa55bb522d569f548adac13af8c16bb0edbd93d37e",
+      "course_id": 40515,
+      "course_name": "202609 - Eth., Law & Soc. Imp of  Comp. - 44820",
+      "title": "Canvas syllabus page",
+      "deadlines": []
+    },
+    "canvas:syllabus-page:42465": {
+      "content_sha256": "c6750e4ae8fd2a3b7598f27deaa8671db65433195b5c783e44bc0b1967a72273",
+      "course_id": 42465,
+      "course_name": "202609 - Analys. & Design of Algorithms - CSCI-3070U - 40265.202609.XLIST",
+      "title": "Canvas syllabus page",
+      "deadlines": []
+    },
+    "canvas:syllabus-page:42467": {
+      "content_sha256": "2d15ea43a51c83c2cb432c24c14dafb98a6e5e47dda54f35314a1763804af199",
+      "course_id": 42467,
+      "course_name": "202609 - Web Dev - CSCI-3230U - 43798.202609.XLIST",
+      "title": "Canvas syllabus page",
+      "deadlines": []
+    },
+    "canvas:syllabus-file:42239:6425919": {
+      "content_sha256": "135fd008137bb450d3a2010d0848e1b4388670a4047d354eeb1d2c13445687ac",
+      "course_id": 42239,
+      "course_name": "202609 - Mobile Devices - 46512",
+      "title": "CSCI_3101U_F26_Syllabus.pdf",
+      "deadlines": [
+        {
+          "title": "Project Proposal",
+          "due_date": "2026-09-27",
+          "due_time": null,
+          "kind": "project",
+          "source_evidence": "Project Proposal Sep 27, 2026"
+        },
+        {
+          "title": "Mid-Course Check-in",
+          "due_date": "2026-11-09",
+          "due_time": null,
+          "kind": "presentation",
+          "source_evidence": "Mid-Course Check-in Teams will submit a short progress report on implementation and present a demo/check-in to the instructor and TA. ... November 9, 2026"
+        },
+        {
+          "title": "Group Project Final Submission",
+          "due_date": "2026-12-06",
+          "due_time": null,
+          "kind": "project",
+          "source_evidence": "Group Project Final Submission December 6, 2026"
+        }
+      ]
+    }
+  }
+}

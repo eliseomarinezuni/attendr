@@ -7,7 +7,7 @@ import os
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Literal
@@ -91,8 +91,39 @@ class QuizQuestion(BaseModel):
         return cleaned
 
 
+class MajorDeadline(BaseModel):
+    """Grounded major course deadline extracted from syllabus material."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    title: str = Field(min_length=1, max_length=300)
+    due_date: str = Field(min_length=10, max_length=10)
+    due_time: str | None = Field(default=None, max_length=5)
+    kind: Literal["exam", "quiz", "assignment", "project", "presentation", "other"]
+    source_evidence: str = Field(min_length=1, max_length=500)
+
+    @field_validator("due_date")
+    @classmethod
+    def validate_due_date(cls, value: str) -> str:
+        try:
+            return date.fromisoformat(value).isoformat()
+        except ValueError as error:
+            raise ValueError("due_date must be a real ISO date") from error
+
+    @field_validator("due_time")
+    @classmethod
+    def validate_due_time(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            return time.fromisoformat(value).strftime("%H:%M")
+        except ValueError as error:
+            raise ValueError("due_time must be a real 24-hour HH:MM time") from error
+
+
 SYLLABUS_ADAPTER = TypeAdapter(list[SyllabusEntry])
 QUIZ_ADAPTER = TypeAdapter(list[QuizQuestion])
+DEADLINE_ADAPTER = TypeAdapter(list[MajorDeadline])
 
 
 def extract_pdf_text_chunks(
@@ -294,6 +325,48 @@ class AIAssistant:
                 f"Gemini returned {len(questions)} questions; expected {num_questions}."
             )
         return [question.model_dump(mode="json") for question in questions]
+
+    def extract_major_deadlines(
+        self,
+        syllabus_text: str | Sequence[PDFTextChunk],
+        *,
+        course_name: str,
+        source_title: str,
+        current_date: date | None = None,
+    ) -> list[dict[str, Any]]:
+        """Extract validated exams and major graded deadlines from a syllabus."""
+        source_text = self._prepare_source_text(syllabus_text)
+        today = current_date or datetime.now(timezone.utc).date()
+        prompt = (
+            "Extract only explicitly stated exams and major graded deadlines from the "
+            "syllabus material below. Include midterms, finals, tests, quizzes, projects, "
+            "presentations, and major assignments. Exclude ordinary class meetings, "
+            "readings, office hours, holidays, and dates that are merely examples. "
+            "Return ISO dates as YYYY-MM-DD. Return due_time as 24-hour HH:MM only when "
+            "the material states a time; otherwise use null. Resolve a missing year only "
+            "when the document's term/year makes it unambiguous. Omit ambiguous or "
+            "conflicting dates. Keep source_evidence short and quote-like, but do not "
+            "include unrelated personal information. Do not invent any deadline.\n\n"
+            f"COURSE: {json.dumps(course_name)}\n"
+            f"SOURCE: {json.dumps(source_title)}\n"
+            f"REFERENCE DATE: {today.isoformat()}\n"
+            f"SYLLABUS MATERIAL (JSON string):\n{json.dumps(source_text)}"
+        )
+        deadlines = self._generate_validated(
+            prompt,
+            response_schema=list[MajorDeadline],
+            adapter=DEADLINE_ADAPTER,
+            temperature=0.0,
+            task_name="major deadline extraction",
+            expected_keys={
+                "title",
+                "due_date",
+                "due_time",
+                "kind",
+                "source_evidence",
+            },
+        )
+        return [deadline.model_dump(mode="json") for deadline in deadlines]
 
     def list_available_flash_models(self) -> tuple[str, ...]:
         """Return Flash models this API key reports as supporting generation."""
