@@ -1,0 +1,84 @@
+name: Scheduled Academic Assistant
+
+on:
+  schedule:
+    - cron: "0 8-22/2 * * *"
+      timezone: "America/Toronto"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: attendr-scheduled
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Restore configuration
+        env:
+          CANVAS_BASE_URL: ${{ secrets.CANVAS_BASE_URL }}
+          CANVAS_API_TOKEN: ${{ secrets.CANVAS_API_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
+          GOOGLE_TOKEN_B64: ${{ secrets.GOOGLE_TOKEN_B64 }}
+          GOOGLE_CALENDAR_NAME: ${{ secrets.GOOGLE_CALENDAR_NAME }}
+          DAILY_QUIZ_TOPIC: ${{ secrets.DAILY_QUIZ_TOPIC }}
+        run: |
+          test -n "$GOOGLE_CREDENTIALS_B64"
+          test -n "$GOOGLE_TOKEN_B64"
+          printf '%s' "$GOOGLE_CREDENTIALS_B64" | base64 --decode > credentials.json
+          printf '%s' "$GOOGLE_TOKEN_B64" | base64 --decode > token.json
+          chmod 600 credentials.json token.json
+          {
+            printf 'CANVAS_BASE_URL=%s\n' "$CANVAS_BASE_URL"
+            printf 'CANVAS_API_TOKEN=%s\n' "$CANVAS_API_TOKEN"
+            printf 'CANVAS_LOOKAHEAD_DAYS=30\n'
+            printf 'CANVAS_ANNOUNCEMENT_DAYS=14\n'
+            printf 'APP_TIMEZONE=America/Toronto\n'
+            printf 'DISCORD_WEBHOOK_URL=%s\n' "$DISCORD_WEBHOOK_URL"
+            printf 'NOTIFICATION_STATE_FILE=data/seen_ids.json\n'
+            printf 'GOOGLE_CREDENTIALS_FILE=credentials.json\n'
+            printf 'GOOGLE_TOKEN_FILE=token.json\n'
+            printf 'GOOGLE_CALENDAR_NAME=%s\n' "$GOOGLE_CALENDAR_NAME"
+            printf 'GOOGLE_CREATE_CALENDAR_IF_MISSING=true\n'
+            printf 'GOOGLE_MARK_SUBMITTED=true\n'
+            printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"
+            printf 'GEMINI_MODEL=gemini-3.6-flash\n'
+            printf 'DAILY_QUIZ_TOPIC=%s\n' "$DAILY_QUIZ_TOPIC"
+            printf 'DAILY_TOPICS_FILE=data/daily_topics.json\n'
+          } > .env
+          chmod 600 .env
+
+      - name: Run pipeline
+        id: pipeline
+        continue-on-error: true
+        run: python main.py --daily-quiz
+
+      - name: Persist notification state
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/seen_ids.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: persist notification state [skip ci]"
+            git push
+          fi
+
+      - name: Report pipeline failure
+        if: steps.pipeline.outcome == 'failure'
+        run: exit 1
