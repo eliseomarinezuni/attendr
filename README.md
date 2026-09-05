@@ -92,7 +92,7 @@ base64 -i token.json -o token.base64
 
 Copy each encoded file's contents into the matching GitHub repository secret, then delete the encoded copies. Base64 is encoding, not encryption; only place it in GitHub Secrets. Never commit `.env`, `credentials.json`, or `token.json`.
 
-In **Settings → Actions → General → Workflow permissions**, allow **Read and write permissions** so the workflow can persist notification state. In **Actions**, run **Scheduled Academic Assistant** manually once and inspect its summary.
+The scheduled workflow requests only `contents: write`, which it uses to commit `data/seen_ids.json`. In **Actions**, run **Scheduled Academic Assistant** manually once and inspect its summary.
 
 Google OAuth apps left in Testing can issue refresh tokens that expire after seven days. For reliable headless runs, move the consent screen to Production when appropriate; verification is generally unnecessary for a personal app limited to your own account.
 
