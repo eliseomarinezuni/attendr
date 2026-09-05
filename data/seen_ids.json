@@ -1,4 +1,13 @@
 {
-  "notifications": {},
+  "notifications": {
+    "announcement:canvas:announcement:40515:344953": {
+      "fingerprint": "91eb907699d4298e31fb524af38393e8f41bae617c235c38913de289bb93c38b",
+      "sent_at": "2026-09-05T05:57:01.089208+00:00"
+    },
+    "announcement:canvas:announcement:42465:344049": {
+      "fingerprint": "5c4acd61ce13cb6961e98fb66899c2ac8f3e4a3c2b6f99e78f03d2419257b63b",
+      "sent_at": "2026-09-05T05:57:01.299705+00:00"
+    }
+  },
   "version": 1
 }
