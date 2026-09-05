@@ -232,25 +232,33 @@ class StudyPlanner:
                 for item in calendars
                 if item.get("id") and item.get("id") != study_calendar_id
             ][:50]
-            response = self.service.freebusy().query(
-                body={
-                    "timeMin": start.isoformat(),
-                    "timeMax": end.isoformat(),
-                    "timeZone": self.timezone.key,
-                    "items": [{"id": value} for value in ids],
-                }
-            ).execute()
+            responses: list[dict[str, Any]] = []
+            chunk_start = start
+            while chunk_start < end:
+                chunk_end = min(chunk_start + timedelta(days=60), end)
+                responses.append(
+                    self.service.freebusy().query(
+                        body={
+                            "timeMin": chunk_start.isoformat(),
+                            "timeMax": chunk_end.isoformat(),
+                            "timeZone": self.timezone.key,
+                            "items": [{"id": value} for value in ids],
+                        }
+                    ).execute()
+                )
+                chunk_start = chunk_end
         except HttpError as error:
             raise CalendarAPIError("Could not inspect Google Calendar availability.") from error
         intervals: list[BusyInterval] = []
-        for details in response.get("calendars", {}).values():
-            for value in details.get("busy", []):
-                intervals.append(
-                    BusyInterval(
-                        datetime.fromisoformat(value["start"].replace("Z", "+00:00")),
-                        datetime.fromisoformat(value["end"].replace("Z", "+00:00")),
+        for response in responses:
+            for details in response.get("calendars", {}).values():
+                for value in details.get("busy", []):
+                    intervals.append(
+                        BusyInterval(
+                            datetime.fromisoformat(value["start"].replace("Z", "+00:00")),
+                            datetime.fromisoformat(value["end"].replace("Z", "+00:00")),
+                        )
                     )
-                )
         return intervals
 
     def _build_sessions(

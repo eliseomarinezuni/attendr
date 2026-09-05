@@ -74,8 +74,8 @@ function isAuthorized(request: Request, env: Env): boolean {
   return value === `Bearer ${env.STUDY_SYNC_SECRET}`;
 }
 
-function hexBytes(value: string): ArrayBuffer | null {
-  if (!/^[0-9a-f]{64}$/i.test(value)) return null;
+function hexBytes(value: string, length: number): ArrayBuffer | null {
+  if (value.length !== length || !/^[0-9a-f]+$/i.test(value)) return null;
   const buffer = new ArrayBuffer(value.length / 2);
   const bytes = new Uint8Array(buffer);
   value.match(/.{2}/g)!.forEach((byte, index) => { bytes[index] = parseInt(byte, 16); });
@@ -85,8 +85,8 @@ function hexBytes(value: string): ArrayBuffer | null {
 async function verifyDiscord(request: Request, body: string, env: Env): Promise<boolean> {
   const signature = request.headers.get("x-signature-ed25519");
   const timestamp = request.headers.get("x-signature-timestamp");
-  const publicKey = hexBytes(env.DISCORD_PUBLIC_KEY);
-  const signatureBytes = signature ? hexBytes(signature) : null;
+  const publicKey = hexBytes(env.DISCORD_PUBLIC_KEY, 64);
+  const signatureBytes = signature ? hexBytes(signature, 128) : null;
   if (!timestamp || !publicKey || !signatureBytes) return false;
   try {
     const key = await crypto.subtle.importKey("raw", publicKey, { name: "Ed25519" }, false, ["verify"]);
@@ -122,7 +122,7 @@ function validSession(value: unknown): value is SyncedSession {
 }
 
 async function syncSessions(request: Request, env: Env): Promise<Response> {
-  let payload: { sessions?: unknown[] };
+  let payload: { sessions?: unknown[]; replace?: boolean };
   try {
     payload = await request.json();
   } catch {
@@ -170,11 +170,13 @@ async function syncSessions(request: Request, env: Env): Promise<Response> {
       item.end, item.task_due_at, item.calendar_id, item.event_id, marker, now,
     ),
   );
-  statements.push(
-    env.DB.prepare(
-      "UPDATE study_sessions SET status='cancelled', updated_at=? WHERE status='scheduled' AND last_synced != ?",
-    ).bind(now, marker),
-  );
+  if (payload.replace !== false) {
+    statements.push(
+      env.DB.prepare(
+        "UPDATE study_sessions SET status='cancelled', updated_at=? WHERE status='scheduled' AND last_synced != ?",
+      ).bind(now, marker),
+    );
+  }
   await env.DB.batch(statements);
   return json({ synced: sessions.length });
 }
@@ -482,6 +484,11 @@ export default {
     }
     if (url.pathname === "/api/sessions/sync" && request.method === "POST") {
       return isAuthorized(request, env) ? syncSessions(request, env) : unauthorized();
+    }
+    if (url.pathname === "/api/reminders/run" && request.method === "POST") {
+      if (!isAuthorized(request, env)) return unauthorized();
+      await sendDueReminders(env);
+      return json({ ok: true });
     }
     return new Response("Not found", { status: 404 });
   },
