@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from academic_assistant import Announcement, AnnouncementDatesSync
+
+
+class FakeAI:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def extract_major_deadlines(self, *args, **kwargs):
+        self.calls += 1
+        return [{
+            "title": "Reflection",
+            "due_date": "2026-09-20",
+            "due_time": None,
+            "kind": "assignment",
+            "source_evidence": "Reflection due September 20",
+        }]
+
+
+class AnnouncementDatesTests(unittest.TestCase):
+    def test_no_time_uses_previous_day_and_cache_prevents_second_ai_call(self):
+        posted = datetime(2026, 9, 10, 14, 0, tzinfo=timezone.utc)
+        announcement = Announcement(
+            uid="canvas:announcement:1:2",
+            source_id="2",
+            course_id=1,
+            course_name="Ethics",
+            title="Reflection date",
+            message_html="<p>Reflection due September 20</p>",
+            message_text="Reflection due September 20",
+            posted_at=posted,
+            posted_at_local=posted,
+            html_url="https://canvas.example/announcements/2",
+            author_name="Professor",
+            read_state="read",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            ai = FakeAI()
+            sync = AnnouncementDatesSync(ai, index_path=Path(directory) / "dates.json")
+            first = sync.sync((announcement,))
+            second = sync.sync((announcement,))
+        self.assertEqual(first.items[0].due_at_local.isoformat(), "2026-09-19T23:59:00-04:00")
+        self.assertEqual(second.cached, 1)
+        self.assertEqual(ai.calls, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

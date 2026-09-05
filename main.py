@@ -9,7 +9,7 @@ import os
 import re
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -22,6 +22,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 from academic_assistant import (
     AcademicItem,
     AIAssistant,
+    AnnouncementDatesSync,
     AIConfigurationError,
     AIInputError,
     AIProviderError,
@@ -34,12 +35,14 @@ from academic_assistant import (
     CanvasConfigurationError,
     CanvasSnapshot,
     CourseMaterialsSync,
+    CourseSchedule,
     DiscordConfigurationError,
     DiscordNotificationError,
     DiscordNotifier,
     GoogleCalendarSync,
     MaterialsConfigurationError,
     MaterialsStateError,
+    LectureQuizRunner,
     PDFExtractionError,
     extract_pdf_text_chunks,
     send_quiz_to_discord,
@@ -73,10 +76,17 @@ class RunPlan:
     calendar: bool
     digest: bool
     quiz: bool
+    lecture_quizzes: bool
 
     @property
     def needs_canvas(self) -> bool:
-        return self.announcements or self.materials or self.calendar or self.digest
+        return (
+            self.announcements
+            or self.materials
+            or self.calendar
+            or self.digest
+            or self.lecture_quizzes
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +121,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only generate and send the daily quiz.",
     )
+    modes.add_argument(
+        "--lecture-quizzes",
+        action="store_true",
+        help="Send quizzes for lecture sessions that recently ended.",
+    )
     parser.add_argument(
         "--daily-quiz",
         action="store_true",
@@ -136,19 +151,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 def resolve_plan(arguments: argparse.Namespace) -> RunPlan:
     if arguments.sync_only:
-        return RunPlan(False, not arguments.no_materials, True, False, False)
+        return RunPlan(False, not arguments.no_materials, True, False, False, False)
     if arguments.announcements_only:
-        return RunPlan(True, False, False, False, False)
+        return RunPlan(True, False, False, False, False, False)
     if arguments.digest_only:
-        return RunPlan(False, False, False, True, False)
+        return RunPlan(False, False, False, True, False, False)
     if arguments.quiz_only:
-        return RunPlan(False, False, False, False, True)
+        return RunPlan(False, False, False, False, True, False)
+    if arguments.lecture_quizzes:
+        return RunPlan(False, False, False, False, False, True)
     return RunPlan(
         True,
         not arguments.no_materials,
         True,
         True,
         bool(arguments.daily_quiz),
+        True,
     )
 
 
@@ -188,6 +206,20 @@ def filter_material_duplicates(
         if not duplicate:
             selected.append(material)
     return tuple(selected)
+
+
+def prefer_announcement_dates(
+    syllabus_items: tuple[AcademicItem, ...],
+    announcement_items: tuple[AcademicItem, ...],
+) -> tuple[AcademicItem, ...]:
+    """Newest announcement replaces a syllabus item with the same semantic ID."""
+    merged = {item.uid: item for item in syllabus_items}
+    for item in sorted(
+        announcement_items,
+        key=lambda value: value.updated_at or datetime.min.replace(tzinfo=UTC),
+    ):
+        merged[item.uid] = item
+    return tuple(sorted(merged.values(), key=lambda value: (value.due_at, value.uid)))
 
 
 def resolve_quiz_source(arguments: argparse.Namespace) -> tuple[str, str]:
@@ -245,7 +277,18 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
     snapshot: CanvasSnapshot | None = None
     canvas_client: CanvasClient | None = None
     material_items: tuple[AcademicItem, ...] = ()
+    announcement_date_items: tuple[AcademicItem, ...] = ()
     notifier: DiscordNotifier | None = None
+    schedule: CourseSchedule | None = None
+
+    schedule_path = PROJECT_ROOT / os.getenv(
+        "COURSE_SCHEDULE_FILE", "data/course_schedule.json"
+    )
+    if plan.needs_canvas:
+        try:
+            schedule = CourseSchedule.load(schedule_path)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            results.append(StepResult("Schedule", "failed", str(error)))
 
     def get_notifier() -> DiscordNotifier:
         nonlocal notifier
@@ -257,6 +300,29 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
         try:
             canvas_client = CanvasClient.from_env(PROJECT_ROOT / ".env")
             snapshot = canvas_client.fetch_snapshot()
+            if schedule is not None:
+                excluded_ids = {
+                    course.id
+                    for course in snapshot.courses
+                    if any(
+                        pattern in f"{course.name} {course.course_code or ''}".casefold()
+                        for pattern in schedule.excluded_course_patterns
+                    )
+                }
+                snapshot = replace(
+                    snapshot,
+                    courses=tuple(
+                        course for course in snapshot.courses if course.id not in excluded_ids
+                    ),
+                    items=tuple(
+                        item for item in snapshot.items if item.course_id not in excluded_ids
+                    ),
+                    announcements=tuple(
+                        item
+                        for item in snapshot.announcements
+                        if item.course_id not in excluded_ids
+                    ),
+                )
             results.append(
                 StepResult(
                     "Canvas",
@@ -312,10 +378,16 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 materials_report = CourseMaterialsSync.from_env(
                     canvas_client, PROJECT_ROOT / ".env"
                 ).sync()
-                material_items = filter_material_duplicates(
-                    snapshot.items, materials_report.items
+                allowed_course_ids = {course.id for course in snapshot.courses}
+                allowed_material_items = tuple(
+                    item
+                    for item in materials_report.items
+                    if item.course_id in allowed_course_ids
                 )
-                duplicate_count = len(materials_report.items) - len(material_items)
+                material_items = filter_material_duplicates(
+                    snapshot.items, allowed_material_items
+                )
+                duplicate_count = len(allowed_material_items) - len(material_items)
                 results.append(
                     StepResult(
                         "Materials",
@@ -337,18 +409,75 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                     )
                 )
 
+    if plan.calendar and canvas_client is not None and snapshot is not None:
+        try:
+            recent_announcements = canvas_client.get_recent_announcements()
+            allowed_course_ids = {course.id for course in snapshot.courses}
+            recent_announcements = tuple(
+                item
+                for item in recent_announcements
+                if item.course_id in allowed_course_ids
+            )
+            date_report = AnnouncementDatesSync(
+                AIAssistant.from_env(PROJECT_ROOT / ".env"),
+                index_path=PROJECT_ROOT
+                / os.getenv(
+                    "ANNOUNCEMENT_DATES_INDEX",
+                    "data/announcement_dates_index.json",
+                ),
+                app_timezone=os.getenv("APP_TIMEZONE", "America/Toronto"),
+            ).sync(recent_announcements)
+            announcement_date_items = date_report.items
+            results.append(
+                StepResult(
+                    "Announcement dates",
+                    "ok",
+                    f"{date_report.analyzed} analyzed, {date_report.cached} cached, "
+                    f"{len(date_report.items)} dated item(s), {len(date_report.warnings)} warnings",
+                )
+            )
+        except KNOWN_ERRORS as error:
+            results.append(StepResult("Announcement dates", "failed", str(error)))
+
     if plan.calendar:
         if snapshot is None:
             results.append(StepResult("Calendar", "skipped", "Canvas data unavailable"))
         else:
 
             def sync_calendar() -> str:
-                assignments = tuple(
-                    item for item in snapshot.items if item.source == "assignment"
+                canvas_items = snapshot.items
+                derived = prefer_announcement_dates(
+                    material_items, announcement_date_items
                 )
+                derived = filter_material_duplicates(canvas_items, derived)
+                university_dates = (
+                    schedule.academic_calendar_items() if schedule is not None else ()
+                )
+                calendar_items = canvas_items + derived + university_dates
                 report = GoogleCalendarSync.from_env(PROJECT_ROOT / ".env").sync_items(
-                    assignments + material_items
+                    calendar_items
                 )
+                items_by_uid = {item.uid: item for item in calendar_items}
+                for entry in report.updated:
+                    changed_item = items_by_uid[entry.canvas_uid]
+                    get_notifier().send_custom_notification(
+                        f"calendar-change:{entry.canvas_uid}",
+                        {
+                            "username": "Attendr",
+                            "content": "📅 **Academic calendar item updated**",
+                            "embeds": [
+                                {
+                                    "title": entry.title[:256],
+                                    "description": (
+                                        "A newer Canvas source changed this calendar event.\n"
+                                        f"Current time: {changed_item.due_at_local.strftime('%Y-%m-%d %I:%M %p %Z')}"
+                                    ),
+                                    "color": 0xF59E0B,
+                                }
+                            ],
+                            "allowed_mentions": {"parse": []},
+                        },
+                    )
                 return (
                     f"{len(report.created)} created, {len(report.updated)} updated, "
                     f"{len(report.skipped)} unchanged"
@@ -360,7 +489,11 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
         if snapshot is None:
             results.append(StepResult("Digest", "skipped", "Canvas data unavailable"))
         else:
-            deadlines = upcoming_items(snapshot.items + material_items, 48)
+            deadlines = upcoming_items(
+                snapshot.items
+                + prefer_announcement_dates(material_items, announcement_date_items),
+                48,
+            )
             if not deadlines:
                 results.append(
                     StepResult("Digest", "skipped", "No deadlines in next 48 hours")
@@ -393,6 +526,35 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 return "3 questions sent" if sent else "already sent today"
 
             results.append(run_step("Quiz", generate_quiz))
+
+    if plan.lecture_quizzes:
+        if canvas_client is None or schedule is None:
+            results.append(
+                StepResult("Lecture quizzes", "skipped", "Canvas or schedule unavailable")
+            )
+        else:
+            def send_lecture_quizzes() -> str:
+                runner = LectureQuizRunner(
+                    canvas_client,
+                    AIAssistant.from_env(PROJECT_ROOT / ".env"),
+                    get_notifier(),
+                    schedule,
+                    materials_directory=PROJECT_ROOT
+                    / os.getenv("CANVAS_MATERIALS_DIR", "data/materials"),
+                    state_path=PROJECT_ROOT
+                    / os.getenv(
+                        "LECTURE_QUIZ_STATE_FILE", "data/lecture_quiz_state.json"
+                    ),
+                    retry_hours=int(os.getenv("LECTURE_QUIZ_RETRY_HOURS", "30")),
+                )
+                report = runner.run(force=arguments.force)
+                return (
+                    f"{report.sent} sent, {report.already_sent} already sent, "
+                    f"{report.waiting_for_slides} waiting for slides, "
+                    f"{len(report.warnings)} warnings"
+                )
+
+            results.append(run_step("Lecture quizzes", send_lecture_quizzes))
 
     return results
 

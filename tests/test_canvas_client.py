@@ -39,6 +39,16 @@ class FakeCourse(SimpleNamespace):
         self.file_kwargs = kwargs
         return iter(getattr(self, "files", []))
 
+    def get_modules(self, **kwargs):
+        self.module_kwargs = kwargs
+        return iter(getattr(self, "modules", []))
+
+    def get_file(self, file_id, **kwargs):
+        return next(item for item in self.files if str(item.id) == str(file_id))
+
+    def get_page(self, page_url, **kwargs):
+        return self.pages[page_url]
+
 
 class FakeFile(SimpleNamespace):
     def get_contents(self, *, binary=False):
@@ -121,6 +131,8 @@ def course(course_id=1, name="Algorithms", **overrides):
         "assignments": [],
         "announcements": [],
         "files": [],
+        "modules": [],
+        "pages": {},
         "syllabus_body": "",
     }
     values.update(overrides)
@@ -223,6 +235,39 @@ class CanvasClientTests(unittest.TestCase):
             self.assertEqual(
                 active_course.file_kwargs["content_types"], ["application/pdf"]
             )
+
+    def test_downloads_lecture_module_material_but_excludes_lab(self):
+        pdf = b"%PDF-1.4\nlecture content"
+        lecture_file = FakeFile(
+            id=21,
+            display_name="Lecture 1.pdf",
+            content_type="application/pdf",
+            size=len(pdf),
+            content=pdf,
+            updated_at="2026-09-08T10:00:00Z",
+        )
+        lab_file = FakeFile(
+            id=22,
+            display_name="Lab 1.pdf",
+            content_type="application/pdf",
+            size=len(pdf),
+            content=pdf,
+            updated_at="2026-09-08T10:00:00Z",
+        )
+        module = SimpleNamespace(
+            name="Week 1",
+            position=1,
+            locked_for_user=False,
+            items=[
+                {"type": "File", "content_id": 21, "title": "Lecture 1", "position": 1},
+                {"type": "File", "content_id": 22, "title": "Lab 1", "position": 2},
+            ],
+        )
+        active_course = course(files=[lecture_file, lab_file], modules=[module])
+        with tempfile.TemporaryDirectory() as directory:
+            report = self.make_client(FakeCanvas([active_course])).download_lecture_materials(directory)
+        self.assertEqual([item.title for item in report.materials], ["Lecture 1"])
+        self.assertEqual(report.materials[0].module_name, "Week 1")
 
     def test_upcoming_window_includes_boundaries_and_excludes_invalid_dates(self):
         active_course = course(

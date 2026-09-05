@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import re
 import tempfile
+import io
+import zipfile
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -29,6 +31,20 @@ SYLLABUS_FILE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CANVAS_FILE_ID_PATTERN = re.compile(r"/files/(\d+)")
+LECTURE_MATERIAL_PATTERN = re.compile(
+    r"\b(lecture|lect|week|module|chapter|slides?|deck|lesson|topic|notes?)\b",
+    re.IGNORECASE,
+)
+NON_LECTURE_MATERIAL_PATTERN = re.compile(
+    r"\b(lab|laboratory|tutorial|workshop)\b", re.IGNORECASE
+)
+DATED_MATERIAL_PATTERN = re.compile(
+    r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)\s+\d{1,2}\b|\b\d{4}[-_]\d{1,2}[-_]\d{1,2}\b|"
+    r"\b\d{1,2}[-_]\d{1,2}\b",
+    re.IGNORECASE,
+)
 
 
 class CanvasConfigurationError(ValueError):
@@ -117,6 +133,29 @@ class SyllabusMaterial:
 @dataclass(frozen=True, slots=True)
 class MaterialDownloadReport:
     materials: tuple[SyllabusMaterial, ...]
+    warnings: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LectureMaterial:
+    uid: str
+    source_id: str
+    course_id: int
+    course_name: str
+    title: str
+    content_type: str
+    local_path: Path
+    content_sha256: str
+    updated_at: datetime | None
+    html_url: str | None
+    module_name: str | None
+    module_position: int | None
+    item_position: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class LectureMaterialDownloadReport:
+    materials: tuple[LectureMaterial, ...]
     warnings: tuple[str, ...]
 
 
@@ -246,7 +285,13 @@ class CanvasClient:
         """Return recent announcements that Canvas reports as unread."""
         contexts = self._get_active_course_contexts()
         warnings: list[str] = []
-        return self._fetch_announcements(contexts, warnings)
+        return self._fetch_announcements(contexts, warnings, unread_only=True)
+
+    def get_recent_announcements(self) -> tuple[Announcement, ...]:
+        """Return recent announcements without changing their read state."""
+        contexts = self._get_active_course_contexts()
+        warnings: list[str] = []
+        return self._fetch_announcements(contexts, warnings, unread_only=False)
 
     def fetch_snapshot(self) -> CanvasSnapshot:
         """Fetch a consistent snapshot and retain non-fatal per-course warnings."""
@@ -254,7 +299,9 @@ class CanvasClient:
         contexts = self._get_active_course_contexts()
         warnings: list[str] = []
         items = self._fetch_upcoming_items(contexts, warnings)
-        announcements = self._fetch_announcements(contexts, warnings)
+        announcements = self._fetch_announcements(
+            contexts, warnings, unread_only=True
+        )
         return CanvasSnapshot(
             user_id=user_id,
             user_name=user_name,
@@ -401,6 +448,215 @@ class CanvasClient:
             warnings=tuple(warnings),
         )
 
+    def download_lecture_materials(
+        self,
+        directory: str | os.PathLike[str],
+        *,
+        excluded_course_patterns: Iterable[str] = (),
+        max_file_bytes: int = 25 * 1024 * 1024,
+    ) -> LectureMaterialDownloadReport:
+        """Download published lecture PDFs, PowerPoints, and pages from Modules."""
+        destination = Path(directory).expanduser().resolve()
+        excluded = tuple(value.casefold() for value in excluded_course_patterns)
+        materials: dict[str, LectureMaterial] = {}
+        warnings: list[str] = []
+
+        for context in self._get_active_course_contexts():
+            course = context.summary
+            searchable = f"{course.name} {course.course_code or ''}".casefold()
+            if any(value in searchable for value in excluded):
+                continue
+            try:
+                modules = context.resource.get_modules(
+                    include=["items", "content_details"]
+                )
+                for module in modules:
+                    if bool(self._attr(module, "locked_for_user", False)):
+                        continue
+                    module_name = str(self._attr(module, "name", "") or "")
+                    module_position = self._optional_int(
+                        self._attr(module, "position", None)
+                    )
+                    items = self._attr(module, "items", None)
+                    if items is None:
+                        items = module.get_module_items(include=["content_details"])
+                    for item in items:
+                        title = str(self._attr(item, "title", "") or "")
+                        combined = f"{module_name} {title}"
+                        if not (
+                            LECTURE_MATERIAL_PATTERN.search(combined)
+                            or DATED_MATERIAL_PATTERN.search(combined)
+                        ):
+                            continue
+                        if NON_LECTURE_MATERIAL_PATTERN.search(combined):
+                            continue
+                        kind = str(self._attr(item, "type", "") or "")
+                        source_id = str(
+                            self._attr(item, "content_id", None)
+                            or self._attr(item, "page_url", None)
+                            or ""
+                        )
+                        position = self._optional_int(self._attr(item, "position", None))
+                        material = None
+                        if kind == "File" and source_id:
+                            material = self._download_lecture_file(
+                                context.resource, course, source_id, title, destination,
+                                max_file_bytes, module_name, module_position, position,
+                            )
+                        elif kind == "Page" and source_id:
+                            material = self._download_lecture_page(
+                                context.resource, course, source_id, title, destination,
+                                module_name, module_position, position,
+                            )
+                        if material:
+                            materials[material.uid] = material
+
+                # Files can be available without being linked from a Module.
+                files = context.resource.get_files(
+                    content_types=[
+                        "application/pdf",
+                        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                    ],
+                    sort="updated_at",
+                    order="desc",
+                )
+                for file in files:
+                    name = str(
+                        self._attr(file, "display_name", None)
+                        or self._attr(file, "filename", None)
+                        or ""
+                    )
+                    if not (
+                        LECTURE_MATERIAL_PATTERN.search(name)
+                        or DATED_MATERIAL_PATTERN.search(name)
+                    ):
+                        continue
+                    if NON_LECTURE_MATERIAL_PATTERN.search(name):
+                        continue
+                    source_id = str(self._attr(file, "id", "") or "")
+                    if not source_id:
+                        continue
+                    material = self._download_lecture_file(
+                        context.resource,
+                        course,
+                        source_id,
+                        name,
+                        destination,
+                        max_file_bytes,
+                        "",
+                        None,
+                        None,
+                    )
+                    if material and material.uid not in materials:
+                        materials[material.uid] = material
+            except (CanvasException, RequestException, OSError, ValueError) as error:
+                warnings.append(self._course_warning("lecture modules", course, error))
+
+        return LectureMaterialDownloadReport(
+            materials=tuple(sorted(materials.values(), key=lambda value: value.uid)),
+            warnings=tuple(warnings),
+        )
+
+    def _download_lecture_file(
+        self,
+        resource: Any,
+        course: CourseSummary,
+        source_id: str,
+        title: str,
+        destination: Path,
+        limit: int,
+        module_name: str,
+        module_position: int | None,
+        item_position: int | None,
+    ) -> LectureMaterial | None:
+        file = resource.get_file(source_id)
+        name = str(
+            self._attr(file, "display_name", None)
+            or self._attr(file, "filename", None)
+            or title
+        )
+        suffix = Path(name).suffix.casefold()
+        mime = str(
+            self._attr(file, "content-type", None)
+            or self._attr(file, "content_type", None)
+            or ""
+        ).casefold()
+        is_pdf = suffix == ".pdf" or mime == "application/pdf"
+        is_pptx = suffix == ".pptx" or "presentationml.presentation" in mime
+        if not (is_pdf or is_pptx):
+            return None
+        if bool(self._attr(file, "hidden_for_user", False)) or bool(
+            self._attr(file, "locked", False)
+        ):
+            return None
+        if int(self._attr(file, "size", 0) or 0) > limit:
+            return None
+        content = file.get_contents(binary=True)
+        if not isinstance(content, bytes) or len(content) > limit:
+            return None
+        if is_pdf and not content.lstrip().startswith(b"%PDF-"):
+            return None
+        if is_pptx and not self._valid_pptx(content):
+            return None
+        content_type = (
+            "application/pdf"
+            if is_pdf
+            else "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        )
+        safe_name = self._safe_filename(name, fallback="lecture.pdf" if is_pdf else "lecture.pptx")
+        path = destination / f"course-{course.id}" / "lectures" / f"{source_id}-{safe_name}"
+        self._atomic_write(path, content)
+        return LectureMaterial(
+            uid=f"canvas:lecture-file:{course.id}:{source_id}",
+            source_id=source_id,
+            course_id=course.id,
+            course_name=course.name,
+            title=title or name,
+            content_type=content_type,
+            local_path=path,
+            content_sha256=sha256(content).hexdigest(),
+            updated_at=self._parse_datetime(self._attr(file, "updated_at", None), required=False),
+            html_url=f"{self.base_url}/courses/{course.id}/files/{source_id}",
+            module_name=module_name or None,
+            module_position=module_position,
+            item_position=item_position,
+        )
+
+    def _download_lecture_page(
+        self,
+        resource: Any,
+        course: CourseSummary,
+        page_url: str,
+        title: str,
+        destination: Path,
+        module_name: str,
+        module_position: int | None,
+        item_position: int | None,
+    ) -> LectureMaterial | None:
+        page = resource.get_page(page_url)
+        html = str(self._attr(page, "body", "") or "")
+        if not self._html_to_text(html):
+            return None
+        content = html.encode("utf-8")
+        safe_name = self._safe_filename(title, fallback="lecture-page")
+        path = destination / f"course-{course.id}" / "lectures" / f"page-{safe_name}.html"
+        self._atomic_write(path, content)
+        return LectureMaterial(
+            uid=f"canvas:lecture-page:{course.id}:{page_url}",
+            source_id=page_url,
+            course_id=course.id,
+            course_name=course.name,
+            title=title,
+            content_type="text/html",
+            local_path=path,
+            content_sha256=sha256(content).hexdigest(),
+            updated_at=self._parse_datetime(self._attr(page, "updated_at", None), required=False),
+            html_url=f"{self.base_url}/courses/{course.id}/pages/{page_url}",
+            module_name=module_name or None,
+            module_position=module_position,
+            item_position=item_position,
+        )
+
     def _get_active_course_contexts(self) -> tuple[_CourseContext, ...]:
         try:
             resources = self._canvas.get_courses(
@@ -497,7 +753,11 @@ class CanvasClient:
         )
 
     def _fetch_announcements(
-        self, contexts: Iterable[_CourseContext], warnings: list[str]
+        self,
+        contexts: Iterable[_CourseContext],
+        warnings: list[str],
+        *,
+        unread_only: bool,
     ) -> tuple[Announcement, ...]:
         now = self._now_utc()
         cutoff = now - timedelta(days=self.announcement_days)
@@ -506,17 +766,22 @@ class CanvasClient:
         for context in contexts:
             course = context.summary
             try:
-                topics = context.resource.get_discussion_topics(
-                    only_announcements=True,
-                    filter_by="unread",
-                    order_by="recent_activity",
-                )
+                arguments: dict[str, Any] = {
+                    "only_announcements": True,
+                    "order_by": "recent_activity",
+                }
+                if unread_only:
+                    arguments["filter_by"] = "unread"
+                topics = context.resource.get_discussion_topics(**arguments)
                 for topic in topics:
                     try:
                         announcement = self._topic_to_announcement(topic, course)
                         if (
                             cutoff <= announcement.posted_at <= now
-                            and announcement.read_state == "unread"
+                            and (
+                                not unread_only
+                                or announcement.read_state == "unread"
+                            )
                         ):
                             announcements.append(announcement)
                     except (TypeError, ValueError) as error:
@@ -750,6 +1015,28 @@ class CanvasClient:
         filename = Path(value.replace("\\", "/")).name
         filename = re.sub(r"[^A-Za-z0-9._ -]+", "_", filename).strip(" .")
         return filename[:180] or fallback
+
+    @staticmethod
+    def _optional_int(value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        return int(value)
+
+    @staticmethod
+    def _valid_pptx(content: bytes) -> bool:
+        if not content.startswith(b"PK"):
+            return False
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                names = set(archive.namelist())
+                total_size = sum(item.file_size for item in archive.infolist())
+                return (
+                    "[Content_Types].xml" in names
+                    and "ppt/presentation.xml" in names
+                    and total_size <= 100 * 1024 * 1024
+                )
+        except (OSError, zipfile.BadZipFile):
+            return False
 
     @staticmethod
     def _atomic_write(path: Path, content: bytes) -> None:

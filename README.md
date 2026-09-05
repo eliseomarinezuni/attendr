@@ -1,6 +1,6 @@
 # Attendr
 
-Read-only Canvas ingestion, automatic syllabus downloads, deduplicated Discord alerts, Google Calendar deadline sync, and Gemini-generated study quizzes. Python 3.11.
+Read-only Canvas ingestion, automatic syllabus/announcement date extraction, Google Calendar sync, Discord alerts, and post-lecture Gemini quizzes from Canvas PDFs, PowerPoints, and Pages. Python 3.11.
 
 ## Run
 
@@ -20,10 +20,15 @@ Useful modes:
 .venv/bin/python main.py --digest-only
 .venv/bin/python main.py --quiz-only --topic "Binary search trees"
 .venv/bin/python main.py --daily-quiz
+.venv/bin/python main.py --lecture-quizzes
 .venv/bin/python main.py --quiz-only --quiz-pdf data/materials/lecture.pdf
 ```
 
-The default run sends unseen announcements, downloads each active course's Canvas syllabus page and syllabus/course-outline PDFs, extracts major dates, syncs Canvas and syllabus deadlines, and sends one digest when deadlines exist in the next 48 hours. `--daily-quiz` adds three questions. Configure the quiz with `DAILY_QUIZ_TOPIC`, `--topic`, `--quiz-pdf`, or a date entry in `data/daily_topics.json`:
+The default run sends unseen announcements, extracts dated items from syllabuses and all recent announcements, syncs deadlines plus Ontario Tech academic dates, sends a 48-hour digest, and retries any post-lecture quiz waiting for slides. Canvas assignments override announcements; newest announcements override syllabuses. A date without a stated time is placed at 11:59 PM the day before.
+
+`--lecture-quizzes` scans published Canvas Modules for the lecture that just ended. It reads PDF, PowerPoint (`.pptx`), and Canvas Page content; labs/tutorials never produce quizzes. Each quiz contains two conceptual multiple-choice questions and one short-answer active-recall question. The verified Fall 2026 timetable and no-class dates are in `data/course_schedule.json`.
+
+The older manual `--daily-quiz` mode uses `DAILY_QUIZ_TOPIC`, `--topic`, `--quiz-pdf`, or a date entry in `data/daily_topics.json`:
 
 ```json
 {
@@ -50,7 +55,7 @@ crontab -e
 Run every two hours from 8:00 AM through 10:00 PM:
 
 ```cron
-0 8-22/2 * * * cd /Users/eliseomarinez/Documents/attendr && /Users/eliseomarinez/Documents/attendr/.venv/bin/python main.py --daily-quiz >> /Users/eliseomarinez/Documents/attendr/logs/attendr.log 2>&1
+0 8-22/2 * * * cd /Users/eliseomarinez/Documents/attendr && /Users/eliseomarinez/Documents/attendr/.venv/bin/python main.py >> /Users/eliseomarinez/Documents/attendr/logs/attendr.log 2>&1
 ```
 
 Check it with `crontab -l`. The Mac must be awake and online.
@@ -62,13 +67,13 @@ Check it with `crontab -l`. The Mac must be awake and online.
 3. Add a daily trigger beginning at 8:00 AM; repeat every 2 hours for 14 hours.
 4. Add an action **Start a program**.
 5. Program: `C:\path\to\attendr\.venv\Scripts\pythonw.exe`
-6. Arguments: `main.py --daily-quiz`
+6. Arguments: `main.py`
 7. Start in: `C:\path\to\attendr`
 8. Enable **Run task as soon as possible after a scheduled start is missed**, save, then choose **Run** once to test.
 
 ## GitHub Actions automation
 
-`.github/workflows/schedule.yml` runs every two hours from 8:00 AM through 10:00 PM in `America/Toronto` and can also be started manually. It commits `data/seen_ids.json` and `data/materials_index.json` after a run. The repository should remain private because this state and optional topic schedule reveal academic activity.
+`.github/workflows/schedule.yml` runs every two hours for deadline/announcement sync and late-slide retries. `.github/workflows/class-quizzes.yml` runs at each lecture end time; GitHub may start scheduled jobs a few minutes late. Both persist deduplication state. The repository should remain private because this state reveals academic activity.
 
 Required repository secrets:
 

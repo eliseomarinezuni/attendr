@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "timezone": "America/Toronto",
+  "term": {
+    "start_date": "2026-09-08",
+    "end_date": "2026-12-07",
+    "no_class": [
+      {"start": "2026-10-12", "end": "2026-10-12", "reason": "Thanksgiving"},
+      {"start": "2026-10-13", "end": "2026-10-18", "reason": "Fall study week"}
+    ]
+  },
+  "excluded_course_patterns": ["academic integrity", "academic advising", "co-op program", "coop program"],
+  "courses": [
+    {
+      "key": "computer-graphics",
+      "match": ["computer graphics", "graphics and visualization", "csci 4110"],
+      "sessions": [
+        {"weekday": 0, "start": "17:10", "end": "18:30", "type": "lab"},
+        {"weekday": 2, "start": "09:40", "end": "11:00", "type": "lecture"},
+        {"weekday": 4, "start": "09:40", "end": "11:00", "type": "lecture"}
+      ]
+    },
+    {
+      "key": "algorithms",
+      "match": ["analysis and design of algorithms", "analys. & design of algorithms", "csci 3070"],
+      "sessions": [
+        {"weekday": 1, "start": "11:10", "end": "12:30", "type": "tutorial"},
+        {"weekday": 2, "start": "15:40", "end": "17:00", "type": "lecture"},
+        {"weekday": 4, "start": "15:40", "end": "17:00", "type": "lecture"}
+      ]
+    },
+    {
+      "key": "web-development",
+      "match": ["web development", "web dev", "csci 3230"],
+      "sessions": [
+        {"weekday": 1, "start": "12:40", "end": "14:00", "type": "lecture"},
+        {"weekday": 2, "start": "14:10", "end": "15:30", "type": "lab"},
+        {"weekday": 4, "start": "12:40", "end": "14:00", "type": "lecture"}
+      ]
+    },
+    {
+      "key": "ethics",
+      "match": ["ethics, law", "eth., law", "impact of computing", "csci 4040"],
+      "sessions": [
+        {"weekday": 3, "start": "11:10", "end": "14:00", "type": "lecture"}
+      ]
+    },
+    {
+      "key": "mobile-devices",
+      "match": ["mobile devices", "csci 3101"],
+      "sessions": [
+        {"weekday": 0, "start": "20:10", "end": "21:30", "type": "lecture"},
+        {"weekday": 1, "start": "17:10", "end": "18:30", "type": "lab"},
+        {"weekday": 3, "start": "20:10", "end": "21:30", "type": "lecture"}
+      ]
+    }
+  ],
+  "academic_dates": [
+    {"uid": "fall-readmission-application", "title": "Fall readmission/change-of-program application deadline", "start_date": "2026-07-31", "kind": "calendar_event"},
+    {"uid": "fall-graduation-application", "title": "Fall convocation graduation application deadline", "start_date": "2026-08-10", "kind": "calendar_event"},
+    {"uid": "fall-orientation", "title": "Fall semester orientation", "start_date": "2026-09-05", "end_date": "2026-09-07", "kind": "calendar_event"},
+    {"uid": "labour-day", "title": "Labour Day — no academic activities", "start_date": "2026-09-07", "kind": "calendar_event"},
+    {"uid": "lectures-begin", "title": "Fall lectures begin", "start_date": "2026-09-08", "kind": "calendar_event"},
+    {"uid": "add-drop-deadline", "title": "Add/drop and fee deadline", "start_date": "2026-09-21", "kind": "calendar_event"},
+    {"uid": "withdraw-refund-deadline", "title": "Withdrawal deadline for 50% refund", "start_date": "2026-10-05", "kind": "calendar_event"},
+    {"uid": "thanksgiving", "title": "Thanksgiving — no academic activities", "start_date": "2026-10-12", "kind": "calendar_event"},
+    {"uid": "fall-study-week", "title": "Fall study week — no academic activities", "start_date": "2026-10-13", "end_date": "2026-10-18", "kind": "calendar_event"},
+    {"uid": "fall-convocation", "title": "Fall Convocation", "start_date": "2026-10-15", "kind": "calendar_event"},
+    {"uid": "winter-readmission-application", "title": "Winter readmission/change-of-program application deadline", "start_date": "2026-11-30", "kind": "calendar_event"},
+    {"uid": "lectures-end", "title": "Fall lectures end", "start_date": "2026-12-07", "kind": "calendar_event"},
+    {"uid": "study-break", "title": "Study break — no academic activities", "start_date": "2026-12-08", "kind": "calendar_event"},
+    {"uid": "final-exams", "title": "Fall final examination period begins", "start_date": "2026-12-09", "end_date": "2026-12-19", "kind": "exam"},
+    {"uid": "university-closure", "title": "University closed", "start_date": "2026-12-24", "end_date": "2027-01-01", "kind": "calendar_event"},
+    {"uid": "fall-degree-requirements", "title": "Fall degree-requirements/graduation application deadline", "start_date": "2026-12-31", "kind": "calendar_event"},
+    {"uid": "fall-grades-released", "title": "Fall semester grades released", "start_date": "2027-01-04", "kind": "calendar_event"},
+    {"uid": "fall-standing-released", "title": "Fall academic standing released", "start_date": "2027-01-06", "kind": "calendar_event"}
+  ]
+}
