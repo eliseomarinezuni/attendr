@@ -39,7 +39,7 @@ The older manual `--daily-quiz` mode uses `DAILY_QUIZ_TOPIC`, `--topic`, `--quiz
 
 Discord sends are recorded only after success. `data/seen_ids.json` is used in GitHub Actions. Google Calendar deduplicates independently with each Canvas UID in `extendedProperties.private` and updates an existing event when its Canvas data changes.
 
-Downloaded syllabuses are stored under `data/materials/course-<id>/` and excluded from Git. `data/materials_index.json` stores only content hashes and validated extracted deadlines, so unchanged documents do not consume Gemini quota again. Live Canvas assignments win over matching syllabus findings. Conflicting extracted dates are skipped and reported rather than guessed. Date changes for the same course/deadline title update the existing Google event; Attendr never automatically deletes Calendar events.
+Attendr first reads the Canvas Syllabus tab, then searches Files, Modules, module-linked files/Pages, and standalone syllabus/course-outline Pages. Not finding a syllabus is non-fatal. Downloads are stored under `data/materials/course-<id>/` and excluded from Git. `data/materials_index.json` stores only content hashes and validated extracted deadlines, so unchanged documents do not consume Gemini quota again. Live Canvas assignments win over matching syllabus findings. Conflicting extracted dates are skipped and reported rather than guessed. Date changes for the same course/deadline title update the existing Google event; Attendr never automatically deletes Calendar events.
 
 ## Local automation
 
