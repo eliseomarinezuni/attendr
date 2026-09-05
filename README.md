@@ -1,6 +1,6 @@
 # Attendr
 
-Read-only Canvas ingestion, deduplicated Discord alerts, Google Calendar deadline sync, and Gemini-generated study quizzes. Python 3.11.
+Read-only Canvas ingestion, automatic syllabus downloads, deduplicated Discord alerts, Google Calendar deadline sync, and Gemini-generated study quizzes. Python 3.11.
 
 ## Run
 
@@ -15,6 +15,7 @@ Useful modes:
 
 ```bash
 .venv/bin/python main.py --sync-only
+.venv/bin/python main.py --sync-only --no-materials
 .venv/bin/python main.py --announcements-only
 .venv/bin/python main.py --digest-only
 .venv/bin/python main.py --quiz-only --topic "Binary search trees"
@@ -22,7 +23,7 @@ Useful modes:
 .venv/bin/python main.py --quiz-only --quiz-pdf data/materials/lecture.pdf
 ```
 
-The default run sends unseen announcements, syncs assignment deadlines, and sends one digest when deadlines exist in the next 48 hours. `--daily-quiz` adds three questions. Configure the quiz with `DAILY_QUIZ_TOPIC`, `--topic`, `--quiz-pdf`, or a date entry in `data/daily_topics.json`:
+The default run sends unseen announcements, downloads each active course's Canvas syllabus page and syllabus/course-outline PDFs, extracts major dates, syncs Canvas and syllabus deadlines, and sends one digest when deadlines exist in the next 48 hours. `--daily-quiz` adds three questions. Configure the quiz with `DAILY_QUIZ_TOPIC`, `--topic`, `--quiz-pdf`, or a date entry in `data/daily_topics.json`:
 
 ```json
 {
@@ -32,6 +33,8 @@ The default run sends unseen announcements, syncs assignment deadlines, and send
 ```
 
 Discord sends are recorded only after success. `data/seen_ids.json` is used in GitHub Actions. Google Calendar deduplicates independently with each Canvas UID in `extendedProperties.private` and updates an existing event when its Canvas data changes.
+
+Downloaded syllabuses are stored under `data/materials/course-<id>/` and excluded from Git. `data/materials_index.json` stores only content hashes and validated extracted deadlines, so unchanged documents do not consume Gemini quota again. Live Canvas assignments win over matching syllabus findings. Conflicting extracted dates are skipped and reported rather than guessed. Date changes for the same course/deadline title update the existing Google event; Attendr never automatically deletes Calendar events.
 
 ## Local automation
 
@@ -65,7 +68,7 @@ Check it with `crontab -l`. The Mac must be awake and online.
 
 ## GitHub Actions automation
 
-`.github/workflows/schedule.yml` runs every two hours from 8:00 AM through 10:00 PM in `America/Toronto` and can also be started manually. It commits only `data/seen_ids.json` after a run. The repository should remain private because this state and optional topic schedule reveal academic activity.
+`.github/workflows/schedule.yml` runs every two hours from 8:00 AM through 10:00 PM in `America/Toronto` and can also be started manually. It commits `data/seen_ids.json` and `data/materials_index.json` after a run. The repository should remain private because this state and optional topic schedule reveal academic activity.
 
 Required repository secrets:
 

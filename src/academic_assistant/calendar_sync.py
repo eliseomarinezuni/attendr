@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import os
+import tempfile
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from hashlib import sha256
-import json
-import os
 from pathlib import Path
-import tempfile
-from typing import Any, Iterable, Literal, Mapping
+from typing import Any, Literal
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -22,7 +23,6 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from .canvas_client import AcademicItem
-
 
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar"
 SCOPES = (CALENDAR_SCOPE,)
@@ -85,7 +85,9 @@ class GoogleCalendarAuthenticator:
         self.token_path = Path(token_path).expanduser().resolve()
         self.scopes = tuple(scopes)
         if not self.scopes:
-            raise CalendarConfigurationError("At least one Google OAuth scope is required.")
+            raise CalendarConfigurationError(
+                "At least one Google OAuth scope is required."
+            )
 
     def authenticate(self) -> Credentials:
         """Return valid credentials and securely persist refreshed credentials."""
@@ -216,7 +218,7 @@ class GoogleCalendarSync:
     @classmethod
     def from_env(
         cls, env_file: str | os.PathLike[str] | None = None
-    ) -> "GoogleCalendarSync":
+    ) -> GoogleCalendarSync:
         """Load configuration, authenticate, and construct a calendar sync client."""
         load_dotenv(dotenv_path=env_file, override=False)
         base_directory = Path(env_file).resolve().parent if env_file else Path.cwd()
@@ -257,7 +259,9 @@ class GoogleCalendarSync:
         ):
             desired = self._event_body(item)
             fingerprint = self._fingerprint(desired)
-            desired["extendedProperties"]["private"]["attendr_fingerprint"] = fingerprint
+            desired["extendedProperties"]["private"]["attendr_fingerprint"] = (
+                fingerprint
+            )
             existing = existing_by_uid.get(item.uid)
 
             if existing and self._existing_fingerprint(existing) == fingerprint:
@@ -331,7 +335,9 @@ class GoogleCalendarSync:
                 if not page_token:
                     break
         except HttpError as error:
-            raise self._api_error("Could not list writable Google calendars", error) from None
+            raise self._api_error(
+                "Could not list writable Google calendars", error
+            ) from None
 
         if len(matches) > 1:
             raise CalendarConfigurationError(
@@ -392,7 +398,9 @@ class GoogleCalendarSync:
                 if not page_token:
                     return events_by_uid
         except HttpError as error:
-            raise self._api_error("Could not inspect existing calendar events", error) from None
+            raise self._api_error(
+                "Could not inspect existing calendar events", error
+            ) from None
 
     def _event_body(self, item: AcademicItem) -> dict[str, Any]:
         submitted = self._mark_submitted and item.submitted is True
@@ -411,6 +419,8 @@ class GoogleCalendarSync:
             description_lines.append(f"Points: {item.points_possible:g}")
         if item.submission_state:
             description_lines.append(f"Canvas submission: {item.submission_state}")
+        if item.source == "syllabus_deadline" and item.description_html:
+            description_lines.append(item.description_html[:800])
         safe_url = self._safe_url(item.html_url)
         if safe_url:
             description_lines.append(f"Canvas: {safe_url}")
@@ -435,7 +445,11 @@ class GoogleCalendarSync:
         if item.all_day:
             start_date = due_local.date()
             end_local = item.end_at.astimezone(self.timezone) if item.end_at else None
-            end_date = end_local.date() if end_local and end_local.date() > start_date else start_date + timedelta(days=1)
+            end_date = (
+                end_local.date()
+                if end_local and end_local.date() > start_date
+                else start_date + timedelta(days=1)
+            )
             body["start"] = {"date": start_date.isoformat()}
             body["end"] = {"date": end_date.isoformat()}
         else:

@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -32,10 +33,13 @@ from academic_assistant import (
     CanvasClient,
     CanvasConfigurationError,
     CanvasSnapshot,
+    CourseMaterialsSync,
     DiscordConfigurationError,
     DiscordNotificationError,
     DiscordNotifier,
     GoogleCalendarSync,
+    MaterialsConfigurationError,
+    MaterialsStateError,
     PDFExtractionError,
     extract_pdf_text_chunks,
     send_quiz_to_discord,
@@ -54,6 +58,8 @@ KNOWN_ERRORS = (
     CanvasConfigurationError,
     DiscordConfigurationError,
     DiscordNotificationError,
+    MaterialsConfigurationError,
+    MaterialsStateError,
     PDFExtractionError,
     OSError,
     ValueError,
@@ -63,13 +69,14 @@ KNOWN_ERRORS = (
 @dataclass(frozen=True, slots=True)
 class RunPlan:
     announcements: bool
+    materials: bool
     calendar: bool
     digest: bool
     quiz: bool
 
     @property
     def needs_canvas(self) -> bool:
-        return self.announcements or self.calendar or self.digest
+        return self.announcements or self.materials or self.calendar or self.digest
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +116,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Add a daily quiz to the normal pipeline.",
     )
+    parser.add_argument(
+        "--no-materials",
+        action="store_true",
+        help="Skip automatic Canvas syllabus download and deadline extraction.",
+    )
     quiz_source = parser.add_mutually_exclusive_group()
     quiz_source.add_argument("--topic", help="Lecture topic or text used for the quiz.")
     quiz_source.add_argument(
@@ -124,22 +136,58 @@ def build_parser() -> argparse.ArgumentParser:
 
 def resolve_plan(arguments: argparse.Namespace) -> RunPlan:
     if arguments.sync_only:
-        return RunPlan(False, True, False, False)
+        return RunPlan(False, not arguments.no_materials, True, False, False)
     if arguments.announcements_only:
-        return RunPlan(True, False, False, False)
+        return RunPlan(True, False, False, False, False)
     if arguments.digest_only:
-        return RunPlan(False, False, True, False)
+        return RunPlan(False, False, False, True, False)
     if arguments.quiz_only:
-        return RunPlan(False, False, False, True)
-    return RunPlan(True, True, True, bool(arguments.daily_quiz))
+        return RunPlan(False, False, False, False, True)
+    return RunPlan(
+        True,
+        not arguments.no_materials,
+        True,
+        True,
+        bool(arguments.daily_quiz),
+    )
 
 
 def upcoming_items(
-    snapshot: CanvasSnapshot, hours: int = 48
+    items: tuple[AcademicItem, ...], hours: int = 48
 ) -> tuple[AcademicItem, ...]:
     now = datetime.now(UTC)
     cutoff = now + timedelta(hours=hours)
-    return tuple(item for item in snapshot.items if now <= item.due_at <= cutoff)
+    return tuple(item for item in items if now <= item.due_at <= cutoff)
+
+
+def filter_material_duplicates(
+    canvas_items: tuple[AcademicItem, ...],
+    material_items: tuple[AcademicItem, ...],
+) -> tuple[AcademicItem, ...]:
+    """Prefer live Canvas dates when a syllabus describes the same deadline."""
+    normalized_canvas = [
+        (
+            item.course_id,
+            item.due_at_local.date(),
+            item.kind,
+            re.sub(r"[^a-z0-9]+", " ", item.title.casefold()).strip(),
+        )
+        for item in canvas_items
+    ]
+    selected: list[AcademicItem] = []
+    for material in material_items:
+        title = re.sub(r"[^a-z0-9]+", " ", material.title.casefold()).strip()
+        duplicate = any(
+            course_id == material.course_id
+            and (
+                canvas_title == title
+                or (due_date == material.due_at_local.date() and kind == material.kind)
+            )
+            for course_id, due_date, kind, canvas_title in normalized_canvas
+        )
+        if not duplicate:
+            selected.append(material)
+    return tuple(selected)
 
 
 def resolve_quiz_source(arguments: argparse.Namespace) -> tuple[str, str]:
@@ -195,6 +243,8 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
     plan = resolve_plan(arguments)
     results: list[StepResult] = []
     snapshot: CanvasSnapshot | None = None
+    canvas_client: CanvasClient | None = None
+    material_items: tuple[AcademicItem, ...] = ()
     notifier: DiscordNotifier | None = None
 
     def get_notifier() -> DiscordNotifier:
@@ -205,7 +255,8 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
 
     if plan.needs_canvas:
         try:
-            snapshot = CanvasClient.from_env(PROJECT_ROOT / ".env").fetch_snapshot()
+            canvas_client = CanvasClient.from_env(PROJECT_ROOT / ".env")
+            snapshot = canvas_client.fetch_snapshot()
             results.append(
                 StepResult(
                     "Canvas",
@@ -251,6 +302,41 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
 
             results.append(run_step("Announcements", send_announcements))
 
+    if plan.materials:
+        if canvas_client is None or snapshot is None:
+            results.append(
+                StepResult("Materials", "skipped", "Canvas data unavailable")
+            )
+        else:
+            try:
+                materials_report = CourseMaterialsSync.from_env(
+                    canvas_client, PROJECT_ROOT / ".env"
+                ).sync()
+                material_items = filter_material_duplicates(
+                    snapshot.items, materials_report.items
+                )
+                duplicate_count = len(materials_report.items) - len(material_items)
+                results.append(
+                    StepResult(
+                        "Materials",
+                        "ok",
+                        f"{materials_report.materials_found} syllabus source(s), "
+                        f"{materials_report.materials_analyzed} analyzed, "
+                        f"{materials_report.cached_materials_reused} cached, "
+                        f"{len(material_items)} calendar deadline(s), "
+                        f"{duplicate_count} live-Canvas duplicate(s), "
+                        f"{len(materials_report.warnings)} warnings",
+                    )
+                )
+            except KNOWN_ERRORS as error:
+                results.append(StepResult("Materials", "failed", str(error)))
+            except Exception as error:  # noqa: BLE001 - isolate pipeline steps.
+                results.append(
+                    StepResult(
+                        "Materials", "failed", f"Unexpected {type(error).__name__}"
+                    )
+                )
+
     if plan.calendar:
         if snapshot is None:
             results.append(StepResult("Calendar", "skipped", "Canvas data unavailable"))
@@ -261,7 +347,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                     item for item in snapshot.items if item.source == "assignment"
                 )
                 report = GoogleCalendarSync.from_env(PROJECT_ROOT / ".env").sync_items(
-                    assignments
+                    assignments + material_items
                 )
                 return (
                     f"{len(report.created)} created, {len(report.updated)} updated, "
@@ -274,7 +360,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
         if snapshot is None:
             results.append(StepResult("Digest", "skipped", "Canvas data unavailable"))
         else:
-            deadlines = upcoming_items(snapshot, 48)
+            deadlines = upcoming_items(snapshot.items + material_items, 48)
             if not deadlines:
                 results.append(
                     StepResult("Digest", "skipped", "No deadlines in next 48 hours")

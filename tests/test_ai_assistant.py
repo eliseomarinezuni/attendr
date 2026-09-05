@@ -158,6 +158,45 @@ class AIAssistantTests(unittest.TestCase):
 
         self.assertEqual(result, response)
 
+    def test_extract_major_deadlines_validates_grounded_iso_dates(self):
+        response = [
+            {
+                "title": "Midterm Exam",
+                "due_date": "2026-10-20",
+                "due_time": "13:30",
+                "kind": "exam",
+                "source_evidence": "Midterm Exam: October 20 at 1:30 PM",
+            }
+        ]
+        assistant = AIAssistant("test-key", client=FakeClient([json.dumps(response)]))
+
+        result = assistant.extract_major_deadlines(
+            "Midterm Exam: October 20, 2026 at 1:30 PM",
+            course_name="Algorithms",
+            source_title="Course syllabus",
+        )
+
+        self.assertEqual(result, response)
+
+    def test_extract_major_deadlines_rejects_impossible_dates(self):
+        response = [
+            {
+                "title": "Final Exam",
+                "due_date": "2026-02-30",
+                "due_time": None,
+                "kind": "exam",
+                "source_evidence": "Final Exam: February 30",
+            }
+        ]
+        assistant = AIAssistant("test-key", client=FakeClient([json.dumps(response)]))
+
+        with self.assertRaisesRegex(AIProviderError, "invalid structured data"):
+            assistant.extract_major_deadlines(
+                "Final Exam: February 30, 2026",
+                course_name="Algorithms",
+                source_title="Course syllabus",
+            )
+
     def test_missing_key_and_oversized_material_fail_before_api_call(self):
         with self.assertRaisesRegex(AIConfigurationError, "GEMINI_API_KEY"):
             AIAssistant("")

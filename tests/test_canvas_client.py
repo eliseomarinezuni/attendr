@@ -1,23 +1,22 @@
 from __future__ import annotations
 
+import sys
+import tempfile
+import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-import sys
-import unittest
-
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from canvasapi.exceptions import CanvasException, InvalidAccessToken  # noqa: E402
+from canvasapi.exceptions import CanvasException, InvalidAccessToken
 
-from academic_assistant.canvas_client import (  # noqa: E402
+from academic_assistant.canvas_client import (
     CanvasAuthenticationError,
     CanvasClient,
     CanvasConfigurationError,
 )
-
 
 UTC = timezone.utc
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
@@ -35,6 +34,16 @@ class FakeCourse(SimpleNamespace):
             raise self.announcement_error
         self.announcement_kwargs = kwargs
         return iter(getattr(self, "announcements", []))
+
+    def get_files(self, **kwargs):
+        self.file_kwargs = kwargs
+        return iter(getattr(self, "files", []))
+
+
+class FakeFile(SimpleNamespace):
+    def get_contents(self, *, binary=False):
+        self.binary_requested = binary
+        return self.content
 
 
 class FakeCanvas:
@@ -111,6 +120,8 @@ def course(course_id=1, name="Algorithms", **overrides):
         "html_url": f"https://canvas.example/courses/{course_id}",
         "assignments": [],
         "announcements": [],
+        "files": [],
+        "syllabus_body": "",
     }
     values.update(overrides)
     return FakeCourse(**values)
@@ -166,6 +177,53 @@ class CanvasClientTests(unittest.TestCase):
         self.assertTrue(active_course.assignment_kwargs["override_assignment_dates"])
         self.assertEqual(active_course.assignment_kwargs["include"], ["submission"])
 
+    def test_downloads_syllabus_page_named_and_linked_pdfs_only(self):
+        pdf = b"%PDF-1.4\nminimal test content"
+        active_course = course(
+            syllabus_body='<p>Exam Oct 20</p><a href="/courses/1/files/12">outline</a>',
+            files=[
+                FakeFile(
+                    id=11,
+                    display_name="CSCI_3101U_F26_Syllabus.pdf",
+                    content_type="application/pdf",
+                    size=len(pdf),
+                    content=pdf,
+                    updated_at="2026-09-01T10:00:00Z",
+                ),
+                FakeFile(
+                    id=12,
+                    display_name="CSC 3000.pdf",
+                    content_type="application/pdf",
+                    size=len(pdf),
+                    content=pdf,
+                    updated_at="2026-09-01T10:00:00Z",
+                ),
+                FakeFile(
+                    id=13,
+                    display_name="Lecture 1.pdf",
+                    content_type="application/pdf",
+                    size=len(pdf),
+                    content=pdf,
+                    updated_at="2026-09-01T10:00:00Z",
+                ),
+            ],
+        )
+        client = self.make_client(FakeCanvas([active_course]))
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = client.download_syllabus_materials(directory)
+
+            self.assertEqual(len(report.materials), 3)
+            self.assertTrue(all(item.local_path.is_file() for item in report.materials))
+            titles = {item.title for item in report.materials}
+            self.assertIn("Canvas syllabus page", titles)
+            self.assertIn("CSCI_3101U_F26_Syllabus.pdf", titles)
+            self.assertIn("CSC 3000.pdf", titles)
+            self.assertNotIn("Lecture 1.pdf", titles)
+            self.assertEqual(
+                active_course.file_kwargs["content_types"], ["application/pdf"]
+            )
+
     def test_upcoming_window_includes_boundaries_and_excludes_invalid_dates(self):
         active_course = course(
             assignments=[
@@ -179,7 +237,10 @@ class CanvasClientTests(unittest.TestCase):
 
         self.assertEqual([item.source_id for item in snapshot.items], ["1", "2"])
         self.assertTrue(
-            any("Skipped malformed assignment" in warning for warning in snapshot.warnings)
+            any(
+                "Skipped malformed assignment" in warning
+                for warning in snapshot.warnings
+            )
         )
 
     def test_all_day_event_uses_local_midnight(self):
@@ -253,7 +314,9 @@ class CanvasClientTests(unittest.TestCase):
 
     def test_invalid_token_becomes_actionable_authentication_error(self):
         fake = FakeCanvas([], user_error=InvalidAccessToken("bad token"))
-        with self.assertRaisesRegex(CanvasAuthenticationError, "rejected the API token"):
+        with self.assertRaisesRegex(
+            CanvasAuthenticationError, "rejected the API token"
+        ):
             self.make_client(fake).validate_credentials()
 
     def test_invalid_configuration_fails_before_any_request(self):
