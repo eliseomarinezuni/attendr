@@ -211,6 +211,32 @@ class AIAssistantTests(unittest.TestCase):
 
         self.assertEqual(result, response)
 
+    def test_extract_major_deadlines_supplies_verified_timetable_context(self):
+        response = [
+            {
+                "title": "Quiz 1",
+                "due_date": "2026-10-09",
+                "due_time": "15:40",
+                "kind": "quiz",
+                "source_evidence": "October 8 & 9, 2026; Time: Lecture Time",
+            }
+        ]
+        fake = FakeClient([json.dumps(response)])
+        assistant = AIAssistant("test-key", client=fake)
+
+        result = assistant.extract_major_deadlines(
+            "Quiz 1: October 8 & 9, 2026; Time: Lecture Time",
+            course_name="Algorithms",
+            source_title="Course syllabus",
+            schedule_context="Lecture: Friday 15:40-17:00.",
+        )
+
+        prompt = fake.models.calls[0]["contents"]
+        self.assertEqual(result, response)
+        self.assertIn("VERIFIED STUDENT TIMETABLE", prompt)
+        self.assertIn("Lecture: Friday 15:40-17:00", prompt)
+        self.assertIn("Do not return the other section's date", prompt)
+
     def test_extract_major_deadlines_rejects_impossible_dates(self):
         response = [
             {

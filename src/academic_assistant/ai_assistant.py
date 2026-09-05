@@ -447,10 +447,22 @@ class AIAssistant:
         course_name: str,
         source_title: str,
         current_date: date | None = None,
+        schedule_context: str | None = None,
     ) -> list[dict[str, Any]]:
         """Extract validated dated academic items from course material."""
         source_text = self._prepare_source_text(syllabus_text)
         today = current_date or datetime.now(timezone.utc).date()
+        timetable_instruction = ""
+        if schedule_context:
+            timetable_instruction = (
+                "\nVERIFIED STUDENT TIMETABLE:\n"
+                f"{schedule_context}\n"
+                "When a syllabus row gives different dates for multiple sections, select "
+                "only the date matching this timetable's weekday and time. Do not return "
+                "the other section's date. A relative value such as 'Week 10 lecture' may "
+                "be resolved only when the term start and timetable make one date "
+                "unambiguous; otherwise omit it.\n"
+            )
         prompt = (
             "Extract every explicitly dated academic item from the course material below. "
             "Include assignments, exams, quizzes, projects, presentations, labs, tutorials, "
@@ -464,6 +476,7 @@ class AIAssistant:
             f"COURSE: {json.dumps(course_name)}\n"
             f"SOURCE: {json.dumps(source_title)}\n"
             f"REFERENCE DATE: {today.isoformat()}\n"
+            f"{timetable_instruction}"
             f"SYLLABUS MATERIAL (JSON string):\n{json.dumps(source_text)}"
         )
         deadlines = self._generate_validated(
