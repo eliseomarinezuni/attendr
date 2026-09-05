@@ -453,7 +453,12 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 university_dates = (
                     schedule.academic_calendar_items() if schedule is not None else ()
                 )
-                calendar_items = canvas_items + derived + university_dates
+                class_sessions = (
+                    schedule.scheduled_class_items() if schedule is not None else ()
+                )
+                calendar_items = (
+                    canvas_items + derived + university_dates + class_sessions
+                )
                 report = GoogleCalendarSync.from_env(PROJECT_ROOT / ".env").sync_items(
                     calendar_items
                 )

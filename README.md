@@ -24,7 +24,7 @@ Useful modes:
 .venv/bin/python main.py --quiz-only --quiz-pdf data/materials/lecture.pdf
 ```
 
-The default run sends unseen announcements, extracts dated items from syllabuses and all recent announcements, syncs deadlines plus Ontario Tech academic dates, sends a 48-hour digest, and retries any post-lecture quiz waiting for slides. Canvas assignments override announcements; newest announcements override syllabuses. A date without a stated time is placed at 11:59 PM the day before.
+The default run sends unseen announcements, extracts dated items from syllabuses and all recent announcements, syncs deadlines plus Ontario Tech academic dates and every lecture/lab/tutorial in the verified timetable, sends a 48-hour digest, and retries any post-lecture quiz waiting for slides. Canvas assignments override announcements; newest announcements override syllabuses. A date without a stated time is placed at 11:59 PM the day before.
 
 `--lecture-quizzes` scans published Canvas Modules for the lecture that just ended. It reads PDF, PowerPoint (`.pptx`), and Canvas Page content; labs/tutorials never produce quizzes. Each quiz contains two conceptual multiple-choice questions and one short-answer active-recall question. The verified Fall 2026 timetable and no-class dates are in `data/course_schedule.json`.
 

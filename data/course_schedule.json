@@ -13,6 +13,7 @@
   "courses": [
     {
       "key": "computer-graphics",
+      "name": "Computer Graphics & Visualization",
       "match": ["computer graphics", "graphics and visualization", "csci 4110"],
       "sessions": [
         {"weekday": 0, "start": "17:10", "end": "18:30", "type": "lab"},
@@ -22,6 +23,7 @@
     },
     {
       "key": "algorithms",
+      "name": "Analysis & Design of Algorithms",
       "match": ["analysis and design of algorithms", "analys. & design of algorithms", "csci 3070"],
       "sessions": [
         {"weekday": 1, "start": "11:10", "end": "12:30", "type": "tutorial"},
@@ -31,6 +33,7 @@
     },
     {
       "key": "web-development",
+      "name": "Web Development",
       "match": ["web development", "web dev", "csci 3230"],
       "sessions": [
         {"weekday": 1, "start": "12:40", "end": "14:00", "type": "lecture"},
@@ -40,6 +43,7 @@
     },
     {
       "key": "ethics",
+      "name": "Ethics, Law & Social Impact of Computing",
       "match": ["ethics, law", "eth., law", "impact of computing", "csci 4040"],
       "sessions": [
         {"weekday": 3, "start": "11:10", "end": "14:00", "type": "lecture"}
@@ -47,6 +51,7 @@
     },
     {
       "key": "mobile-devices",
+      "name": "Mobile Devices",
       "match": ["mobile devices", "csci 3101"],
       "sessions": [
         {"weekday": 0, "start": "20:10", "end": "21:30", "type": "lecture"},
