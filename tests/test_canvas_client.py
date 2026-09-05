@@ -46,6 +46,9 @@ class FakeCourse(SimpleNamespace):
         return iter(getattr(self, "modules", []))
 
     def get_file(self, file_id, **kwargs):
+        direct = getattr(self, "direct_files", {})
+        if str(file_id) in direct:
+            return direct[str(file_id)]
         return next(item for item in self.files if str(item.id) == str(file_id))
 
     def get_page(self, page_url, **kwargs):
@@ -142,6 +145,7 @@ def course(course_id=1, name="Algorithms", **overrides):
         "modules": [],
         "pages": {},
         "page_summaries": [],
+        "direct_files": {},
         "syllabus_body": "",
     }
     values.update(overrides)
@@ -242,8 +246,33 @@ class CanvasClientTests(unittest.TestCase):
             self.assertIn("CSC 3000.pdf", titles)
             self.assertNotIn("Lecture 1.pdf", titles)
             self.assertEqual(
-                active_course.file_kwargs["content_types"], ["application/pdf"]
+                active_course.file_kwargs["content_types"],
+                [
+                    "application/pdf",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                ],
             )
+
+    def test_directly_downloads_linked_file_hidden_from_files_area(self):
+        pdf = b"%PDF-1.4\nhidden but linked syllabus"
+        linked = FakeFile(
+            id=44,
+            display_name="CourseOutline.pdf",
+            content_type="application/pdf",
+            size=len(pdf),
+            content=pdf,
+            updated_at="2026-09-01T10:00:00Z",
+            hidden_for_user=True,
+            locked=False,
+        )
+        active_course = course(
+            syllabus_body='<a href="/courses/1/files/44">Syllabus</a>',
+            direct_files={"44": linked},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(directory)
+        self.assertEqual(len(report.materials), 2)
+        self.assertTrue(any(item.source_id == "44" for item in report.materials))
 
     def test_finds_generic_pdf_linked_from_syllabus_module(self):
         pdf = b"%PDF-1.4\ncourse dates"

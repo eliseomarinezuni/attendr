@@ -14,6 +14,8 @@ from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
+from docx import Document
+from docx.opc.exceptions import PackageNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .ai_assistant import (
@@ -25,9 +27,13 @@ from .ai_assistant import (
     extract_pdf_text_chunks,
 )
 from .canvas_client import AcademicItem, CanvasClient, SyllabusMaterial
+from .course_schedule import CourseSchedule
 
 UTC = timezone.utc
-EXTRACTION_VERSION = 2
+EXTRACTION_VERSION = 3
+DOCX_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
 
 
 class MaterialsConfigurationError(ValueError):
@@ -104,6 +110,7 @@ class CourseMaterialsSync:
         app_timezone: str = "America/Toronto",
         max_file_bytes: int = 25 * 1024 * 1024,
         future_days: int = 550,
+        course_schedule: CourseSchedule | None = None,
         now_provider: Any | None = None,
     ) -> None:
         if max_file_bytes < 1:
@@ -124,6 +131,7 @@ class CourseMaterialsSync:
         self.index_path = Path(index_path).expanduser().resolve()
         self.max_file_bytes = max_file_bytes
         self.future_days = future_days
+        self.course_schedule = course_schedule
         self._now_provider = now_provider or (lambda: datetime.now(UTC))
 
     @classmethod
@@ -142,6 +150,10 @@ class CourseMaterialsSync:
             base_directory,
         )
         max_megabytes = cls._read_positive_int("CANVAS_MATERIAL_MAX_MB", 25)
+        schedule_path = cls._resolve_path(
+            os.getenv("COURSE_SCHEDULE_FILE", "data/course_schedule.json"),
+            base_directory,
+        )
         return cls(
             canvas,
             AIAssistant.from_env(env_file),
@@ -150,6 +162,9 @@ class CourseMaterialsSync:
             app_timezone=os.getenv("APP_TIMEZONE", "America/Toronto"),
             max_file_bytes=max_megabytes * 1024 * 1024,
             future_days=cls._read_positive_int("CANVAS_MATERIAL_FUTURE_DAYS", 550),
+            course_schedule=(
+                CourseSchedule.load(schedule_path) if schedule_path.is_file() else None
+            ),
         )
 
     def sync(self) -> MaterialsSyncReport:
@@ -181,6 +196,13 @@ class CourseMaterialsSync:
                         course_name=material.course_name,
                         source_title=material.title,
                         current_date=local_today,
+                        schedule_context=(
+                            self.course_schedule.context_for_course(
+                                material.course_name
+                            )
+                            if self.course_schedule
+                            else None
+                        ),
                     )
                     deadlines = [
                         MajorDeadline.model_validate(item) for item in raw_deadlines
@@ -226,6 +248,8 @@ class CourseMaterialsSync:
         if material.content_type == "application/pdf":
             chunks = extract_pdf_text_chunks(material.local_path)
             return "\n\n".join(chunk.text for chunk in chunks)
+        if material.content_type == DOCX_CONTENT_TYPE:
+            return self._extract_docx_text(material)
         try:
             raw = material.local_path.read_text(encoding="utf-8")
         except OSError as error:
@@ -239,6 +263,41 @@ class CourseMaterialsSync:
         if not text:
             raise AIInputError(
                 f"Downloaded material contains no text: {material.title}"
+            )
+        return text
+
+    @staticmethod
+    def _extract_docx_text(material: SyllabusMaterial) -> str:
+        try:
+            document = Document(material.local_path)
+        except (OSError, ValueError, KeyError, PackageNotFoundError) as error:
+            raise AIInputError(
+                f"Could not read downloaded Word syllabus: {material.title}"
+            ) from error
+        blocks: list[str] = []
+        blocks.extend(
+            text
+            for paragraph in document.paragraphs
+            if (text := " ".join(paragraph.text.split()))
+        )
+        for table_number, table in enumerate(document.tables, start=1):
+            blocks.append(f"[Table {table_number}]")
+            for row in table.rows:
+                cells = [" ".join(cell.text.split()) for cell in row.cells]
+                row_text = " | ".join(cell for cell in cells if cell)
+                if row_text:
+                    blocks.append(row_text)
+        for section in document.sections:
+            for container in (section.header, section.footer):
+                blocks.extend(
+                    text
+                    for paragraph in container.paragraphs
+                    if (text := " ".join(paragraph.text.split()))
+                )
+        text = "\n".join(blocks).strip()
+        if not text:
+            raise AIInputError(
+                f"Downloaded Word syllabus contains no text: {material.title}"
             )
         return text
 

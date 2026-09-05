@@ -109,6 +109,36 @@ class CourseSchedule:
         name = canvas_name.casefold()
         return any(value in name for value in session.course_match)
 
+    def context_for_course(self, canvas_name: str) -> str | None:
+        matching = [
+            session
+            for session in self.sessions
+            if self.matches_course(session, canvas_name)
+        ]
+        if not matching:
+            return None
+        lines = [
+            f"Fall term: {self.term_start.isoformat()} through {self.term_end.isoformat()}.",
+            "Semester week 1 begins on the term start date.",
+        ]
+        if self.no_class_ranges:
+            ranges = ", ".join(
+                start.isoformat()
+                if start == end
+                else f"{start.isoformat()} through {end.isoformat()}"
+                for start, end in self.no_class_ranges
+            )
+            lines.append(f"No-class dates: {ranges}.")
+        weekday_names = (
+            "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
+        )
+        for session in matching:
+            lines.append(
+                f"{session.activity.title()}: {weekday_names[session.weekday]} "
+                f"{session.start.strftime('%H:%M')}-{session.end.strftime('%H:%M')}."
+            )
+        return "\n".join(lines)
+
     def lecture_number(self, session: ClassSession, day: date) -> int:
         number = 0
         cursor = self.term_start

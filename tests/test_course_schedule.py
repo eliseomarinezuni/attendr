@@ -25,6 +25,21 @@ class CourseScheduleTests(unittest.TestCase):
         self.assertEqual(ethics.start.isoformat(timespec="minutes"), "11:10")
         self.assertEqual(ethics.end.isoformat(timespec="minutes"), "14:00")
 
+    def test_course_context_contains_only_matching_verified_sessions(self):
+        context = self.schedule.context_for_course(
+            "EXMP 2020 XLIST Analys. & Design of Algorithms"
+        )
+
+        self.assertIsNotNone(context)
+        self.assertIn("Lecture: Wednesday 15:40-17:00", context)
+        self.assertIn("Lecture: Friday 15:40-17:00", context)
+        self.assertIn("Tutorial: Tuesday 11:10-12:30", context)
+        self.assertIn("2026-10-13 through 2026-10-18", context)
+        self.assertNotIn("Thursday 12:40", context)
+
+    def test_course_context_returns_none_for_unmatched_course(self):
+        self.assertIsNone(self.schedule.context_for_course("Unrelated Course"))
+
     def test_labs_and_tutorials_never_become_due_quizzes(self):
         now = datetime(2026, 9, 8, 19, 0, tzinfo=self.schedule.timezone)
         due = self.schedule.ended_lecture_sessions(now)

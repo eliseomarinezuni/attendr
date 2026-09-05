@@ -7,6 +7,8 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 
+from docx import Document
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
@@ -123,6 +125,38 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             self.assertTrue(
                 any("Conflicting syllabus dates" in item for item in report.warnings)
             )
+
+    def test_word_syllabus_extracts_paragraphs_and_tables(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "outline.docx"
+            document = Document()
+            document.add_paragraph("Course schedule")
+            table = document.add_table(rows=1, cols=2)
+            table.cell(0, 0).text = "Assignment 1"
+            table.cell(0, 1).text = "October 16, 2026"
+            document.save(path)
+            material = SyllabusMaterial(
+                uid="canvas:syllabus-file:1:9",
+                source_id="9",
+                course_id=1,
+                course_name="Algorithms",
+                title="outline.docx",
+                content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                local_path=path,
+                content_sha256=sha256(path.read_bytes()).hexdigest(),
+                updated_at=None,
+                html_url=None,
+            )
+            ai = FakeAI([deadline("2026-10-16", None)])
+            report = CourseMaterialsSync(
+                FakeCanvas([material]),
+                ai,
+                index_path=root / "index.json",
+                now_provider=lambda: NOW,
+            ).sync()
+        self.assertIn("Assignment 1 | October 16, 2026", ai.calls[0][0])
+        self.assertEqual(report.items[0].due_at_local.isoformat(), "2026-10-15T23:59:00-04:00")
 
 
 if __name__ == "__main__":

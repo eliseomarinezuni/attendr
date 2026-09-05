@@ -31,6 +31,9 @@ SYLLABUS_FILE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 CANVAS_FILE_ID_PATTERN = re.compile(r"/files/(\d+)")
+DOCX_CONTENT_TYPE = (
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+)
 LECTURE_MATERIAL_PATTERN = re.compile(
     r"\b(lecture|lect|week|module|chapter|slides?|deck|lesson|topic|notes?)\b",
     re.IGNORECASE,
@@ -318,7 +321,7 @@ class CanvasClient:
         *,
         max_file_bytes: int = 25 * 1024 * 1024,
     ) -> MaterialDownloadReport:
-        """Download accessible syllabus pages and syllabus-like PDFs read-only."""
+        """Download accessible syllabus pages, PDFs, and Word documents read-only."""
         if max_file_bytes < 1:
             raise CanvasConfigurationError(
                 "Canvas material size limit must be positive."
@@ -358,7 +361,7 @@ class CanvasClient:
 
             try:
                 files = context.resource.get_files(
-                    content_types=["application/pdf"],
+                    content_types=["application/pdf", DOCX_CONTENT_TYPE],
                     sort="updated_at",
                     order="desc",
                 )
@@ -375,15 +378,15 @@ class CanvasClient:
                         or self._attr(file_resource, "content_type", None)
                         or ""
                     ).casefold()
-                    is_pdf = (
-                        content_type == "application/pdf"
-                        or display_name.casefold().endswith(".pdf")
+                    is_supported = (
+                        content_type in {"application/pdf", DOCX_CONTENT_TYPE}
+                        or display_name.casefold().endswith((".pdf", ".docx"))
                     )
                     is_candidate = (
                         bool(SYLLABUS_FILE_PATTERN.search(display_name))
                         or source_id in linked_file_ids
                     )
-                    if not is_pdf or not is_candidate:
+                    if not is_supported or not is_candidate:
                         continue
                     material = self._syllabus_file_material(
                         file_resource,
@@ -391,11 +394,40 @@ class CanvasClient:
                         course_directory,
                         max_file_bytes,
                         warnings,
+                        explicitly_linked=source_id in linked_file_ids,
                     )
                     if material:
                         materials.append(material)
             except (CanvasException, RequestException) as error:
                 warnings.append(self._course_warning("syllabus files", course, error))
+
+            # Canvas may omit files hidden from the Files tab even when a syllabus
+            # page explicitly links them. Direct retrieval preserves that access.
+            for source_id in linked_file_ids:
+                if any(
+                    material.course_id == course.id
+                    and material.source_id == source_id
+                    for material in materials
+                ):
+                    continue
+                try:
+                    file_resource = file_resources.get(source_id) or context.resource.get_file(
+                        source_id
+                    )
+                    material = self._syllabus_file_material(
+                        file_resource,
+                        course,
+                        course_directory,
+                        max_file_bytes,
+                        warnings,
+                        explicitly_linked=True,
+                    )
+                    if material:
+                        materials.append(material)
+                except (CanvasException, RequestException, OSError, ValueError):
+                    warnings.append(
+                        f"Could not download a syllabus-linked file in {course.name}."
+                    )
 
             self._discover_syllabus_in_modules(
                 context.resource,
@@ -429,6 +461,8 @@ class CanvasClient:
         course_directory: Path,
         max_file_bytes: int,
         warnings: list[str],
+        *,
+        explicitly_linked: bool = False,
     ) -> SyllabusMaterial | None:
         source_id = str(self._attr(file_resource, "id", ""))
         display_name = str(
@@ -441,34 +475,47 @@ class CanvasClient:
             or self._attr(file_resource, "content_type", None)
             or ""
         ).casefold()
-        if content_type != "application/pdf" and not display_name.casefold().endswith(".pdf"):
+        is_pdf = content_type == "application/pdf" or display_name.casefold().endswith(
+            ".pdf"
+        )
+        is_docx = content_type == DOCX_CONTENT_TYPE or display_name.casefold().endswith(
+            ".docx"
+        )
+        if not (is_pdf or is_docx):
             return None
-        if bool(self._attr(file_resource, "hidden_for_user", False)) or bool(
-            self._attr(file_resource, "locked", False)
-        ):
+        if bool(self._attr(file_resource, "locked", False)):
+            return None
+        if bool(self._attr(file_resource, "hidden_for_user", False)) and not explicitly_linked:
             return None
         if int(self._attr(file_resource, "size", 0) or 0) > max_file_bytes:
             warnings.append(
-                f"Skipped oversized syllabus PDF in {course.name}: {display_name}."
+                f"Skipped oversized syllabus file in {course.name}: {display_name}."
             )
             return None
         try:
             content = file_resource.get_contents(binary=True)
         except (CanvasException, RequestException):
             warnings.append(
-                f"Could not download syllabus PDF in {course.name}: {display_name}."
+                f"Could not download syllabus file in {course.name}: {display_name}."
             )
             return None
-        if (
-            not isinstance(content, bytes)
-            or len(content) > max_file_bytes
-            or not content.lstrip().startswith(b"%PDF-")
-        ):
+        valid_content = (
+            isinstance(content, bytes)
+            and len(content) <= max_file_bytes
+            and (
+                (is_pdf and content.lstrip().startswith(b"%PDF-"))
+                or (is_docx and self._valid_docx(content))
+            )
+        )
+        if not valid_content:
             warnings.append(
-                f"Skipped invalid syllabus PDF in {course.name}: {display_name}."
+                f"Skipped invalid syllabus file in {course.name}: {display_name}."
             )
             return None
-        safe_name = self._safe_filename(display_name, fallback="syllabus.pdf")
+        content_type = "application/pdf" if is_pdf else DOCX_CONTENT_TYPE
+        safe_name = self._safe_filename(
+            display_name, fallback="syllabus.pdf" if is_pdf else "syllabus.docx"
+        )
         path = course_directory / f"{source_id}-{safe_name}"
         self._atomic_write(path, content)
         return SyllabusMaterial(
@@ -477,7 +524,7 @@ class CanvasClient:
             course_id=course.id,
             course_name=course.name,
             title=display_name,
-            content_type="application/pdf",
+            content_type=content_type,
             local_path=path,
             content_sha256=sha256(content).hexdigest(),
             updated_at=self._parse_datetime(
@@ -553,7 +600,12 @@ class CanvasClient:
                         if item_type == "File" and source_id:
                             file = file_resources.get(source_id) or resource.get_file(source_id)
                             material = self._syllabus_file_material(
-                                file, course, course_directory, max_file_bytes, warnings
+                                file,
+                                course,
+                                course_directory,
+                                max_file_bytes,
+                                warnings,
+                                explicitly_linked=True,
                             )
                             if material:
                                 materials.append(material)
@@ -646,7 +698,12 @@ class CanvasClient:
             try:
                 file = file_resources.get(source_id) or resource.get_file(source_id)
                 material = self._syllabus_file_material(
-                    file, course, course_directory, max_file_bytes, warnings
+                    file,
+                    course,
+                    course_directory,
+                    max_file_bytes,
+                    warnings,
+                    explicitly_linked=True,
                 )
                 if material:
                     materials.append(material)
@@ -1240,6 +1297,22 @@ class CanvasClient:
                 return (
                     "[Content_Types].xml" in names
                     and "ppt/presentation.xml" in names
+                    and total_size <= 100 * 1024 * 1024
+                )
+        except (OSError, zipfile.BadZipFile):
+            return False
+
+    @staticmethod
+    def _valid_docx(content: bytes) -> bool:
+        if not content.startswith(b"PK"):
+            return False
+        try:
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                names = set(archive.namelist())
+                total_size = sum(item.file_size for item in archive.infolist())
+                return (
+                    "[Content_Types].xml" in names
+                    and "word/document.xml" in names
                     and total_size <= 100 * 1024 * 1024
                 )
         except (OSError, zipfile.BadZipFile):
