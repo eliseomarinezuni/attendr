@@ -105,3 +105,17 @@ The workflows reconstruct `.env`, Google OAuth files, and the database from repo
 ```
 
 The automated tests use fakes and temporary state. Files under `scripts/test_*.py` are live smoke tests and can write to Google Calendar or Discord.
+
+### Calendar destination and duplicate recovery
+
+Set `GOOGLE_CALENDAR_ID` to the same dedicated Attendr calendar in local `.env` and GitHub Actions secrets. The explicit ID takes precedence over the display name. This prevents local and hosted runs from writing separate copies to different calendars.
+
+For an older installation that also wrote to your primary calendar, preview confirmed cross-calendar duplicates with:
+
+```bash
+.venv/bin/python scripts/repair_calendar_duplicates.py --source-calendar primary
+```
+
+Add `--apply` to remove only Attendr-tagged source events whose stable UID already exists in the configured destination. Each cleanup saves a private JSON backup under `data/` and rechecks the destination before deletion. Unmatched events and personal events are preserved.
+
+Cloud checkpoints are compressed before authenticated encryption. Existing uncompressed checkpoints remain readable. After a failed upload, Attendr checks the remote revision and checksum before retrying, including recovery from a successful write whose response was lost. Public calendars that reject free/busy queries are read through paginated event listings; unavailable calendars still block planning safely.
