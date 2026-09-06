@@ -326,7 +326,6 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
         try:
             canvas_client = CanvasClient.from_env(PROJECT_ROOT / ".env")
             snapshot = canvas_client.fetch_snapshot()
-            inputs_complete = inputs_complete and snapshot.complete
             for warning in snapshot.warnings:
                 logging.getLogger("attendr.snapshot").warning("%s", warning)
             if schedule is not None:
@@ -351,7 +350,13 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                         for item in snapshot.announcements
                         if item.course_id not in excluded_ids
                     ),
+                    complete=(
+                        snapshot.complete
+                        if not snapshot.incomplete_course_ids
+                        else not (set(snapshot.incomplete_course_ids) - excluded_ids)
+                    ),
                 )
+            inputs_complete = inputs_complete and snapshot.complete
             results.append(
                 StepResult(
                     "Canvas",

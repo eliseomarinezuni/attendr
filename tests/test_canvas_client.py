@@ -435,7 +435,10 @@ class CanvasClientTests(unittest.TestCase):
         ).fetch_snapshot()
 
         self.assertTrue(snapshot.complete)
-        self.assertEqual(snapshot.announcements[0].posted_at.isoformat(), "2026-09-03T12:00:00+00:00")
+        self.assertEqual(
+            snapshot.announcements[0].posted_at.isoformat(),
+            "2026-09-03T12:00:00+00:00",
+        )
 
     def test_one_inaccessible_course_adds_warnings_without_losing_other_data(self):
         good = course(
@@ -461,6 +464,7 @@ class CanvasClientTests(unittest.TestCase):
         self.assertEqual(len(snapshot.announcements), 1)
         self.assertEqual(len(snapshot.warnings), 3)
         self.assertTrue(all("Restricted" in warning for warning in snapshot.warnings))
+        self.assertEqual(snapshot.incomplete_course_ids, (2,))
 
     def test_invalid_token_becomes_actionable_authentication_error(self):
         fake = FakeCanvas([], user_error=InvalidAccessToken("bad token"))

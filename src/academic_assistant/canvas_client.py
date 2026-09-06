@@ -131,6 +131,7 @@ class CanvasSnapshot:
     fetched_at: datetime
     complete: bool = True
     removed_uids: tuple[str, ...] = ()
+    incomplete_course_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -359,6 +360,7 @@ class CanvasClient:
             fetched_at=self._now_utc(),
             complete=not incomplete_courses,
             removed_uids=tuple(removed_uids),
+            incomplete_course_ids=tuple(sorted(incomplete_courses)),
         )
 
     def download_syllabus_materials(
