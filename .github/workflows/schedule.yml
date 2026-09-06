@@ -34,6 +34,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
           GOOGLE_TOKEN_B64: ${{ secrets.GOOGLE_TOKEN_B64 }}
+          GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
           GOOGLE_CALENDAR_NAME: ${{ secrets.GOOGLE_CALENDAR_NAME }}
           GOOGLE_STUDY_CALENDAR_NAME: ${{ secrets.GOOGLE_STUDY_CALENDAR_NAME }}
           STUDY_WORKER_URL: ${{ secrets.STUDY_WORKER_URL }}

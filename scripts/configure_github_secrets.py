@@ -61,6 +61,7 @@ def main(argv: list[str] | None = None) -> int:
 
     secrets = {name: str(configuration[name]).strip() for name in required}
     for optional in (
+        "GOOGLE_CALENDAR_ID",
         "GOOGLE_CALENDAR_NAME",
         "GOOGLE_STUDY_CALENDAR_NAME",
         "DAILY_QUIZ_TOPIC",
