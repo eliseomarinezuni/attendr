@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
+from types import SimpleNamespace
 
 from .ai_assistant import (
     AIAssistant,
@@ -17,10 +18,11 @@ from .ai_assistant import (
     AIProviderError,
     extract_pdf_text_chunks,
     extract_powerpoint_text_chunks,
-    send_hybrid_quiz_to_discord,
+    hybrid_quiz_discord_payload,
 )
 from .canvas_client import CanvasClient, LectureMaterial
 from .course_schedule import ClassSession, CourseSchedule
+from .state_store import StateStore
 from .notifier import DiscordNotificationError, DiscordNotifier
 
 UTC = timezone.utc
@@ -62,6 +64,7 @@ class LectureQuizRunner:
         self.schedule = schedule
         self.materials_directory = Path(materials_directory).expanduser().resolve()
         self.state_path = Path(state_path).expanduser().resolve()
+        self.store = StateStore(self.state_path) if self.state_path.suffix != ".json" else None
         self.retry_hours = retry_hours
         self.max_file_bytes = max_file_bytes
 
@@ -70,49 +73,74 @@ class LectureQuizRunner:
         due = self.schedule.ended_lecture_sessions(current, retry_hours=self.retry_hours)
         if not due:
             return LectureQuizReport(0, 0, 0, ())
-        downloads = self.canvas.download_lecture_materials(
+        state = self._load_state() if self.store is None else {"sent": {}}
+        pending = [(session, ended_at) for session, ended_at in due
+                   if force or not self._already_sent(session.session_id(ended_at.date()), state)]
+        already = len(due) - len(pending)
+        if not pending:
+            return LectureQuizReport(0, already, 0, ())
+        needs_materials = any(force or not self.store or not self.store.quiz(f"lecture-quiz:{session.session_id(ended_at.date())}") for session, ended_at in pending)
+        downloads = (self.canvas.download_lecture_materials(
             self.materials_directory,
             excluded_course_patterns=self.schedule.excluded_course_patterns,
             max_file_bytes=self.max_file_bytes,
-        )
-        state = self._load_state()
-        sent = already = waiting = 0
+        ) if needs_materials else SimpleNamespace(materials=(), warnings=()))
+        sent = waiting = 0
         warnings = list(downloads.warnings)
-        for session, ended_at in due:
+        for session, ended_at in pending:
             session_id = session.session_id(ended_at.date())
             if session_id in state.get("sent", {}) and not force:
                 already += 1
                 continue
-            material = self._select_material(session, ended_at, downloads.materials)
-            if material is None:
+            key = f"lecture-quiz:{session_id}"
+            cached = self.store.quiz(key) if self.store and not force else None
+            material = self._select_material(session, ended_at, downloads.materials) if not cached else None
+            if material is None and not cached:
                 waiting += 1
                 continue
             try:
-                source = self._material_text(material)
-                questions = self.ai.generate_hybrid_quiz(source)
-                title = f"{material.course_name} — {material.title}"
-                delivered = send_hybrid_quiz_to_discord(
-                    self.notifier,
-                    title,
-                    questions,
-                    event_key=f"lecture-quiz:{session_id}",
-                    force=force,
+                key = f"lecture-quiz:{session_id}"
+                cached = self.store.quiz(key) if self.store and not force else None
+                if cached:
+                    payload = cached["payload"]
+                else:
+                    source = self._material_text(material)
+                    questions = self.ai.generate_hybrid_quiz(source)
+                    title = f"{material.course_name} — {material.title}"
+                    payload = hybrid_quiz_discord_payload(title, questions)
+                    if self.store and not force:
+                        payload = self.store.save_quiz(key, payload)
+                delivered = self.notifier.send_custom_notification(
+                    key, payload, force=force, destination="lecture_quizzes",
+                    fixed_fingerprint="session",
                 )
                 if delivered:
                     state.setdefault("sent", {})[session_id] = {
                         "sent_at": current.astimezone(UTC).isoformat(),
-                        "material_uid": material.uid,
-                        "content_sha256": material.content_sha256,
+                        "material_uid": material.uid if material else "cached",
+                        "content_sha256": material.content_sha256 if material else "cached",
                     }
-                    self._save_state(state)
+                    if not force:
+                        if self.store:
+                            self.store.complete_quiz(key)
+                        else:
+                            self._save_state(state)
                     sent += 1
                 else:
+                    if self.store and not force:
+                        self.store.complete_quiz(key)
                     already += 1
             except (AIInputError, AIProviderError, DiscordNotificationError, OSError) as error:
                 warnings.append(
-                    f"Quiz failed for {material.course_name}: {type(error).__name__}."
+                    f"Quiz failed for session {session_id}: {type(error).__name__}."
                 )
         return LectureQuizReport(sent, already, waiting, tuple(warnings))
+
+    def _already_sent(self, session_id: str, state: dict[str, object]) -> bool:
+        if self.store:
+            cached = self.store.quiz(f"lecture-quiz:{session_id}")
+            return bool(cached and cached["sent_at"])
+        return session_id in state.get("sent", {})
 
     def _select_material(
         self,
@@ -178,9 +206,11 @@ class LectureQuizRunner:
             return {"version": 1, "sent": {}}
         try:
             value = json.loads(self.state_path.read_text(encoding="utf-8"))
-            return value if isinstance(value, dict) else {"version": 1, "sent": {}}
-        except (OSError, json.JSONDecodeError):
-            return {"version": 1, "sent": {}}
+            if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("sent"), dict):
+                raise ValueError("Unsupported lecture quiz state")
+            return value
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError("Lecture quiz state is unreadable") from error
 
     def _save_state(self, state: dict[str, object]) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)

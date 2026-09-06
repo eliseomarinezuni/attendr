@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import uuid
+import time as monotonic_time
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from hashlib import sha256
@@ -14,6 +16,8 @@ import requests
 from dotenv import load_dotenv
 from googleapiclient.errors import HttpError
 
+from .state_store import StateStore
+from .preferences import Preferences
 from .calendar_sync import (
     CalendarAPIError,
     CalendarSyncReport,
@@ -54,12 +58,51 @@ class StudyRemoteState:
         self.url = url.rstrip("/")
         self.secret = secret
         self.timeout = timeout
+        self.plan_token: str | None = None
+        self.lease_started = 0.0
+        self.state_store: StateStore | None = None
+        self.profile = Preferences().worker_profile()
 
     @classmethod
     def from_env(cls) -> StudyRemoteState | None:
         url = os.getenv("STUDY_WORKER_URL", "").strip()
         secret = os.getenv("STUDY_SYNC_SECRET", "").strip()
+        if bool(url) != bool(secret):
+            raise CalendarAPIError("Both STUDY_WORKER_URL and STUDY_SYNC_SECRET are required for online state.")
         return cls(url, secret) if url and secret else None
+
+    def acquire(self) -> None:
+        self.plan_token = self.plan_token or uuid.uuid4().hex
+        response = requests.post(f"{self.url}/api/plan/acquire", headers={"Authorization": f"Bearer {self.secret}"},
+                                 json={"token": self.plan_token}, timeout=self.timeout)
+        response.raise_for_status()
+        self.lease_started = monotonic_time.monotonic()
+
+    def release(self) -> None:
+        if not self.plan_token:
+            return
+        response = requests.post(f"{self.url}/api/plan/release", headers={"Authorization": f"Bearer {self.secret}"},
+                                 json={"token": self.plan_token}, timeout=self.timeout)
+        response.raise_for_status()
+        self.plan_token = None
+
+    def ensure_lease(self) -> None:
+        if not self.plan_token or monotonic_time.monotonic() - self.lease_started > 15 * 60:
+            raise CalendarAPIError("Study planner lease expired; stop before further calendar writes.")
+
+    def flush_pending(self) -> None:
+        pending = self.state_store.cache_get("pending_study_sync") if self.state_store else None
+        if pending is not None:
+            self._post_sessions(pending)
+
+    def _post_sessions(self, payload: list[dict[str, Any]]) -> None:
+        self.ensure_lease()
+        response = requests.post(f"{self.url}/api/sessions/sync", headers={
+            "Authorization": f"Bearer {self.secret}", "Content-Type": "application/json"},
+            json={"sessions": payload, "plan_token": self.plan_token, "profile": self.profile}, timeout=self.timeout)
+        response.raise_for_status()
+        if self.state_store:
+            self.state_store.cache_set("pending_study_sync", None)
 
     def get_state(self) -> dict[str, Any]:
         response = requests.get(
@@ -81,10 +124,10 @@ class StudyRemoteState:
         for item in sessions:
             event = events.get(item.uid)
             if not event or not event.google_event_id:
-                continue
+                raise CalendarAPIError("Incomplete Calendar mapping; Worker state preserved.")
             deadline = self._task_deadline(item)
             if deadline is None:
-                continue
+                raise CalendarAPIError("Missing study-task deadline; Worker state preserved.")
             payload.append(
                 {
                     "session_id": item.uid,
@@ -98,16 +141,9 @@ class StudyRemoteState:
                     "event_id": event.google_event_id,
                 }
             )
-        response = requests.post(
-            f"{self.url}/api/sessions/sync",
-            headers={
-                "Authorization": f"Bearer {self.secret}",
-                "Content-Type": "application/json",
-            },
-            json={"sessions": payload},
-            timeout=self.timeout,
-        )
-        response.raise_for_status()
+        if self.state_store:
+            self.state_store.cache_set("pending_study_sync", payload)
+        self._post_sessions(payload)
 
     @staticmethod
     def _task_deadline(item: AcademicItem) -> str | None:
@@ -149,7 +185,12 @@ class StudyPlanner:
         calendar_name: str = "Attendr Study Plan",
         remote: StudyRemoteState | None = None,
         now_provider: Any | None = None,
+        state_store: StateStore | None = None,
+        preferences: Preferences | None = None,
     ) -> None:
+        self.state_store = state_store
+        self.preferences = preferences or Preferences()
+        self.WINDOWS = {int(day): tuple((time(start // 60, start % 60), time(end // 60, end % 60)) for start, end in windows) for day, windows in self.preferences.study_windows.items()}
         self.service = service
         self.timezone = ZoneInfo(timezone_name)
         self.calendar_name = calendar_name
@@ -165,12 +206,33 @@ class StudyPlanner:
         service = GoogleCalendarAuthenticator(credentials, token).build_service()
         return cls(
             service,
+            state_store=StateStore(root / os.getenv("ATTENDR_DB", "data/attendr.db")),
+            preferences=Preferences.load(root),
             timezone_name=os.getenv("APP_TIMEZONE", "America/Toronto"),
             calendar_name=os.getenv("GOOGLE_STUDY_CALENDAR_NAME", "Attendr Study Plan"),
             remote=StudyRemoteState.from_env(),
         )
 
-    def sync(self, items: Iterable[AcademicItem]) -> StudyPlanReport:
+    def sync(self, items: Iterable[AcademicItem], *, inputs_complete: bool = False) -> StudyPlanReport:
+        if not inputs_complete:
+            raise CalendarAPIError("Incomplete task data; existing study plan preserved.")
+        if not self.remote:
+            return self._sync(items, inputs_complete=True)
+        self.remote.state_store = self.state_store
+        self.remote.profile = self.preferences.worker_profile()
+        try:
+            self.remote.acquire()
+        except requests.RequestException:
+            raise CalendarAPIError("Could not acquire study planner lease; existing plan preserved.") from None
+        try:
+            self.remote.flush_pending()
+            return self._sync(items, inputs_complete=True)
+        finally:
+            self.remote.release()
+
+    def _sync(self, items: Iterable[AcademicItem], *, inputs_complete: bool = False) -> StudyPlanReport:
+        if not inputs_complete:
+            raise CalendarAPIError("Incomplete task data; existing study plan preserved.")
         now = self.now_provider().astimezone(self.timezone)
         tasks = tuple(
             item
@@ -179,21 +241,41 @@ class StudyPlanner:
             and item.due_at > now.astimezone(UTC)
             and item.submitted is not True
         )
+        remote_state: dict[str, Any] = {}
+        if self.remote:
+            try:
+                remote_state = self.remote.get_state()
+            except (requests.RequestException, ValueError):
+                raise CalendarAPIError("Online study state unavailable; existing study plan preserved.") from None
+            if (
+                not isinstance(remote_state, dict)
+                or remote_state.get("operations_pending", False) is not False
+                or any(
+                    not isinstance(remote_state.get(key), list)
+                    or any(not isinstance(value, str) for value in remote_state[key])
+                    for key in ("completed_tasks", "completed_sessions")
+                )
+                or not isinstance(remote_state.get("rescheduled_sessions"), dict)
+            ):
+                raise CalendarAPIError("Invalid online study state; existing study plan preserved.")
+            for override in remote_state["rescheduled_sessions"].values():
+                try:
+                    start = datetime.fromisoformat(override["start"])
+                    end = datetime.fromisoformat(override["end"])
+                    if start.tzinfo is None or end.tzinfo is None or end <= start:
+                        raise ValueError("invalid interval")
+                except (KeyError, TypeError, ValueError):
+                    raise CalendarAPIError("Invalid rescheduled session; existing study plan preserved.") from None
         calendar = GoogleCalendarSync(
             self.service,
+            state_store=self.state_store,
             calendar_name=self.calendar_name,
             app_timezone=self.timezone.key,
             source_tag="study_plan",
             prune_missing=True,
         )
         study_calendar_id, _ = calendar.resolve_calendar()
-        remote_state: dict[str, Any] = {}
         warnings: list[str] = []
-        if self.remote:
-            try:
-                remote_state = self.remote.get_state()
-            except (requests.RequestException, ValueError):
-                warnings.append("The online study-session state was temporarily unavailable.")
         completed_tasks = set(remote_state.get("completed_tasks", []))
         completed_sessions = set(remote_state.get("completed_sessions", []))
         rescheduled_sessions = remote_state.get("rescheduled_sessions", {})
@@ -212,7 +294,11 @@ class StudyPlanner:
             tasks, busy, completed_sessions, now, rescheduled_sessions
         )
         warnings.extend(planning_warnings)
-        report = calendar.sync_items(sessions)
+        if self.remote:
+            if len(sessions) > 250:
+                raise CalendarAPIError("Study plan exceeds the Worker session limit; existing plan preserved.")
+            self.remote.ensure_lease()
+        report = calendar.sync_items(sessions, before_write=self.remote.ensure_lease if self.remote else None)
         if self.remote:
             try:
                 self.remote.sync_sessions(sessions, report)
@@ -224,28 +310,36 @@ class StudyPlanner:
         self, start: datetime, end: datetime, study_calendar_id: str
     ) -> list[BusyInterval]:
         try:
-            calendars = self.service.calendarList().list(
-                minAccessRole="reader", maxResults=250
-            ).execute().get("items", [])
-            ids = [
-                str(item["id"])
-                for item in calendars
-                if item.get("id") and item.get("id") != study_calendar_id
-            ][:50]
+            calendars = []
+            page_token = None
+            seen_tokens = set()
+            while True:
+                options = {"minAccessRole": "reader", "maxResults": 250}
+                if page_token:
+                    options["pageToken"] = page_token
+                page = self.service.calendarList().list(**options).execute()
+                calendars.extend(page.get("items", []))
+                page_token = page.get("nextPageToken")
+                if not page_token:
+                    break
+                if page_token in seen_tokens:
+                    raise CalendarAPIError("Calendar pagination repeated a token.")
+                seen_tokens.add(page_token)
+            ids = sorted({str(item["id"]) for item in calendars if item.get("id") and item["id"] != study_calendar_id})
             responses: list[dict[str, Any]] = []
             chunk_start = start
             while chunk_start < end:
                 chunk_end = min(chunk_start + timedelta(days=60), end)
-                responses.append(
-                    self.service.freebusy().query(
-                        body={
-                            "timeMin": chunk_start.isoformat(),
-                            "timeMax": chunk_end.isoformat(),
-                            "timeZone": self.timezone.key,
-                            "items": [{"id": value} for value in ids],
-                        }
-                    ).execute()
-                )
+                for offset in range(0, len(ids), 50):
+                    batch = ids[offset:offset + 50]
+                    response = self.service.freebusy().query(body={
+                        "timeMin": chunk_start.isoformat(), "timeMax": chunk_end.isoformat(),
+                        "timeZone": self.timezone.key, "items": [{"id": value} for value in batch],
+                    }).execute()
+                    coverage = response.get("calendars", {})
+                    if any(value not in coverage or coverage[value].get("errors") or not isinstance(coverage[value].get("busy"), list) for value in batch):
+                        raise CalendarAPIError("Google returned incomplete availability; existing study plan preserved.")
+                    responses.append(response)
                 chunk_start = chunk_end
         except HttpError as error:
             raise CalendarAPIError("Could not inspect Google Calendar availability.") from error
@@ -253,12 +347,11 @@ class StudyPlanner:
         for response in responses:
             for details in response.get("calendars", {}).values():
                 for value in details.get("busy", []):
-                    intervals.append(
-                        BusyInterval(
-                            datetime.fromisoformat(value["start"].replace("Z", "+00:00")),
-                            datetime.fromisoformat(value["end"].replace("Z", "+00:00")),
-                        )
-                    )
+                    start_at = datetime.fromisoformat(value["start"].replace("Z", "+00:00"))
+                    end_at = datetime.fromisoformat(value["end"].replace("Z", "+00:00"))
+                    if start_at.tzinfo is None or end_at.tzinfo is None or end_at <= start_at:
+                        raise CalendarAPIError("Google returned an invalid busy interval.")
+                    intervals.append(BusyInterval(start_at, end_at))
         return intervals
 
     def _build_sessions(
@@ -272,13 +365,16 @@ class StudyPlanner:
         requests_to_place: list[tuple[date, datetime, AcademicItem, int, StudyTemplate]] = []
         for task in tasks:
             template = self.TEMPLATES[task.kind]
+            if task.kind in self.preferences.study_minutes:
+                from dataclasses import replace
+                template = replace(template, minutes=self.preferences.study_minutes[task.kind])
             due = task.due_at.astimezone(self.timezone)
             for index in range(template.sessions):
                 fraction = index / max(template.sessions - 1, 1)
                 offset = template.lead_days - round(fraction * (template.lead_days - 1))
                 ideal = due.date() - timedelta(days=offset)
                 requests_to_place.append((ideal, due, task, index, template))
-        requests_to_place.sort(key=lambda value: (value[0], value[1], value[2].uid, value[3]))
+        requests_to_place.sort(key=lambda value: (value[1], -self.preferences.course_priorities.get(str(value[2].course_id), 1), value[0], value[2].uid, value[3]))
 
         overrides: dict[str, tuple[datetime, datetime]] = {}
         for session_id, value in (rescheduled_sessions or {}).items():
@@ -311,7 +407,7 @@ class StudyPlanner:
                 end = override[1].astimezone(self.timezone)
             else:
                 start = self._find_slot(max(ideal, now.date()), due, template.minutes, allocated, used_days, now)
-                end = start + timedelta(minutes=template.minutes) if start else None
+                end = (start.astimezone(UTC) + timedelta(minutes=template.minutes)).astimezone(self.timezone) if start else None
             if start is None:
                 warnings.append(f"No acceptable study slot was available for {task.title}.")
                 continue
@@ -357,8 +453,13 @@ class StudyPlanner:
                 for window_start, window_end in self.WINDOWS[day.weekday()]:
                     candidate = datetime.combine(day, window_start, tzinfo=self.timezone)
                     limit = datetime.combine(day, window_end, tzinfo=self.timezone)
-                    while candidate + timedelta(minutes=minutes) <= limit:
-                        if candidate >= now and not self._overlaps(candidate, candidate + timedelta(minutes=minutes), busy):
+                    if limit.astimezone(UTC).astimezone(self.timezone).replace(fold=0) != limit.replace(fold=0):
+                        continue
+                    while candidate < limit:
+                        start_utc = candidate.astimezone(UTC)
+                        end_utc = start_utc + timedelta(minutes=minutes)
+                        valid_local = start_utc.astimezone(self.timezone).replace(fold=0) == candidate.replace(fold=0)
+                        if valid_local and start_utc >= now.astimezone(UTC) and end_utc <= limit.astimezone(UTC) and not self._overlaps(start_utc, end_utc, busy):
                             return candidate
                         candidate += timedelta(minutes=15)
             day += timedelta(days=1)

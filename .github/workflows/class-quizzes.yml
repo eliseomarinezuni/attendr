@@ -12,59 +12,22 @@ on:
       timezone: "America/Toronto"
   workflow_dispatch:
 
+# This label must identify ONE trusted machine with a persistent ATTENDR_HOME.
 permissions:
-  contents: write
-
+  contents: read
 concurrency:
   group: attendr-scheduled
   cancel-in-progress: false
-
 jobs:
-  quiz:
-    runs-on: ubuntu-latest
+  run:
+    runs-on: [self-hosted, attendr]
     timeout-minutes: 15
+    env:
+      ATTENDR_HOME: ${{ vars.ATTENDR_HOME }}
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
-          cache: pip
-      - run: python -m pip install -r requirements.txt
-      - name: Restore secrets
-        env:
-          CANVAS_BASE_URL: ${{ secrets.CANVAS_BASE_URL }}
-          CANVAS_API_TOKEN: ${{ secrets.CANVAS_API_TOKEN }}
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-          DISCORD_QUIZ_CHANNEL_ID: ${{ secrets.DISCORD_QUIZ_CHANNEL_ID }}
-        run: |
-          {
-            printf 'CANVAS_BASE_URL=%s\n' "$CANVAS_BASE_URL"
-            printf 'CANVAS_API_TOKEN=%s\n' "$CANVAS_API_TOKEN"
-            printf 'APP_TIMEZONE=America/Toronto\n'
-            printf 'CANVAS_MATERIALS_DIR=data/materials\n'
-            printf 'CANVAS_MATERIAL_MAX_MB=25\n'
-            printf 'DISCORD_WEBHOOK_URL=%s\n' "$DISCORD_WEBHOOK_URL"
-            printf 'DISCORD_BOT_TOKEN=%s\n' "$DISCORD_BOT_TOKEN"
-            printf 'DISCORD_QUIZ_CHANNEL_ID=%s\n' "$DISCORD_QUIZ_CHANNEL_ID"
-            printf 'NOTIFICATION_STATE_FILE=data/seen_ids.json\n'
-            printf 'GEMINI_API_KEY=%s\n' "$GEMINI_API_KEY"
-            printf 'GEMINI_MODEL=gemini-3.6-flash\n'
-            printf 'COURSE_SCHEDULE_FILE=data/course_schedule.json\n'
-            printf 'LECTURE_QUIZ_STATE_FILE=data/lecture_quiz_state.json\n'
-            printf 'LECTURE_QUIZ_RETRY_HOURS=30\n'
-          } > .env
-          chmod 600 .env
-      - name: Send due lecture quizzes
-        run: python main.py --lecture-quizzes
-      - name: Persist deduplication state
-        if: always()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/seen_ids.json data/lecture_quiz_state.json
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: persist lecture quiz state [skip ci]"
-            git push
-          fi
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Run with persistent state and refreshed OAuth token
+        run: '"$ATTENDR_HOME/venv/bin/python" scripts/scheduled_run.py --lecture-quizzes'

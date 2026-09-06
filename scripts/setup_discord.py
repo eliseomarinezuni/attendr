@@ -39,7 +39,7 @@ def main() -> int:
         ENV_PATH,
         {
             "DISCORD_WEBHOOK_URL": webhook_url,
-            "NOTIFICATION_STATE_DB": "data/notification_state.db",
+            "ATTENDR_DB": "data/attendr.db",
             "DISCORD_TIMEOUT_SECONDS": "15",
             "DISCORD_MAX_ATTEMPTS": "4",
             "DISCORD_MAX_RATE_LIMIT_WAIT_SECONDS": "60",

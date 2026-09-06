@@ -15,8 +15,6 @@ from typing import Any, Literal
 from dotenv import load_dotenv
 from google import genai
 from google.genai import errors, types
-from google.genai._gaos.errors.genaierror import GenAiError
-from google.genai._gaos.lib.compat_errors import APIError as InteractionAPIError
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -323,7 +321,7 @@ class AIAssistant:
         self.model = model
         self.max_input_chars = max_input_chars
         self._uses_auth_key = api_key.startswith("AQ")
-        self._client = client if client is not None else genai.Client(api_key=api_key)
+        self._client = client if client is not None else genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=60_000))
 
     @classmethod
     def from_env(
@@ -541,7 +539,7 @@ class AIAssistant:
                 raise AIProviderError(
                     "Gemini returned an empty connection-check response."
                 )
-        except (errors.APIError, GenAiError, InteractionAPIError) as error:
+        except Exception as error:
             raise self._safe_provider_error(error, "connection check") from None
 
     def _generate_validated(
@@ -591,12 +589,8 @@ class AIAssistant:
                     ),
                 )
                 raw_text = str(response.text or "")
-        except (errors.APIError, GenAiError, InteractionAPIError) as error:
+        except Exception as error:
             raise self._safe_provider_error(error, task_name) from None
-        except (AttributeError, TypeError, ValueError):
-            raise AIProviderError(
-                f"Gemini returned no usable response for {task_name}."
-            ) from None
 
         if not raw_text or not raw_text.strip():
             raise AIProviderError(f"Gemini returned an empty response for {task_name}.")
