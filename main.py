@@ -55,6 +55,7 @@ from academic_assistant import (
 )
 
 from academic_assistant.state_store import StateStore
+from academic_assistant.cloud_state import CloudStateError
 from academic_assistant.settings import Settings
 from academic_assistant.preferences import Preferences
 from academic_assistant.triage import AnnouncementTriage
@@ -63,6 +64,7 @@ from academic_assistant.logging_config import configure_logging
 
 UTC = timezone.utc
 KNOWN_ERRORS = (
+    CloudStateError,
     AIConfigurationError,
     AIInputError,
     AIProviderError,

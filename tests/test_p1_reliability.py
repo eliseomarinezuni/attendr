@@ -399,3 +399,23 @@ def test_notification_content_can_change_back_to_previous_value(store):
         assert notifier.send_custom_notification("mutable-announcement", {"content": content})
         assert not notifier.send_custom_notification("mutable-announcement", {"content": content})
     assert len(session.calls) == 4
+
+
+def test_public_calendar_notfound_falls_back_to_paginated_events():
+    from zoneinfo import ZoneInfo
+    service = Mock()
+    service.calendarList().list().execute.return_value = {"items": [{"id": "holidays"}]}
+    service.freebusy().query().execute.return_value = {
+        "calendars": {"holidays": {"errors": [{"reason": "notFound"}]}}
+    }
+    service.events().list().execute.side_effect = [
+        {"items": [{"transparency": "transparent"}], "nextPageToken": "next"},
+        {"items": [{"start": {"date": "2026-09-07"}, "end": {"date": "2026-09-08"}}]},
+    ]
+    planner = object.__new__(StudyPlanner)
+    planner.service, planner.timezone = service, ZoneInfo("America/Toronto")
+    start = datetime(2026, 9, 6, tzinfo=timezone.utc)
+    result = planner._load_busy(start, start + timedelta(days=3), "study")
+    assert len(result) == 1
+    assert result[0].start.isoformat() == "2026-09-07T00:00:00-04:00"
+    assert result[0].end.isoformat() == "2026-09-08T00:00:00-04:00"

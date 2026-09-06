@@ -337,6 +337,11 @@ class StudyPlanner:
                         "timeZone": self.timezone.key, "items": [{"id": value} for value in batch],
                     }).execute()
                     coverage = response.get("calendars", {})
+                    for value in batch:
+                        details = coverage.get(value, {})
+                        errors = details.get("errors", [])
+                        if errors and all(error.get("reason") == "notFound" for error in errors):
+                            coverage[value] = {"busy": self._event_availability(value, chunk_start, chunk_end)}
                     if any(value not in coverage or coverage[value].get("errors") or not isinstance(coverage[value].get("busy"), list) for value in batch):
                         raise CalendarAPIError("Google returned incomplete availability; existing study plan preserved.")
                     responses.append(response)
@@ -353,6 +358,36 @@ class StudyPlanner:
                         raise CalendarAPIError("Google returned an invalid busy interval.")
                     intervals.append(BusyInterval(start_at, end_at))
         return intervals
+
+    def _event_availability(self, calendar_id: str, start: datetime, end: datetime) -> list[dict[str, str]]:
+        """Public calendars can expose events while rejecting free/busy queries."""
+        intervals = []
+        token = None
+        seen = set()
+        while True:
+            page = self.service.events().list(
+                calendarId=calendar_id, timeMin=start.isoformat(), timeMax=end.isoformat(),
+                singleEvents=True, showDeleted=False, maxResults=2500, pageToken=token,
+            ).execute()
+            for event in page.get("items", []):
+                if event.get("status") == "cancelled" or event.get("transparency") == "transparent":
+                    continue
+                interval = {}
+                for field in ("start", "end"):
+                    value = event.get(field, {})
+                    if value.get("dateTime"):
+                        interval[field] = value["dateTime"]
+                    elif value.get("date"):
+                        interval[field] = datetime.fromisoformat(value["date"]).replace(tzinfo=self.timezone).isoformat()
+                    else:
+                        raise CalendarAPIError("Google returned an invalid calendar event interval.")
+                intervals.append(interval)
+            token = page.get("nextPageToken")
+            if not token:
+                return intervals
+            if token in seen:
+                raise CalendarAPIError("Calendar event pagination repeated a token.")
+            seen.add(token)
 
     def _build_sessions(
         self,
