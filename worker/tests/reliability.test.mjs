@@ -237,3 +237,14 @@ test('cloud state requires a lease and enforces revisions', async () => {
   assert.equal(competing.status, 409);
   DB.sqlite.close();
 });
+
+test('public freebusy notFound falls back to paginated events', async () => {
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    if (url.includes('freeBusy')) return Response.json({ calendars: { holidays: { errors: [{ reason: 'notFound' }] } } });
+    if (!url.includes('pageToken')) return Response.json({ items: [{ transparency: 'transparent' }], nextPageToken: 'next' });
+    return Response.json({ items: [{ start: { date: '2026-09-07' }, end: { date: '2026-09-08' } }] });
+  };
+  const busy = await busyIntervals('token', ['holidays'], new Date('2026-09-06Z'), new Date('2026-09-09Z'));
+  assert.deepEqual(busy, [{ start: '2026-09-07T04:00:00.000Z', end: '2026-09-08T04:00:00.000Z' }]);
+});

@@ -7,6 +7,8 @@ import hashlib
 import os
 import sqlite3
 import tempfile
+import time
+import zlib
 from pathlib import Path
 from typing import Any
 
@@ -70,9 +72,11 @@ class CloudStateClient:
             raise CloudStateError("State checkpoint checksum mismatch")
         if len(encrypted) != payload["size"]:
             raise CloudStateError("State checkpoint size mismatch")
-        if len(encrypted) < 13 or encrypted[0] != 1:
+        if len(encrypted) < 13 or encrypted[0] not in (1, 2):
             raise CloudStateError("Unsupported state checkpoint format")
         plaintext = self.cipher.decrypt(encrypted[1:13], encrypted[13:], _AAD)
+        if encrypted[0] == 2:
+            plaintext = zlib.decompress(plaintext)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(plaintext)
         path.chmod(0o600)
@@ -87,20 +91,30 @@ class CloudStateClient:
                 source.backup(target)
             plaintext = Path(snapshot.name).read_bytes()
         nonce = os.urandom(12)
-        encrypted = b"\x01" + nonce + self.cipher.encrypt(nonce, plaintext, _AAD)
+        encrypted = b"\x02" + nonce + self.cipher.encrypt(nonce, zlib.compress(plaintext), _AAD)
         encoded = base64.b64encode(encrypted).decode("ascii")
         chunks = [encoded[index : index + _CHUNK_BYTES] for index in range(0, len(encoded), _CHUNK_BYTES)]
-        response = self.request(
-            "PUT",
-            "/api/state-store",
-            json={
-                "revision": self.revision,
-                "sha256": hashlib.sha256(encrypted).hexdigest(),
-                "size": len(encrypted),
-                "chunks": chunks,
-            },
-        )
-        self.revision = int(response.json()["revision"])
+        payload = {
+            "revision": self.revision,
+            "sha256": hashlib.sha256(encrypted).hexdigest(),
+            "size": len(encrypted),
+            "chunks": chunks,
+        }
+        for attempt in range(3):
+            try:
+                response = self.request("PUT", "/api/state-store", json=payload)
+                self.revision = int(response.json()["revision"])
+                return
+            except CloudStateError:
+                # A lost response may hide a successful commit. Verify before retrying.
+                remote = self.request("GET", "/api/state-store").json()
+                if remote.get("sha256") == payload["sha256"] and remote["revision"] == self.revision + 1:
+                    self.revision = int(remote["revision"])
+                    return
+                if remote["revision"] != self.revision or attempt == 2:
+                    raise
+                time.sleep(attempt + 1)
+
 
 
 def client_from_env(path: Path) -> CloudStateClient | None:

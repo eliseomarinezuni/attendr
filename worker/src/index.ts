@@ -523,6 +523,36 @@ async function allCalendarIds(token: string, excluded: string): Promise<string[]
   return [...ids];
 }
 
+async function eventIntervals(token: string, id: string, start: Date, end: Date): Promise<Array<{ start: string; end: string }>> {
+  const busy: Array<{ start: string; end: string }> = [];
+  const seen = new Set<string>();
+  let pageToken = "";
+  do {
+    const url = new URL(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(id)}/events`);
+    for (const [key, value] of Object.entries({ timeMin: start.toISOString(), timeMax: end.toISOString(), singleEvents: "true", showDeleted: "false", maxResults: "2500" })) url.searchParams.set(key, value);
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+    const response = await boundedFetch(url, { headers: { authorization: `Bearer ${token}` } });
+    if (!response.ok) throw new Error(`Calendar events failed: ${response.status}`);
+    type EventTime = { dateTime?: string; date?: string };
+    const page = await response.json() as { items?: Array<{ status?: string; transparency?: string; start?: EventTime; end?: EventTime }>; nextPageToken?: string };
+    const timestamp = (value?: EventTime): string => {
+      if (value?.dateTime) return value.dateTime;
+      if (value?.date) {
+        const [year, month, day] = value.date.split("-").map(Number);
+        return zonedToUtc(year, month, day, 0, 0).toISOString();
+      }
+      throw new Error("Invalid calendar event interval");
+    };
+    for (const event of page.items ?? []) {
+      if (event.status !== "cancelled" && event.transparency !== "transparent") busy.push({ start: timestamp(event.start), end: timestamp(event.end) });
+    }
+    pageToken = page.nextPageToken ?? "";
+    if (pageToken && seen.has(pageToken)) throw new Error("Calendar event pagination repeated a token");
+    seen.add(pageToken);
+  } while (pageToken);
+  return busy;
+}
+
 async function busyIntervals(token: string, ids: string[], start: Date, end: Date): Promise<Array<{ start: string; end: string }>> {
   const busy: Array<{ start: string; end: string }> = [];
   for (let offset = 0; offset < ids.length; offset += 50) {
@@ -532,9 +562,12 @@ async function busyIntervals(token: string, ids: string[], start: Date, end: Dat
       body: JSON.stringify({ timeMin: start.toISOString(), timeMax: end.toISOString(), timeZone: TIME_ZONE, items: batch.map((id) => ({ id })) }),
     });
     if (!response.ok) throw new Error(`Calendar availability failed: ${response.status}`);
-    const payload = await response.json() as { calendars?: Record<string, { errors?: unknown[]; busy?: Array<{ start: string; end: string }> }> };
+    const payload = await response.json() as { calendars?: Record<string, { errors?: Array<{ reason?: string }>; busy?: Array<{ start: string; end: string }> }> };
     for (const id of batch) {
-      const value = payload.calendars?.[id];
+      let value = payload.calendars?.[id];
+      if (value?.errors?.length && value.errors.every((error) => error.reason === "notFound")) {
+        value = { busy: await eventIntervals(token, id, start, end) };
+      }
       if (!value || value.errors?.length || !Array.isArray(value.busy)) throw new Error("Incomplete calendar availability");
       for (const interval of value.busy) {
         if (!Number.isFinite(Date.parse(interval.start)) || !Number.isFinite(Date.parse(interval.end)) || Date.parse(interval.end) <= Date.parse(interval.start)) throw new Error("Invalid busy interval");
