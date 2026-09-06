@@ -421,7 +421,9 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 materials_report = CourseMaterialsSync.from_env(
                     canvas_client, PROJECT_ROOT / ".env"
                 ).sync(active_course_ids={course.id for course in snapshot.courses})
-                inputs_complete = inputs_complete and not materials_report.warnings
+                inputs_complete = inputs_complete and getattr(
+                    materials_report, "complete", not materials_report.warnings
+                )
                 for warning in materials_report.warnings:
                     logging.getLogger("attendr.materials_report").warning("%s", warning)
                 allowed_course_ids = {course.id for course in snapshot.courses}

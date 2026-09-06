@@ -71,6 +71,7 @@ class MaterialsSyncReport:
     cached_materials_reused: int
     items: tuple[AcademicItem, ...]
     warnings: tuple[str, ...]
+    complete: bool = True
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -181,6 +182,8 @@ class CourseMaterialsSync:
         reused = 0
         changed = False
         warnings = list(downloads.warnings)
+        incomplete_downloads = set(downloads.incomplete_course_ids)
+        blocking_courses: set[int] = set()
         extracted: list[tuple[SyllabusMaterial, MajorDeadline]] = []
         local_today = self._now_local().date()
 
@@ -222,6 +225,7 @@ class CourseMaterialsSync:
                     PDFExtractionError,
                     ValidationError,
                 ):
+                    blocking_courses.add(material.course_id)
                     warnings.append(
                         f"Could not extract deadlines from {material.course_name}: "
                         f"{material.title}."
@@ -246,8 +250,10 @@ class CourseMaterialsSync:
 
         found = {material.uid for material in downloads.materials}
         active_courses = active_course_ids if active_course_ids is not None else {value.course_id for value in index.sources.values()}
+        material_courses = {material.course_id for material in downloads.materials}
         for uid, previous in index.sources.items():
             if uid not in found and previous.course_id in active_courses:
+                blocking_courses.add(previous.course_id)
                 warnings.append(f"Previously indexed syllabus unavailable: {previous.course_name} — {previous.title}; cached deadlines retained for review.")
                 fallback = SyllabusMaterial(uid=uid, source_id=uid, course_id=previous.course_id,
                     course_name=previous.course_name, title=previous.title, content_type="text/html",
@@ -257,13 +263,22 @@ class CourseMaterialsSync:
         if changed:
             self._save_index(index)
 
+        warning_count = len(warnings)
         items = self._normalize_deadlines(extracted, local_today, warnings)
+        normalization_complete = len(warnings) == warning_count
         return MaterialsSyncReport(
             materials_found=len(downloads.materials),
             materials_analyzed=analyzed,
             cached_materials_reused=reused,
             items=items,
             warnings=tuple(warnings),
+            complete=normalization_complete and not (
+                (blocking_courses & active_courses)
+                or {
+                    course_id for course_id in incomplete_downloads
+                    if course_id in active_courses and course_id not in material_courses
+                }
+            ),
         )
 
     def _material_text(self, material: SyllabusMaterial) -> str:

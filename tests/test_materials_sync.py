@@ -25,11 +25,15 @@ NOW = datetime(2026, 9, 5, 12, 0, tzinfo=UTC)
 
 
 class FakeCanvas:
-    def __init__(self, materials):
+    def __init__(self, materials, warnings=(), incomplete_course_ids=()):
         self.materials = materials
+        self.warnings = warnings
+        self.incomplete_course_ids = incomplete_course_ids
 
     def download_syllabus_materials(self, directory, *, max_file_bytes):
-        return MaterialDownloadReport(tuple(self.materials), ())
+        return MaterialDownloadReport(
+            tuple(self.materials), tuple(self.warnings), tuple(self.incomplete_course_ids)
+        )
 
 
 class FakeAI:
@@ -187,6 +191,25 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             ).sync()
         self.assertIn("Assignment 1 | October 16, 2026", ai.calls[0][0])
         self.assertEqual(report.items[0].due_at_local.isoformat(), "2026-10-16T00:00:00-04:00")
+
+    def test_optional_route_failure_is_complete_when_course_has_material(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "syllabus.html"
+            path.write_text("<p>Course outline</p>")
+            material = self.make_material(path)
+            report = CourseMaterialsSync(
+                FakeCanvas(
+                    [material],
+                    warnings=("Could not retrieve syllabus files",),
+                    incomplete_course_ids=(1,),
+                ),
+                FakeAI([]),
+                index_path=root / "index.json",
+                now_provider=lambda: NOW,
+            ).sync(active_course_ids={1})
+
+        self.assertTrue(report.complete)
 
 
 if __name__ == "__main__":
