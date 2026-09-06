@@ -746,7 +746,9 @@ def send_quiz_to_discord(
         topic_hash = sha256(topic.strip().encode("utf-8")).hexdigest()[:16]
         utc_date = datetime.now(timezone.utc).date().isoformat()
         event_key = f"daily-quiz:{utc_date}:{topic_hash}"
-    return notifier.send_custom_notification(event_key, payload, force=force)
+    return notifier.send_custom_notification(
+        event_key, payload, force=force, destination="lecture_quizzes"
+    )
 
 
 def hybrid_quiz_discord_payload(
@@ -816,7 +818,10 @@ def send_hybrid_quiz_to_discord(
     force: bool = False,
 ) -> bool:
     return notifier.send_custom_notification(
-        event_key, hybrid_quiz_discord_payload(topic, questions), force=force
+        event_key,
+        hybrid_quiz_discord_payload(topic, questions),
+        force=force,
+        destination="lecture_quizzes",
     )
 
 

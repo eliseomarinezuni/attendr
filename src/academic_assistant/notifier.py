@@ -196,12 +196,14 @@ class JsonNotificationState:
 
 
 class DiscordNotifier:
-    """Format and send academic notifications through a Discord webhook."""
+    """Format and route academic notifications to dedicated Discord channels."""
 
     def __init__(
         self,
         webhook_url: str,
         *,
+        bot_token: str | None = None,
+        channel_ids: Mapping[str, str] | None = None,
         state_path: str | os.PathLike[str] = "data/notification_state.db",
         app_timezone: str = "America/Toronto",
         timeout_seconds: float = 15.0,
@@ -212,6 +214,12 @@ class DiscordNotifier:
         now_provider: Callable[[], datetime] | None = None,
     ) -> None:
         self._webhook_url = self._validate_webhook_url(webhook_url)
+        self._bot_token = (bot_token or "").strip()
+        self._channel_ids = {
+            str(name): self._validate_channel_id(value)
+            for name, value in (channel_ids or {}).items()
+            if str(value).strip()
+        }
         if timeout_seconds <= 0:
             raise DiscordConfigurationError(
                 "Discord timeout must be greater than zero."
@@ -264,6 +272,12 @@ class DiscordNotifier:
         )
         return cls(
             webhook_url,
+            bot_token=os.getenv("DISCORD_BOT_TOKEN") or None,
+            channel_ids={
+                "announcements": os.getenv("DISCORD_ANNOUNCEMENTS_CHANNEL_ID", ""),
+                "calendar_updates": os.getenv("DISCORD_CALENDAR_CHANNEL_ID", ""),
+                "lecture_quizzes": os.getenv("DISCORD_QUIZ_CHANNEL_ID", ""),
+            },
             state_path=state_path,
             app_timezone=os.getenv("APP_TIMEZONE", "America/Toronto"),
             timeout_seconds=cls._read_positive_float("DISCORD_TIMEOUT_SECONDS", 15.0),
@@ -276,14 +290,20 @@ class DiscordNotifier:
     def send_assignment_alert(self, item: AcademicItem, *, force: bool = False) -> bool:
         """Send one assignment/exam/quiz alert; return False when already sent."""
         payload = self.assignment_payload(item)
-        return self._send_once(f"assignment:{item.uid}", payload, force=force)
+        return self._send_once(
+            f"assignment:{item.uid}", payload, force=force,
+            destination="announcements",
+        )
 
     def send_announcement_alert(
         self, announcement: Announcement, *, force: bool = False
     ) -> bool:
         """Send one announcement alert; return False when already sent."""
         payload = self.announcement_payload(announcement)
-        return self._send_once(f"announcement:{announcement.uid}", payload, force=force)
+        return self._send_once(
+            f"announcement:{announcement.uid}", payload, force=force,
+            destination="announcements",
+        )
 
     def send_custom_notification(
         self,
@@ -291,12 +311,15 @@ class DiscordNotifier:
         payload: Mapping[str, Any],
         *,
         force: bool = False,
+        destination: str = "announcements",
     ) -> bool:
         """Send an application-defined payload using the existing safe webhook flow."""
         event_key = event_key.strip()
         if not event_key:
             raise ValueError("Custom notification event_key cannot be empty.")
-        return self._send_once(f"custom:{event_key}", payload, force=force)
+        return self._send_once(
+            f"custom:{event_key}", payload, force=force, destination=destination
+        )
 
     def send_daily_digest(
         self,
@@ -317,6 +340,7 @@ class DiscordNotifier:
             payload,
             force=force,
             fixed_fingerprint="daily",
+            destination="announcements",
         )
 
     def notify_snapshot(
@@ -470,23 +494,40 @@ class DiscordNotifier:
         *,
         force: bool,
         fixed_fingerprint: str | None = None,
+        destination: str = "announcements",
     ) -> bool:
         fingerprint = fixed_fingerprint or self._fingerprint(payload)
-        if not force and self.state.was_sent(event_key, fingerprint):
+        routed_key = f"{destination}:{event_key}"
+        if not force and self.state.was_sent(routed_key, fingerprint):
             return False
-        self._post(payload)
+        self._post(payload, destination)
         # Forced test sends remain repeatable and do not consume the real alert state.
         if not force:
-            self.state.mark_sent(event_key, fingerprint)
+            self.state.mark_sent(routed_key, fingerprint)
         return True
 
-    def _post(self, payload: Mapping[str, Any]) -> None:
+    def _post(self, payload: Mapping[str, Any], destination: str) -> None:
+        channel_id = self._channel_ids.get(destination)
+        use_bot = bool(self._bot_token and channel_id)
+        url = (
+            f"https://discord.com/api/v10/channels/{channel_id}/messages"
+            if use_bot
+            else self._webhook_url
+        )
+        outgoing = dict(payload)
+        if use_bot:
+            outgoing.pop("username", None)
         for attempt in range(1, self.max_attempts + 1):
             try:
                 response = self._session.post(
-                    self._webhook_url,
-                    params={"wait": "true"},
-                    json=dict(payload),
+                    url,
+                    params=None if use_bot else {"wait": "true"},
+                    headers=(
+                        {"Authorization": f"Bot {self._bot_token}"}
+                        if use_bot
+                        else None
+                    ),
+                    json=outgoing,
                     timeout=self.timeout_seconds,
                 )
             except requests.RequestException:
@@ -516,7 +557,7 @@ class DiscordNotifier:
                 continue
             raise DiscordNotificationError(
                 f"Discord rejected the webhook request with HTTP {response.status_code}. "
-                "Check that the webhook still exists and can post in the channel."
+                "Check that Attendr can still post in the configured channel."
             )
 
         raise DiscordNotificationError("Discord notification failed unexpectedly.")
@@ -560,6 +601,15 @@ class DiscordNotifier:
                 "DISCORD_WEBHOOK_URL must be the complete HTTPS URL copied from Discord."
             )
         return value
+
+    @staticmethod
+    def _validate_channel_id(value: str) -> str:
+        channel_id = str(value).strip()
+        if not channel_id.isdigit():
+            raise DiscordConfigurationError(
+                "Discord channel IDs must contain digits only."
+            )
+        return channel_id
 
     @staticmethod
     def _safe_link(value: str | None) -> str | None:

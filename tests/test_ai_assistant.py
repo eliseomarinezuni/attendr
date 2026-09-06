@@ -70,8 +70,10 @@ class FakeNotifier:
     def __init__(self):
         self.calls = []
 
-    def send_custom_notification(self, event_key, payload, *, force=False):
-        self.calls.append((event_key, payload, force))
+    def send_custom_notification(
+        self, event_key, payload, *, force=False, destination="announcements"
+    ):
+        self.calls.append((event_key, payload, force, destination))
         return True
 
 
@@ -328,6 +330,7 @@ class AIAssistantTests(unittest.TestCase):
         self.assertTrue(sent)
         self.assertEqual(notifier.calls[0][0], "test-quiz")
         self.assertTrue(notifier.calls[0][2])
+        self.assertEqual(notifier.calls[0][3], "lecture_quizzes")
 
 
 if __name__ == "__main__":

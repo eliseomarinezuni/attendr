@@ -40,6 +40,8 @@ The older manual `--daily-quiz` mode uses `DAILY_QUIZ_TOPIC`, `--topic`, `--quiz
 
 Discord sends are recorded only after success. `data/seen_ids.json` is used in GitHub Actions. Google Calendar deduplicates independently with each Canvas UID in `extendedProperties.private` and updates an existing event when its Canvas data changes.
 
+Discord is separated by purpose: Canvas announcements, deadline alerts, and digests go to `#announcements`; created/changed Calendar items go to `#calendar-updates`; post-lecture quizzes go to `#lecture-quizzes`; interactive reminders remain in `#study-sessions`.
+
 Attendr also creates a separate `Attendr Study Plan` calendar. It places a small number of conflict-free study blocks before each assignment, quiz, project, presentation, midterm, or exam. Regular work uses 30–45 minute sessions; exams use 60 minutes. Thursday is excluded, Wednesday/Friday 6–8 PM is blocked, and existing readable Google calendars are respected. One study block is scheduled per day.
 
 The free Cloudflare Worker under `worker/` stays online when the computer is off. Every five minutes it checks D1 for sessions that are starting and posts buttons in `#study-sessions`: **Session complete**, **Reschedule**, and **Task complete**. Completion removes the corresponding Calendar block; task completion removes all remaining blocks for that task. The Python planner and Worker share only opaque IDs and session metadata through an authenticated endpoint.

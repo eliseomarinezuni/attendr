@@ -482,25 +482,36 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                     calendar_items, delete_uids=replaced_exam_uids
                 )
                 items_by_uid = {item.uid: item for item in calendar_items}
-                for entry in report.updated:
-                    changed_item = items_by_uid[entry.canvas_uid]
+                for entry in report.created + report.updated + report.deleted:
+                    changed_item = items_by_uid.get(entry.canvas_uid)
+                    action_text = {
+                        "created": "added to",
+                        "updated": "updated in",
+                        "deleted": "removed from",
+                    }[entry.action]
+                    detail = (
+                        f"Current time: {changed_item.due_at_local.strftime('%Y-%m-%d %I:%M %p %Z')}"
+                        if changed_item is not None
+                        else "The obsolete or replaced calendar entry was removed."
+                    )
                     get_notifier().send_custom_notification(
-                        f"calendar-change:{entry.canvas_uid}",
+                        f"calendar-change:{entry.action}:{entry.canvas_uid}",
                         {
                             "username": "Attendr",
-                            "content": "📅 **Academic calendar item updated**",
+                            "content": f"📅 **Academic calendar item {entry.action}**",
                             "embeds": [
                                 {
                                     "title": entry.title[:256],
                                     "description": (
-                                        "A newer Canvas source changed this calendar event.\n"
-                                        f"Current time: {changed_item.due_at_local.strftime('%Y-%m-%d %I:%M %p %Z')}"
+                                        f"This item was {action_text} Google Calendar.\n"
+                                        f"{detail}"
                                     ),
                                     "color": 0xF59E0B,
                                 }
                             ],
                             "allowed_mentions": {"parse": []},
                         },
+                        destination="calendar_updates",
                     )
                 return (
                     f"{len(report.created)} created, {len(report.updated)} updated, "

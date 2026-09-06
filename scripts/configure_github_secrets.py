@@ -66,6 +66,10 @@ def main(argv: list[str] | None = None) -> int:
         "DAILY_QUIZ_TOPIC",
         "STUDY_WORKER_URL",
         "STUDY_SYNC_SECRET",
+        "DISCORD_BOT_TOKEN",
+        "DISCORD_ANNOUNCEMENTS_CHANNEL_ID",
+        "DISCORD_CALENDAR_CHANNEL_ID",
+        "DISCORD_QUIZ_CHANNEL_ID",
     ):
         value = str(configuration.get(optional) or "").strip()
         if value:
