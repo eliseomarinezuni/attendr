@@ -28,12 +28,9 @@ class CloudStateClient:
         self.secret = secret
         self.lease_token = lease_token
         self.revision = revision
-        try:
-            raw_key = base64.b64decode(key, validate=True)
-        except ValueError as error:
-            raise CloudStateError("ATTENDR_STATE_KEY must be base64") from error
-        if len(raw_key) != 32:
-            raise CloudStateError("ATTENDR_STATE_KEY must encode exactly 32 bytes")
+        if not key:
+            raise CloudStateError("ATTENDR_STATE_KEY must be configured")
+        raw_key = hashlib.sha256(b"attendr-state-key-v1\0" + key.encode("utf-8")).digest()
         self.cipher = AESGCM(raw_key)
 
     @property

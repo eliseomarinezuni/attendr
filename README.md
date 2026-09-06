@@ -92,9 +92,9 @@ Check it with `crontab -l`. The Mac must be awake and online.
 
 ## GitHub Actions automation
 
-Scheduled sync and lecture-quiz workflows run on GitHub-hosted Linux runners, so the Mac may remain off. A Cloudflare D1 lease serializes runs and stores an AES-256-GCM-encrypted SQLite checkpoint after each committed mutation. GitHub holds the encryption key in `ATTENDR_STATE_KEY`; D1 never receives plaintext application state.
+Scheduled sync and lecture-quiz workflows run on GitHub-hosted Linux runners, so the Mac may remain off. A Cloudflare D1 lease serializes runs and stores an AES-256-GCM-encrypted SQLite checkpoint after each committed mutation. The key is derived at runtime from the existing `STUDY_SYNC_SECRET`; D1 never receives plaintext application state.
 
-The workflows reconstruct `.env`, Google OAuth files, and the database from repository secrets. Required secrets are documented by `scripts/configure_github_secrets.py`; deployment also requires `ATTENDR_STATE_KEY`, `STUDY_WORKER_URL`, and `STUDY_SYNC_SECRET`. Missing or revoked Google credentials fail promptly, and scheduled runs never launch interactive OAuth.
+The workflows reconstruct `.env`, Google OAuth files, and the database from repository secrets. Required secrets are documented by `scripts/configure_github_secrets.py`; deployment also requires `STUDY_WORKER_URL` and `STUDY_SYNC_SECRET`. Missing or revoked Google credentials fail promptly, and scheduled runs never launch interactive OAuth.
 
 ## Tests
 
