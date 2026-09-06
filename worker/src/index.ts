@@ -189,7 +189,8 @@ async function writeState(request: Request, env: Env): Promise<Response> {
   const token = stateLeaseToken(request);
   const control = await env.DB.prepare("SELECT revision FROM attendr_state_control WHERE id=1 AND lease_token=? AND lease_until>?")
     .bind(token, Date.now()).first<{ revision: number }>();
-  if (!control || control.revision !== body.revision) return json({ error: "State revision conflict" }, 409);
+  if (!control) return json({ error: "State lease missing or expired" }, 409);
+  if (control.revision !== body.revision) return json({ error: "State revision conflict" }, 409);
   const revision = control.revision + 1;
   const statements = [env.DB.prepare("DELETE FROM attendr_state_chunks")];
   chunks.forEach((chunk, index) => statements.push(
