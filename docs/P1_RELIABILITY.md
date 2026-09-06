@@ -21,7 +21,7 @@ The migration does not infer historical daily quizzes from changing generated-me
 
 Both scheduled workflows use `ubuntu-latest` and share one concurrency group. `scripts/cloud_run.py` acquires an exclusive D1 lease, restores the encrypted SQLite checkpoint, runs the pipeline, and releases the lease. Every committed state change checkpoints before its caller continues. A terminated job leaves a 20-minute lease; a later run safely resumes after expiry.
 
-Configure the integration secrets with `scripts/configure_github_secrets.py`. It derives `ATTENDR_STATE_KEY` from `STUDY_SYNC_SECRET`, so keep that source secret in the local recovery configuration. Rotating or losing it makes the existing checkpoint unreadable. Apply Worker migration `0004_cloud_state.sql` before dispatching either workflow.
+Configure the integration secrets with `scripts/configure_github_secrets.py`. The checkpoint key is derived at runtime from `STUDY_SYNC_SECRET`, so keep that secret in the local recovery configuration. Rotating or losing it makes the existing checkpoint unreadable. Apply Worker migration `0004_cloud_state.sql` before dispatching either workflow.
 
 The OAuth refresh token remains in the encrypted `GOOGLE_TOKEN_B64` repository secret. Access-token refresh does not require a browser. A revoked refresh token fails the run and requires explicit reauthorization with `scripts/setup_google.py`, followed by updating the GitHub secret.
 

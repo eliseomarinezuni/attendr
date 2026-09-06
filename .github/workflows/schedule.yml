@@ -42,5 +42,5 @@ jobs:
         run: bash scripts/restore_ci_config.sh
       - name: Run with durable cloud state
         env:
-          ATTENDR_STATE_KEY: ${{ secrets.ATTENDR_STATE_KEY }}
+          ATTENDR_STATE_KEY: ${{ secrets.STUDY_SYNC_SECRET }}
         run: python scripts/cloud_run.py

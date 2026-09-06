@@ -1,6 +1,4 @@
 import base64
-import hashlib
-import os
 import sqlite3
 from pathlib import Path
 
@@ -33,7 +31,7 @@ def test_encrypted_checkpoint_round_trip(monkeypatch, tmp_path):
         return Response({"revision": remote["revision"]})
 
     monkeypatch.setattr(cloud_state.requests, "request", request)
-    key = base64.b64encode(os.urandom(32)).decode()
+    key = "high-entropy-test-secret"
     source = tmp_path / "source.db"
     with sqlite3.connect(source) as db:
         db.execute("CREATE TABLE value(name TEXT)")
