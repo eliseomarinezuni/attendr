@@ -177,7 +177,8 @@ async function writeState(request: Request, env: Env): Promise<Response> {
   let bytes: Uint8Array;
   try {
     const binary = atob(chunks.join(""));
-    bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
   } catch {
     return json({ error: "Invalid state checkpoint encoding" }, 400);
   }
