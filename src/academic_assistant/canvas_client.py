@@ -1222,7 +1222,11 @@ class CanvasClient:
 
     def _topic_to_announcement(self, topic: Any, course: CourseSummary) -> Announcement:
         source_id = str(self._attr(topic, "id"))
-        posted_at = self._parse_datetime(self._attr(topic, "posted_at", None))
+        posted_at = self._parse_datetime(
+            self._attr(topic, "posted_at", None)
+            or self._attr(topic, "created_at", None)
+            or self._attr(topic, "updated_at", None)
+        )
         if posted_at is None:
             raise ValueError(f"announcement {source_id} has no posted date")
         message_html = str(self._attr(topic, "message", "") or "")

@@ -427,6 +427,16 @@ class CanvasClientTests(unittest.TestCase):
             },
         )
 
+    def test_announcement_uses_created_timestamp_when_posted_timestamp_is_null(self):
+        item = announcement(1, "Delayed announcement", None)
+        item.created_at = "2026-09-03T12:00:00Z"
+        snapshot = self.make_client(
+            FakeCanvas([course(announcements=[item])])
+        ).fetch_snapshot()
+
+        self.assertTrue(snapshot.complete)
+        self.assertEqual(snapshot.announcements[0].posted_at.isoformat(), "2026-09-03T12:00:00+00:00")
+
     def test_one_inaccessible_course_adds_warnings_without_losing_other_data(self):
         good = course(
             1,
