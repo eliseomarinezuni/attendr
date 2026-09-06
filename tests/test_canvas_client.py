@@ -378,7 +378,7 @@ class CanvasClientTests(unittest.TestCase):
         self.assertEqual([item.source_id for item in snapshot.items], ["1", "2"])
         self.assertTrue(
             any(
-                "Skipped malformed assignment" in warning
+                "Skipped undated assignment" in warning
                 for warning in snapshot.warnings
             )
         )

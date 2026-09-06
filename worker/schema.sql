@@ -26,3 +26,32 @@ CREATE TABLE IF NOT EXISTS completed_tasks (
   task_uid TEXT PRIMARY KEY,
   completed_at TEXT NOT NULL
 );
+
+-- Durable, resumable Google/D1 mutations. One active operation per task.
+CREATE TABLE IF NOT EXISTS study_operations (
+  interaction_id TEXT PRIMARY KEY,
+  task_uid TEXT NOT NULL,
+  action TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  status TEXT NOT NULL,
+  lease_until INTEGER NOT NULL,
+  target_start TEXT,
+  target_end TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_active_study_operation
+  ON study_operations(task_uid) WHERE status != 'done';
+
+CREATE TABLE IF NOT EXISTS plan_lease (
+  id INTEGER PRIMARY KEY CHECK(id=1),
+  token TEXT NOT NULL,
+  lease_until INTEGER NOT NULL
+);
+
+-- Rescheduling different tasks must also be serialized: they share availability.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_single_active_study_operation
+  ON study_operations((1)) WHERE status != 'done';
+
+CREATE TABLE IF NOT EXISTS study_preferences (
+  name TEXT PRIMARY KEY,
+  payload TEXT NOT NULL
+);

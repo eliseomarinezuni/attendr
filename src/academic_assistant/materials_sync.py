@@ -28,6 +28,7 @@ from .ai_assistant import (
 )
 from .canvas_client import AcademicItem, CanvasClient, SyllabusMaterial
 from .course_schedule import CourseSchedule
+from .state_store import StateStore
 
 UTC = timezone.utc
 EXTRACTION_VERSION = 3
@@ -53,6 +54,7 @@ class CachedMaterial(BaseModel):
     title: str
     deadlines: list[MajorDeadline]
     extraction_version: int = 1
+    context_hash: str = ""
 
 
 class MaterialsIndex(BaseModel):
@@ -112,6 +114,7 @@ class CourseMaterialsSync:
         future_days: int = 550,
         course_schedule: CourseSchedule | None = None,
         now_provider: Any | None = None,
+        state_store: StateStore | None = None,
     ) -> None:
         if max_file_bytes < 1:
             raise MaterialsConfigurationError("Material size limit must be positive.")
@@ -125,6 +128,7 @@ class CourseMaterialsSync:
             raise MaterialsConfigurationError(
                 f"APP_TIMEZONE is not a valid IANA timezone: {app_timezone}"
             ) from error
+        self.state_store = state_store
         self.canvas = canvas
         self.ai = ai
         self.materials_directory = Path(materials_directory).expanduser().resolve()
@@ -157,6 +161,7 @@ class CourseMaterialsSync:
         return cls(
             canvas,
             AIAssistant.from_env(env_file),
+            state_store=StateStore(cls._resolve_path(os.getenv("ATTENDR_DB", "data/attendr.db"), base_directory)),
             materials_directory=materials_directory,
             index_path=index_path,
             app_timezone=os.getenv("APP_TIMEZONE", "America/Toronto"),
@@ -167,7 +172,7 @@ class CourseMaterialsSync:
             ),
         )
 
-    def sync(self) -> MaterialsSyncReport:
+    def sync(self, *, active_course_ids: set[int] | None = None) -> MaterialsSyncReport:
         downloads = self.canvas.download_syllabus_materials(
             self.materials_directory, max_file_bytes=self.max_file_bytes
         )
@@ -180,11 +185,15 @@ class CourseMaterialsSync:
         local_today = self._now_local().date()
 
         for material in downloads.materials:
+            context_hash = sha256(str((getattr(self.ai, "model", "injected"),
+                self.course_schedule.context_for_course(material.course_name) if self.course_schedule else None,
+                self.timezone.key, EXTRACTION_VERSION)).encode()).hexdigest()
             cached = index.sources.get(material.uid)
             if (
                 cached
                 and cached.content_sha256 == material.content_sha256
                 and cached.extraction_version == EXTRACTION_VERSION
+                and cached.context_hash == context_hash
             ):
                 deadlines = cached.deadlines
                 reused += 1
@@ -217,6 +226,8 @@ class CourseMaterialsSync:
                         f"Could not extract deadlines from {material.course_name}: "
                         f"{material.title}."
                     )
+                    if cached:
+                        extracted.extend((material, deadline) for deadline in cached.deadlines)
                     continue
                 index.sources[material.uid] = CachedMaterial(
                     content_sha256=material.content_sha256,
@@ -225,6 +236,7 @@ class CourseMaterialsSync:
                     title=material.title,
                     deadlines=deadlines,
                     extraction_version=EXTRACTION_VERSION,
+                    context_hash=context_hash,
                 )
                 analyzed += 1
                 changed = True
@@ -232,6 +244,16 @@ class CourseMaterialsSync:
             for deadline in deadlines:
                 extracted.append((material, deadline))
 
+        found = {material.uid for material in downloads.materials}
+        active_courses = active_course_ids if active_course_ids is not None else {value.course_id for value in index.sources.values()}
+        for uid, previous in index.sources.items():
+            if uid not in found and previous.course_id in active_courses:
+                warnings.append(f"Previously indexed syllabus unavailable: {previous.course_name} — {previous.title}; cached deadlines retained for review.")
+                fallback = SyllabusMaterial(uid=uid, source_id=uid, course_id=previous.course_id,
+                    course_name=previous.course_name, title=previous.title, content_type="text/html",
+                    local_path=self.materials_directory, content_sha256=previous.content_sha256,
+                    updated_at=None, html_url=None)
+                extracted.extend((fallback, deadline) for deadline in previous.deadlines)
         if changed:
             self._save_index(index)
 
@@ -345,17 +367,15 @@ class CourseMaterialsSync:
             elif lecture is not None:
                 parsed_time = lecture.start
             else:
-                # A missing time becomes an advance safety reminder.
-                effective_date -= timedelta(days=1)
-                parsed_time = time(23, 59)
+                parsed_time = time.min
             due_local = datetime.combine(
                 effective_date, parsed_time, tzinfo=self.timezone
             )
-            all_day = False
+            all_day = deadline.due_time is None and lecture is None
             duration = timedelta(hours=2 if deadline.kind == "exam" else 1)
             end_local = (
                 datetime.combine(deadline_date, lecture.end, tzinfo=self.timezone)
-                if lecture is not None
+                if lecture is not None and deadline.due_time is None
                 else due_local + duration
             )
             normalized_kind = (
@@ -374,7 +394,7 @@ class CourseMaterialsSync:
                     kind=normalized_kind,
                     due_at=due_local.astimezone(UTC),
                     due_at_local=due_local,
-                    end_at=end_local.astimezone(UTC),
+                    end_at=None if all_day else end_local.astimezone(UTC),
                     all_day=all_day,
                     html_url=material.html_url,
                     updated_at=material.updated_at,
@@ -389,6 +409,10 @@ class CourseMaterialsSync:
         return tuple(sorted(items, key=lambda item: (item.due_at, item.uid)))
 
     def _load_index(self) -> MaterialsIndex:
+        if self.state_store:
+            cached = self.state_store.cache_get("materials")
+            if cached is not None:
+                return MaterialsIndex.model_validate(cached)
         if not self.index_path.exists():
             return MaterialsIndex()
         try:
@@ -401,6 +425,9 @@ class CourseMaterialsSync:
             ) from error
 
     def _save_index(self, index: MaterialsIndex) -> None:
+        if self.state_store:
+            self.state_store.cache_set("materials", index.model_dump(mode="json"))
+            return
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path: Path | None = None
         try:

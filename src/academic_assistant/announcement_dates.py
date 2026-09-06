@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -14,6 +14,8 @@ from zoneinfo import ZoneInfo
 from .ai_assistant import AIAssistant, AIInputError, AIProviderError, MajorDeadline
 from .canvas_client import AcademicItem, Announcement
 from .course_schedule import CourseSchedule
+from .materials_sync import CourseMaterialsSync
+from .state_store import StateStore
 
 UTC = timezone.utc
 
@@ -34,7 +36,9 @@ class AnnouncementDatesSync:
         index_path: str | os.PathLike[str],
         app_timezone: str = "America/Toronto",
         course_schedule: CourseSchedule | None = None,
+        state_store: StateStore | None = None,
     ) -> None:
+        self.state_store = state_store
         self.ai = ai
         self.index_path = Path(index_path).expanduser().resolve()
         self.timezone = ZoneInfo(app_timezone)
@@ -49,9 +53,21 @@ class AnnouncementDatesSync:
         changed = False
         warnings: list[str] = []
         items: list[AcademicItem] = []
-        for announcement in announcements:
+        current = {item.uid: item for item in announcements}
+        # Retain dated corrections beyond the Canvas announcement lookback window.
+        for uid, record in index.items():
+            if uid not in current and isinstance(record, dict) and record.get("source"):
+                source = dict(record["source"])
+                for key in ("posted_at", "posted_at_local"):
+                    source[key] = datetime.fromisoformat(source[key])
+                current[uid] = Announcement(**source)
+        for announcement in sorted(current.values(), key=lambda item: (item.posted_at, item.uid)):
+            if not announcement.message_text.strip():
+                continue
             digest = sha256(
-                f"{announcement.title}\n{announcement.message_text}".encode("utf-8")
+                str(("announcement-v2", getattr(self.ai, "model", "injected"), self.timezone.key,
+                     self.course_schedule.context_for_course(announcement.course_name) if self.course_schedule else None,
+                     announcement.title, announcement.message_text)).encode("utf-8")
             ).hexdigest()
             record = index.get(announcement.uid)
             raw_deadlines: list[dict[str, object]]
@@ -65,6 +81,10 @@ class AnnouncementDatesSync:
                         course_name=announcement.course_name,
                         source_title=f"Announcement: {announcement.title}",
                         current_date=announcement.posted_at_local.date(),
+                        schedule_context=(
+                            self.course_schedule.context_for_course(announcement.course_name)
+                            if self.course_schedule else None
+                        ),
                     )
                 except (AIInputError, AIProviderError):
                     warnings.append(
@@ -74,6 +94,8 @@ class AnnouncementDatesSync:
                 index[announcement.uid] = {
                     "sha256": digest,
                     "deadlines": raw_deadlines,
+                    "source": {key: value.isoformat() if isinstance(value, datetime) else value
+                               for key, value in asdict(announcement).items()},
                 }
                 analyzed += 1
                 changed = True
@@ -111,21 +133,18 @@ class AnnouncementDatesSync:
             effective_date = actual_date
             effective_time = lecture.start
         else:
-            effective_date = actual_date - timedelta(days=1)
-            effective_time = time(23, 59)
+            effective_date = actual_date
+            effective_time = time.min
         due_local = datetime.combine(effective_date, effective_time, tzinfo=self.timezone)
-        normalized_title = " ".join(
-            "".join(character if character.isalnum() else " " for character in deadline.title.casefold()).split()
-        )
-        uid_hash = sha256(normalized_title.encode("utf-8")).hexdigest()[:24]
+        all_day = deadline.due_time is None and lecture is None
         kind = deadline.kind if deadline.kind in {"exam", "quiz", "assignment"} else "assignment"
         end_local = (
             datetime.combine(actual_date, lecture.end, tzinfo=self.timezone)
-            if lecture is not None
+            if lecture is not None and deadline.due_time is None
             else due_local + timedelta(hours=2 if kind == "exam" else 1)
         )
         return AcademicItem(
-            uid=f"canvas:material-deadline:{announcement.course_id}:{uid_hash}",
+            uid=CourseMaterialsSync._deadline_uid(announcement.course_id, deadline.title),
             source="announcement_deadline",
             source_id=announcement.source_id,
             course_id=announcement.course_id,
@@ -134,8 +153,8 @@ class AnnouncementDatesSync:
             kind=kind,
             due_at=due_local.astimezone(UTC),
             due_at_local=due_local,
-            end_at=end_local.astimezone(UTC),
-            all_day=False,
+            end_at=None if all_day else end_local.astimezone(UTC),
+            all_day=all_day,
             html_url=announcement.html_url,
             updated_at=announcement.posted_at,
             points_possible=None,
@@ -147,15 +166,24 @@ class AnnouncementDatesSync:
         )
 
     def _load(self) -> dict[str, object]:
+        if self.state_store:
+            value = self.state_store.cache_get("announcements")
+            if value is not None:
+                return value
         if not self.index_path.exists():
             return {}
         try:
             value = json.loads(self.index_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return value if isinstance(value, dict) else {}
+        except (OSError, json.JSONDecodeError) as error:
+            raise ValueError("Announcement date cache is unreadable.") from error
+        if not isinstance(value, dict):
+            raise ValueError("Announcement date cache must contain an object.")
+        return value
 
     def _save(self, index: dict[str, object]) -> None:
+        if self.state_store:
+            self.state_store.cache_set("announcements", index)
+            return
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, raw_path = tempfile.mkstemp(
             prefix=f".{self.index_path.name}.", dir=self.index_path.parent, text=True

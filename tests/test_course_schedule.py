@@ -51,13 +51,13 @@ class CourseScheduleTests(unittest.TestCase):
         now = datetime(2026, 10, 15, 22, 0, tzinfo=self.schedule.timezone)
         self.assertEqual(self.schedule.ended_lecture_sessions(now), ())
 
-    def test_no_time_academic_dates_are_previous_day_at_1159(self):
+    def test_academic_dates_preserve_stated_date(self):
         item = next(
             value
             for value in self.schedule.academic_calendar_items()
             if value.source_id == "lectures-begin"
         )
-        self.assertEqual(item.due_at_local.isoformat(), "2026-09-07T23:59:00-04:00")
+        self.assertEqual(item.due_at_local.isoformat(), "2026-09-08T00:00:00-04:00")
 
     def test_full_term_expands_all_class_types_and_skips_no_class_week(self):
         items = self.schedule.scheduled_class_items()
@@ -117,10 +117,7 @@ class CourseScheduleTests(unittest.TestCase):
         self.assertEqual(replacement.title, "Midterm")
         self.assertEqual(replacement.uid.split(":")[1], "class-session")
         self.assertEqual(replacement.due_at_local.strftime("%H:%M"), "11:10")
-        self.assertEqual(
-            replacement.end_at.astimezone(self.schedule.timezone).strftime("%H:%M"),
-            "14:00",
-        )
+        self.assertIsNone(replacement.end_at)
         self.assertEqual(removed, frozenset({midterm.uid}))
         self.assertEqual(len(merged), 156)
 

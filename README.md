@@ -6,8 +6,10 @@ Read-only Canvas ingestion, automatic syllabus/announcement date extraction, Goo
 
 ```bash
 python3.11 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements.lock
 cp .env.example .env
+# Fill in .env and download Desktop OAuth credentials first.
+.venv/bin/python scripts/setup_google.py
 .venv/bin/python main.py
 ```
 
@@ -25,7 +27,7 @@ Useful modes:
 .venv/bin/python main.py --quiz-only --quiz-pdf data/materials/lecture.pdf
 ```
 
-The default run sends unseen announcements, extracts dated items from syllabuses and all recent announcements, syncs deadlines plus Ontario Tech academic dates and every lecture/lab/tutorial in the verified timetable, sends a 48-hour digest, and retries any post-lecture quiz waiting for slides. Canvas assignments override announcements; newest announcements override syllabuses. A date without a stated time is placed at 11:59 PM the day before. The exception is a same-course midterm or exam on an unambiguous lecture date: Attendr uses that lecture's exact time and replaces the lecture event, so the calendar never shows both simultaneously.
+The default run sends unseen announcements, extracts dated items from syllabuses and all recent announcements, syncs deadlines plus Ontario Tech academic dates and every lecture/lab/tutorial in the verified timetable, sends a configurable digest (72 hours by default), and retries any post-lecture quiz waiting for slides. Canvas assignments override announcements; newest announcements override syllabuses. A date without a stated time remains an all-day event on its stated date. Academic date ranges use an exclusive next-day end. The exception is a same-course midterm or exam on an unambiguous lecture date: when the source omits the time, Attendr uses that lecture slot. Explicit exam times are preserved when replacing a lecture occurrence.
 
 `--lecture-quizzes` scans published Canvas Modules for the lecture that just ended. It reads PDF, PowerPoint (`.pptx`), and Canvas Page content; labs/tutorials never produce quizzes. Each quiz contains two conceptual multiple-choice questions and one short-answer active-recall question. The verified Fall 2026 timetable and no-class dates are in `data/course_schedule.json`.
 
@@ -38,7 +40,7 @@ The older manual `--daily-quiz` mode uses `DAILY_QUIZ_TOPIC`, `--topic`, `--quiz
 }
 ```
 
-Discord sends are recorded only after success. `data/seen_ids.json` is used in GitHub Actions. Google Calendar deduplicates independently with each Canvas UID in `extendedProperties.private` and updates an existing event when its Canvas data changes.
+Production state lives in `ATTENDR_DB` (`data/attendr.db`): durable notification delivery, Calendar mappings, quiz history, and extraction caches. Calendar events have deterministic IDs and are checked for actual field changes. Read [P1 migration, recovery, and deployment instructions](docs/P1_RELIABILITY.md) before upgrading an existing scheduled installation.
 
 Discord is separated by purpose: Canvas announcements, deadline alerts, and digests go to `#announcements`; created/changed Calendar items go to `#calendar-updates`; post-lecture quizzes go to `#lecture-quizzes`; interactive reminders remain in `#study-sessions`.
 
@@ -46,7 +48,17 @@ Attendr also creates a separate `Attendr Study Plan` calendar. It places a small
 
 The free Cloudflare Worker under `worker/` stays online when the computer is off. Every five minutes it checks D1 for sessions that are starting and posts buttons in `#study-sessions`: **Session complete**, **Reschedule**, and **Task complete**. Completion removes the corresponding Calendar block; task completion removes all remaining blocks for that task. The Python planner and Worker share only opaque IDs and session metadata through an authenticated endpoint.
 
-Attendr first reads the Canvas Syllabus tab, then searches Files, Modules, module-linked files/Pages, and standalone syllabus/course-outline Pages. Explicit syllabus links are fetched directly even when Canvas hides the source from the general Files area. PDF and Word (`.docx`) syllabuses are supported, including Word tables. Not finding a syllabus is non-fatal. Downloads are stored under `data/materials/course-<id>/` and excluded from Git. `data/materials_index.json` stores only content hashes and validated extracted deadlines, so unchanged documents do not consume Gemini quota again. Live Canvas assignments win over matching syllabus findings. Conflicting extracted dates are skipped and reported rather than guessed. Date changes for the same course/deadline title update the existing Google event; Attendr never automatically deletes Calendar events.
+Attendr first reads the Canvas Syllabus tab, then searches Files, Modules, module-linked files/Pages, and standalone syllabus/course-outline Pages. Explicit syllabus links are fetched directly even when Canvas hides the source from the general Files area. PDF and Word (`.docx`) syllabuses are supported, including Word tables. Not finding a syllabus is non-fatal. Downloads are stored under `data/materials/course-<id>/` and excluded from Git. The SQLite extraction cache stores content hashes, context fingerprints, and validated extracted deadlines so unchanged documents do not consume Gemini quota again. Existing JSON indexes are accepted as migration inputs. Live Canvas assignments win over matching syllabus findings. Conflicting extracted dates are skipped and reported rather than guessed. Date changes for the same course/deadline title update the existing Google event. Attendr can delete replaced exam entries and obsolete managed study blocks. Failed or incomplete Canvas/material/announcement input blocks calendar reconciliation; unread announcements can still be delivered. An unavailable or malformed Worker state blocks study-plan writes. These guards preserve existing events until a complete run succeeds.
+
+`--no-materials` skips timetable replacement and study-plan reconciliation because it omits a required source. It can still sync available Canvas and announcement dates. Undated Canvas assignments are reported and omitted from scheduling without marking the whole fetch incomplete.
+
+Canvas API requests and file downloads use 5-second connect and 15-second read timeouts. Read requests retry up to three total attempts for timeouts, connection failures, HTTP 429, and HTTP 500/502/503/504. Retry-After waits longer than 15 seconds are deferred to a later run.
+
+## Personalized planning and review
+
+[P2 features](docs/P2_FEATURES.md) add configurable study windows, session durations and course priorities; explainable announcement triage with explicit mute rules; and spaced quiz reviews with `again` / `good` / `easy` grades. Edit `data/preferences.json`. Reviews run with the normal pipeline or `main.py --review-only`; grade locally with `scripts/review.py` against the same database.
+
+P2 upgrades the local database to schema version 2 and adds a Worker preferences migration. Follow the [P2 upgrade instructions](docs/P2_FEATURES.md#upgrade) before rollout.
 
 ## Local automation
 
@@ -80,42 +92,16 @@ Check it with `crontab -l`. The Mac must be awake and online.
 
 ## GitHub Actions automation
 
-`.github/workflows/schedule.yml` runs every two hours for deadline/announcement sync and late-slide retries. `.github/workflows/class-quizzes.yml` runs at each lecture end time; GitHub may start scheduled jobs a few minutes late. Both persist deduplication state. The repository should remain private because this state reveals academic activity.
+Scheduled sync and lecture-quiz workflows use a single persistent self-hosted runner labelled `attendr`, with the `ATTENDR_HOME` repository variable pointing outside its checkout. They need only `contents: read`; database and refreshed OAuth tokens stay on the runner. Hosted GitHub runners continue to execute the test workflow.
 
-Required repository secrets:
-
-- `CANVAS_BASE_URL`
-- `CANVAS_API_TOKEN`
-- `DISCORD_WEBHOOK_URL`
-- `GEMINI_API_KEY`
-- `GOOGLE_CREDENTIALS_B64`
-- `GOOGLE_TOKEN_B64`
-- Optional: `GOOGLE_CALENDAR_NAME`, `DAILY_QUIZ_TOPIC`
-- For study controls: `GOOGLE_STUDY_CALENDAR_NAME`, `STUDY_WORKER_URL`, `STUDY_SYNC_SECRET`
-
-After authenticating GitHub CLI, upload them directly from the local `.env` and OAuth files without displaying their values:
-
-```bash
-.venv/bin/python scripts/configure_github_secrets.py --repo OWNER/attendr
-```
-
-Manual file encoding alternatives:
-
-```bash
-base64 -i credentials.json -o credentials.base64
-base64 -i token.json -o token.base64
-```
-
-Copy each encoded file's contents into the matching GitHub repository secret, then delete the encoded copies. Base64 is encoding, not encryption; only place it in GitHub Secrets. Never commit `.env`, `credentials.json`, or `token.json`.
-
-The scheduled workflow requests only `contents: write`, which it uses to commit `data/seen_ids.json`. In **Actions**, run **Scheduled Academic Assistant** manually once and inspect its summary.
-
-Google OAuth apps left in Testing can issue refresh tokens that expire after seven days. For reliable headless runs, move the consent screen to Production when appropriate; verification is generally unnecessary for a personal app limited to your own account.
-
-GitHub Actions usage is subject to the included minutes/storage quota of the repository owner's plan. A lightweight private repository normally fits the free allowance, but it is not an unlimited guarantee.
+The schedules require runner provisioning and state migration before activation. Follow [the P1 rollout guide](docs/P1_RELIABILITY.md). Missing or revoked Google credentials fail promptly; only explicit `scripts/setup_google.py` authorization launches a browser.
 
 ## Tests
 
 ```bash
-.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -B -m pytest
+(cd worker && npm test && npm run check)
 ```
+
+The automated tests use fakes and temporary state. Files under `scripts/test_*.py` are live smoke tests and can write to Google Calendar or Discord.

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
 import os
-import sqlite3
 import tempfile
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -21,6 +21,9 @@ import requests
 from dotenv import load_dotenv
 
 from .canvas_client import AcademicItem, Announcement, CanvasSnapshot
+from .state_store import StateStore
+from .delivery import discord_messages
+from .triage import TriageDecision
 
 UTC = timezone.utc
 DISCORD_BLUE = 0x5865F2
@@ -37,6 +40,10 @@ class DiscordConfigurationError(ValueError):
 
 class DiscordNotificationError(RuntimeError):
     """Raised when Discord does not accept a notification."""
+
+
+class DiscordUncertainDeliveryError(DiscordNotificationError):
+    """Discord may have accepted the message; operator reconciliation is required."""
 
 
 class DiscordRateLimitError(DiscordNotificationError):
@@ -80,53 +87,8 @@ class _TextExtractor(HTMLParser):
         return " ".join("".join(self._parts).split())
 
 
-class NotificationState:
-    """Track successfully sent notifications without storing message contents."""
-
-    def __init__(self, path: str | os.PathLike[str]) -> None:
-        self.path = Path(path).expanduser().resolve()
-
-    def was_sent(self, event_key: str, fingerprint: str) -> bool:
-        self._initialize()
-        with sqlite3.connect(self.path) as connection:
-            row = connection.execute(
-                "SELECT fingerprint FROM sent_notifications WHERE event_key = ?",
-                (event_key,),
-            ).fetchone()
-        return row is not None and row[0] == fingerprint
-
-    def mark_sent(self, event_key: str, fingerprint: str) -> None:
-        self._initialize()
-        sent_at = datetime.now(UTC).isoformat()
-        with sqlite3.connect(self.path) as connection:
-            connection.execute(
-                """
-                INSERT INTO sent_notifications (event_key, fingerprint, sent_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT(event_key) DO UPDATE SET
-                    fingerprint = excluded.fingerprint,
-                    sent_at = excluded.sent_at
-                """,
-                (event_key, fingerprint, sent_at),
-            )
-
-    def _initialize(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.path) as connection:
-            connection.execute(
-                """
-                CREATE TABLE IF NOT EXISTS sent_notifications (
-                    event_key TEXT PRIMARY KEY,
-                    fingerprint TEXT NOT NULL,
-                    sent_at TEXT NOT NULL
-                )
-                """
-            )
-        try:
-            self.path.chmod(0o600)
-        except OSError:
-            # Some non-POSIX filesystems do not support chmod.
-            pass
+class NotificationState(StateStore):
+    """Backward-compatible name for the shared SQLite repository."""
 
 
 class NotificationStateStore(Protocol):
@@ -204,7 +166,7 @@ class DiscordNotifier:
         *,
         bot_token: str | None = None,
         channel_ids: Mapping[str, str] | None = None,
-        state_path: str | os.PathLike[str] = "data/notification_state.db",
+        state_path: str | os.PathLike[str] = "data/attendr.db",
         app_timezone: str = "America/Toronto",
         timeout_seconds: float = 15.0,
         max_attempts: int = 4,
@@ -220,7 +182,7 @@ class DiscordNotifier:
             for name, value in (channel_ids or {}).items()
             if str(value).strip()
         }
-        if timeout_seconds <= 0:
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise DiscordConfigurationError(
                 "Discord timeout must be greater than zero."
             )
@@ -228,7 +190,7 @@ class DiscordNotifier:
             raise DiscordConfigurationError(
                 "Discord max attempts must be at least one."
             )
-        if max_rate_limit_wait_seconds < 0:
+        if not math.isfinite(max_rate_limit_wait_seconds) or max_rate_limit_wait_seconds < 0:
             raise DiscordConfigurationError(
                 "Discord maximum rate-limit wait cannot be negative."
             )
@@ -260,9 +222,8 @@ class DiscordNotifier:
         webhook_url = os.getenv("DISCORD_WEBHOOK_URL", "")
         base_directory = Path(env_file).resolve().parent if env_file else Path.cwd()
         configured_state = (
-            os.getenv("NOTIFICATION_STATE_FILE")
-            or os.getenv("NOTIFICATION_STATE_DB")
-            or "data/notification_state.db"
+            os.getenv("ATTENDR_DB")
+            or "data/attendr.db"
         )
         raw_state_path = Path(configured_state).expanduser()
         state_path = (
@@ -270,6 +231,13 @@ class DiscordNotifier:
             if raw_state_path.is_absolute()
             else base_directory / raw_state_path
         )
+        if state_path.suffix.casefold() == ".json":
+            raise DiscordConfigurationError("ATTENDR_DB must name a SQLite database, not a JSON state file.")
+        if state_path.suffix != ".json":
+            store = StateStore(state_path)
+            for legacy in (base_directory / os.getenv("NOTIFICATION_STATE_FILE", "data/seen_ids.json"), base_directory / os.getenv("NOTIFICATION_STATE_DB", "data/notification_state.db")):
+                if legacy.resolve() != state_path.resolve():
+                    store.migrate_notifications(legacy)
         return cls(
             webhook_url,
             bot_token=os.getenv("DISCORD_BOT_TOKEN") or None,
@@ -296,13 +264,18 @@ class DiscordNotifier:
         )
 
     def send_announcement_alert(
-        self, announcement: Announcement, *, force: bool = False
+        self, announcement: Announcement, *, force: bool = False, triage: TriageDecision | None = None
     ) -> bool:
         """Send one announcement alert; return False when already sent."""
         payload = self.announcement_payload(announcement)
+        fingerprint = self._fingerprint(payload)
+        if triage:
+            payload["embeds"][0]["fields"].append({"name": triage.category, "value": triage.reason[:1024]})
+            if triage.category == "Action required":
+                payload["embeds"][0]["color"] = EXAM_RED
         return self._send_once(
             f"announcement:{announcement.uid}", payload, force=force,
-            destination="announcements",
+            destination="announcements", fixed_fingerprint=fingerprint,
         )
 
     def send_custom_notification(
@@ -312,13 +285,15 @@ class DiscordNotifier:
         *,
         force: bool = False,
         destination: str = "announcements",
+        fixed_fingerprint: str | None = None,
     ) -> bool:
         """Send an application-defined payload using the existing safe webhook flow."""
         event_key = event_key.strip()
         if not event_key:
             raise ValueError("Custom notification event_key cannot be empty.")
         return self._send_once(
-            f"custom:{event_key}", payload, force=force, destination=destination
+            f"custom:{event_key}", payload, force=force, destination=destination,
+            fixed_fingerprint=fixed_fingerprint
         )
 
     def send_daily_digest(
@@ -357,7 +332,7 @@ class DiscordNotifier:
         now = self._now_utc()
         deadline = now + timedelta(hours=alert_hours)
         eligible_items = [
-            item for item in snapshot.items if now <= item.due_at <= deadline
+            item for item in snapshot.items if item.falls_in_window(now, deadline)
         ]
 
         assignments_sent = 0
@@ -396,7 +371,10 @@ class DiscordNotifier:
             "quiz": "Quiz",
             "calendar_event": "Course Event",
         }.get(item.kind, "Assignment")
-        due = item.due_at_local.strftime("%A, %B %d at %I:%M %p %Z")
+        due = (
+            item.due_at_local.strftime("%A, %B %d, %Y (time not specified)")
+            if item.all_day else item.due_at_local.strftime("%A, %B %d at %I:%M %p %Z")
+        )
         points = (
             self._format_points(item.points_possible)
             if item.points_possible is not None
@@ -468,7 +446,7 @@ class DiscordNotifier:
         current = now.astimezone(UTC) if now else self._now_utc()
         deadline = current + timedelta(hours=hours)
         pending = sorted(
-            (item for item in items if current <= item.due_at <= deadline),
+            (item for item in items if item.falls_in_window(current, deadline)),
             key=lambda item: (item.due_at, item.course_name, item.title),
         )
         if pending:
@@ -500,13 +478,53 @@ class DiscordNotifier:
         routed_key = f"{destination}:{event_key}"
         if not force and self.state.was_sent(routed_key, fingerprint):
             return False
-        self._post(payload, destination)
-        # Forced test sends remain repeatable and do not consume the real alert state.
-        if not force:
+        messages = discord_messages(payload)
+        if isinstance(self.state, StateStore) and not force:
+            keys = self.state.enqueue_messages(routed_key, fingerprint, destination, messages)
+            for key in keys:
+                if self.state.was_sent(key, fingerprint):
+                    continue
+                row = self.state.claim(key, fingerprint)
+                if row is None:
+                    raise DiscordNotificationError("Delivery is claimed, failed, or uncertain; inspect the outbox before retrying.")
+                self._deliver_claim(row)
             self.state.mark_sent(routed_key, fingerprint)
+        else:
+            for message in messages:
+                self._post(message, destination)
+            if not force:
+                self.state.mark_sent(routed_key, fingerprint)
         return True
 
-    def _post(self, payload: Mapping[str, Any], destination: str) -> None:
+    def _deliver_claim(self, row: dict[str, Any]) -> None:
+        try:
+            remote_id = self._post(json.loads(row["payload"]), row["destination"], durable=True)
+        except DiscordRateLimitError:
+            self.state.finish(row, "pending", error="Rate limited")
+            raise
+        except DiscordUncertainDeliveryError:
+            self.state.finish(row, "uncertain", error="Discord result unknown; inspect destination before retry")
+            raise
+        except DiscordNotificationError:
+            self.state.finish(row, "failed", error="Discord rejected delivery; repair configuration before retry")
+            raise
+        self.state.finish(row, "sent", remote_id=remote_id)
+
+    def flush_pending(self) -> int:
+        if not isinstance(self.state, StateStore):
+            return 0
+        sent = 0
+        for pending in self.state.pending_deliveries():
+            row = self.state.claim(pending["event_key"], pending["fingerprint"])
+            if row:
+                self._deliver_claim(row)
+                sent += 1
+        blocked = self.state.blocked_deliveries()
+        if blocked:
+            raise DiscordNotificationError(f"{blocked} outbox delivery(s) need review; run scripts/state_admin.py list.")
+        return sent
+
+    def _post(self, payload: Mapping[str, Any], destination: str, *, durable: bool = False) -> str | None:
         channel_id = self._channel_ids.get(destination)
         use_bot = bool(self._bot_token and channel_id)
         url = (
@@ -531,6 +549,8 @@ class DiscordNotifier:
                     timeout=self.timeout_seconds,
                 )
             except requests.RequestException:
+                if durable:
+                    raise DiscordUncertainDeliveryError("Discord connection ended without a confirmed delivery result.") from None
                 if attempt == self.max_attempts:
                     raise DiscordNotificationError(
                         "Discord could not be reached after repeated attempts."
@@ -539,7 +559,13 @@ class DiscordNotifier:
                 continue
 
             if 200 <= response.status_code < 300:
-                return
+                try:
+                    result = response.json()
+                    return str(result["id"]) if isinstance(result, dict) and result.get("id") else None
+                except (ValueError, TypeError):
+                    return None
+            if durable and response.status_code >= 500:
+                raise DiscordUncertainDeliveryError("Discord returned a server error; delivery may have succeeded.")
             if response.status_code == 429:
                 retry_after = self._retry_after_seconds(response)
                 if (
@@ -635,7 +661,7 @@ class DiscordNotifier:
         if value is None:
             value = response.headers.get("Retry-After", 1.0)
         try:
-            return max(0.0, float(value))
+            return max(0.0, float(value)) if math.isfinite(float(value)) else float("inf")
         except (TypeError, ValueError):
             return 1.0
 
@@ -672,7 +698,9 @@ class DiscordNotifier:
         return value[: max(0, limit - 1)].rstrip() + "…"
 
     def _digest_line(self, item: AcademicItem) -> str:
-        due = item.due_at_local.strftime("%a %b %d, %I:%M %p")
+        due = item.due_at_local.strftime(
+            "%a %b %d (time not specified)" if item.all_day else "%a %b %d, %I:%M %p"
+        )
         label = item.kind.replace("_", " ").title()
         title = self._truncate(item.title, 140)
         course = self._truncate(item.course_name, 100)

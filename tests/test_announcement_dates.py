@@ -28,7 +28,7 @@ class FakeAI:
 
 
 class AnnouncementDatesTests(unittest.TestCase):
-    def test_no_time_uses_previous_day_and_cache_prevents_second_ai_call(self):
+    def test_no_time_preserves_stated_date_and_cache_prevents_second_ai_call(self):
         posted = datetime(2026, 9, 10, 14, 0, tzinfo=timezone.utc)
         announcement = Announcement(
             uid="canvas:announcement:1:2",
@@ -49,7 +49,8 @@ class AnnouncementDatesTests(unittest.TestCase):
             sync = AnnouncementDatesSync(ai, index_path=Path(directory) / "dates.json")
             first = sync.sync((announcement,))
             second = sync.sync((announcement,))
-        self.assertEqual(first.items[0].due_at_local.isoformat(), "2026-09-19T23:59:00-04:00")
+        self.assertEqual(first.items[0].due_at_local.isoformat(), "2026-09-20T00:00:00-04:00")
+        self.assertTrue(first.items[0].all_day)
         self.assertEqual(second.cached, 1)
         self.assertEqual(ai.calls, 1)
 

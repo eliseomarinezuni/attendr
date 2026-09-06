@@ -113,6 +113,8 @@ class CourseSchedule:
         self, canvas_name: str, day: date
     ) -> ClassSession | None:
         """Return the single scheduled lecture matching a course and date."""
+        if not self.term_start <= day <= self.term_end or self.is_no_class_day(day):
+            return None
         matches = [
             session
             for session in self.sessions
@@ -170,11 +172,14 @@ class CourseSchedule:
         return ((day - self.term_start).days // 7) + 1
 
     def academic_calendar_items(self) -> tuple[AcademicItem, ...]:
-        """Create advance reminder events at 11:59 PM the day before each date."""
+        """Preserve academic dates as all-day events with exclusive end dates."""
         items: list[AcademicItem] = []
         for entry in self.academic_dates:
-            reminder_day = entry.start_date - timedelta(days=1)
-            due_local = datetime.combine(reminder_day, time(23, 59), tzinfo=self.timezone)
+            due_local = datetime.combine(entry.start_date, time.min, tzinfo=self.timezone)
+            end_local = datetime.combine(
+                (entry.end_date or entry.start_date) + timedelta(days=1),
+                time.min, tzinfo=self.timezone,
+            )
             description = f"Academic date: {entry.start_date.isoformat()}"
             if entry.end_date and entry.end_date != entry.start_date:
                 description += f" through {entry.end_date.isoformat()}"
@@ -189,8 +194,8 @@ class CourseSchedule:
                     kind=entry.kind,
                     due_at=due_local.astimezone(UTC),
                     due_at_local=due_local,
-                    end_at=None,
-                    all_day=False,
+                    end_at=end_local.astimezone(UTC),
+                    all_day=True,
                     html_url="https://registrar.ontariotechu.ca/academic-schedule/ug-academic-schedule.php",
                     updated_at=None,
                     points_possible=None,
@@ -273,10 +278,6 @@ class CourseSchedule:
                     source="class_schedule",
                     source_id=class_item.source_id,
                     course_name=class_item.course_name,
-                    due_at=class_item.due_at,
-                    due_at_local=class_item.due_at_local,
-                    end_at=class_item.end_at,
-                    all_day=False,
                     description_html=(
                         f"{exam.description_html or 'In-class assessment.'} "
                         "This event replaces the regularly scheduled lecture."

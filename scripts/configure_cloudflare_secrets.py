@@ -9,6 +9,7 @@ import secrets
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 from dotenv import dotenv_values, set_key
@@ -19,6 +20,7 @@ WORKER_ROOT = PROJECT_ROOT / "worker"
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
+    result.add_argument("--worker-url", required=True)
     result.add_argument("--guild-id", required=True)
     result.add_argument("--channel-id", required=True)
     return result
@@ -79,6 +81,11 @@ def main(argv: list[str] | None = None) -> int:
     env_path = PROJECT_ROOT / ".env"
     configuration = dict(dotenv_values(env_path))
     try:
+        parsed = urlparse(arguments.worker_url)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise RuntimeError("--worker-url must be an HTTPS deployment URL.")
+        if not arguments.guild_id.isdigit() or not arguments.channel_id.isdigit():
+            raise RuntimeError("Discord IDs must be numeric.")
         bot_token = required(configuration, "DISCORD_BOT_TOKEN")
         owner_id = discord_owner(bot_token, arguments.guild_id)
         oauth_client = json_file(
@@ -98,12 +105,8 @@ def main(argv: list[str] | None = None) -> int:
             "DISCORD_STUDY_CHANNEL_ID": arguments.channel_id,
             "DISCORD_OWNER_USER_ID": owner_id,
             "STUDY_SYNC_SECRET": sync_secret,
-            "STUDY_WORKER_URL": "https://attendr-interactions.attendr-interactions.workers.dev",
+            "STUDY_WORKER_URL": arguments.worker_url.rstrip("/"),
         }
-        for name, value in local_values.items():
-            set_key(str(env_path), name, value, quote_mode="always")
-        env_path.chmod(0o600)
-
         cloudflare_values = {
             "DISCORD_APPLICATION_ID": required(configuration, "DISCORD_APPLICATION_ID"),
             "DISCORD_PUBLIC_KEY": required(configuration, "DISCORD_PUBLIC_KEY"),
@@ -118,7 +121,11 @@ def main(argv: list[str] | None = None) -> int:
         for name, value in cloudflare_values.items():
             if not value:
                 raise RuntimeError(f"Google OAuth data is missing {name}.")
+        for name, value in cloudflare_values.items():
             put_secret(name, value)
+        for name, value in local_values.items():
+            set_key(str(env_path), name, value, quote_mode="always")
+        env_path.chmod(0o600)
     except RuntimeError as error:
         print(error, file=sys.stderr)
         return 1

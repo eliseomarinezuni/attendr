@@ -186,7 +186,7 @@ class CourseMaterialsSyncTests(unittest.TestCase):
                 now_provider=lambda: NOW,
             ).sync()
         self.assertIn("Assignment 1 | October 16, 2026", ai.calls[0][0])
-        self.assertEqual(report.items[0].due_at_local.isoformat(), "2026-10-15T23:59:00-04:00")
+        self.assertEqual(report.items[0].due_at_local.isoformat(), "2026-10-16T00:00:00-04:00")
 
 
 if __name__ == "__main__":

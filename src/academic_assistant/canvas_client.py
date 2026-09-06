@@ -18,9 +18,11 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from canvasapi import Canvas
-from canvasapi.exceptions import CanvasException, InvalidAccessToken
+from canvasapi.exceptions import CanvasException, InvalidAccessToken, Unauthorized
 from dotenv import load_dotenv
 from requests import RequestException
+from .http_client import configure_canvas_transport
+from .state_store import StateStore
 
 UTC = timezone.utc
 EXAM_PATTERN = re.compile(r"\b(exam|midterm|final|test)\b", re.IGNORECASE)
@@ -91,6 +93,16 @@ class AcademicItem:
     submitted: bool | None = None
     submission_state: str | None = None
 
+    def falls_in_window(self, start: datetime, end: datetime) -> bool:
+        if self.all_day:
+            zone = self.due_at_local.tzinfo
+            return (
+                start.astimezone(zone).date()
+                <= self.due_at_local.date()
+                <= end.astimezone(zone).date()
+            )
+        return start <= self.due_at <= end
+
 
 @dataclass(frozen=True, slots=True)
 class Announcement:
@@ -117,6 +129,8 @@ class CanvasSnapshot:
     announcements: tuple[Announcement, ...]
     warnings: tuple[str, ...]
     fetched_at: datetime
+    complete: bool = True
+    removed_uids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,7 +221,9 @@ class CanvasClient:
         app_timezone: str = "America/Toronto",
         canvas: Any | None = None,
         now_provider: Callable[[], datetime] | None = None,
+        state_store: StateStore | None = None,
     ) -> None:
+        self.state_store = state_store
         self.base_url = self._validate_base_url(base_url)
         if not api_token or not api_token.strip():
             raise CanvasConfigurationError("CANVAS_API_TOKEN is missing or empty.")
@@ -230,6 +246,8 @@ class CanvasClient:
         self._canvas = (
             canvas if canvas is not None else Canvas(self.base_url, api_token.strip())
         )
+        if canvas is None:
+            configure_canvas_transport(self._canvas)
         self._now_provider = now_provider or (lambda: datetime.now(UTC))
 
     @classmethod
@@ -244,6 +262,7 @@ class CanvasClient:
         return cls(
             base_url,
             api_token,
+            state_store=StateStore((Path(env_file).resolve().parent if env_file else Path.cwd()) / os.getenv("ATTENDR_DB", "data/attendr.db")),
             lookahead_days=lookahead_days,
             announcement_days=announcement_days,
             app_timezone=app_timezone,
@@ -294,16 +313,40 @@ class CanvasClient:
         """Return recent announcements without changing their read state."""
         contexts = self._get_active_course_contexts()
         warnings: list[str] = []
-        return self._fetch_announcements(contexts, warnings, unread_only=False)
+        announcements = self._fetch_announcements(contexts, warnings, unread_only=False)
+        if warnings:
+            raise CanvasAPIError("Announcement dates are incomplete: " + "; ".join(warnings))
+        return announcements
 
     def fetch_snapshot(self) -> CanvasSnapshot:
         """Fetch a consistent snapshot and retain non-fatal per-course warnings."""
         user_id, user_name = self.validate_credentials()
         contexts = self._get_active_course_contexts()
         warnings: list[str] = []
-        items = self._fetch_upcoming_items(contexts, warnings)
+        incomplete_courses: set[int] = set()
+        items = self._fetch_upcoming_items(contexts, warnings, incomplete_courses)
+        removed_uids: list[str] = []
+        if self.state_store:
+            contexts_by_id = {context.summary.id: context for context in contexts}
+            known = {item.uid: item for item in items}
+            for tracked in self.state_store.tracked_assignments():
+                context = contexts_by_id.get(tracked["course_id"])
+                if context is None or tracked["uid"] in known:
+                    continue
+                try:
+                    assignment = context.resource.get_assignment(tracked["assignment_id"], include=["submission"], override_assignment_dates=True)
+                    if self._attr(assignment, "due_at", None) in (None, ""):
+                        removed_uids.append(tracked["uid"])
+                    else:
+                        item = self._assignment_to_item(assignment, context.summary)
+                        known[item.uid] = item
+                except (CanvasException, RequestException, ValueError, TypeError):
+                    # A 404 can also mask inaccessible data; preserve the prior event.
+                    incomplete_courses.add(context.summary.id)
+                    warnings.append(f"Could not reconcile tracked assignment in {context.summary.name}.")
+            items = tuple(sorted(known.values(), key=lambda item: (item.due_at, item.uid)))
         announcements = self._fetch_announcements(
-            contexts, warnings, unread_only=True
+            contexts, warnings, unread_only=True, incomplete_courses=incomplete_courses
         )
         return CanvasSnapshot(
             user_id=user_id,
@@ -313,6 +356,8 @@ class CanvasClient:
             announcements=announcements,
             warnings=tuple(warnings),
             fetched_at=self._now_utc(),
+            complete=not incomplete_courses,
+            removed_uids=tuple(removed_uids),
         )
 
     def download_syllabus_materials(
@@ -962,11 +1007,14 @@ class CanvasClient:
             raise CanvasAPIError("Could not retrieve active Canvas courses.") from error
 
     def _fetch_upcoming_items(
-        self, contexts: Iterable[_CourseContext], warnings: list[str]
+        self, contexts: Iterable[_CourseContext], warnings: list[str],
+        incomplete_courses: set[int] | None = None,
     ) -> tuple[AcademicItem, ...]:
         start = self._now_utc()
         end = start + timedelta(days=self.lookahead_days)
         items: list[AcademicItem] = []
+        if incomplete_courses is None:
+            incomplete_courses = set()
 
         for context in contexts:
             course = context.summary
@@ -979,14 +1027,19 @@ class CanvasClient:
                 )
                 for assignment in assignments:
                     try:
+                        if self._attr(assignment, "due_at", None) in {None, ""}:
+                            warnings.append(f"Skipped undated assignment in {course.name}.")
+                            continue
                         item = self._assignment_to_item(assignment, course)
-                        if start <= item.due_at <= end:
+                        if item.falls_in_window(start, end):
                             items.append(item)
                     except (TypeError, ValueError) as error:
+                        incomplete_courses.add(course.id)
                         warnings.append(
                             f"Skipped malformed assignment in {course.name}: {error}"
                         )
             except (CanvasException, RequestException) as error:
+                incomplete_courses.add(course.id)
                 warnings.append(self._course_warning("assignments", course, error))
 
             try:
@@ -999,13 +1052,15 @@ class CanvasClient:
                 for event in events:
                     try:
                         item = self._calendar_event_to_item(event, course)
-                        if start <= item.due_at <= end:
+                        if item.falls_in_window(start, end):
                             items.append(item)
                     except (TypeError, ValueError) as error:
+                        incomplete_courses.add(course.id)
                         warnings.append(
                             f"Skipped malformed calendar event in {course.name}: {error}"
                         )
             except (CanvasException, RequestException) as error:
+                incomplete_courses.add(course.id)
                 warnings.append(self._course_warning("calendar events", course, error))
 
         unique = {item.uid: item for item in items}
@@ -1022,10 +1077,13 @@ class CanvasClient:
         warnings: list[str],
         *,
         unread_only: bool,
+        incomplete_courses: set[int] | None = None,
     ) -> tuple[Announcement, ...]:
         now = self._now_utc()
         cutoff = now - timedelta(days=self.announcement_days)
         announcements: list[Announcement] = []
+        if incomplete_courses is None:
+            incomplete_courses = set()
 
         for context in contexts:
             course = context.summary
@@ -1049,10 +1107,12 @@ class CanvasClient:
                         ):
                             announcements.append(announcement)
                     except (TypeError, ValueError) as error:
+                        incomplete_courses.add(course.id)
                         warnings.append(
                             f"Skipped malformed announcement in {course.name}: {error}"
                         )
             except (CanvasException, RequestException) as error:
+                incomplete_courses.add(course.id)
                 warnings.append(self._course_warning("announcements", course, error))
 
         unique = {announcement.uid: announcement for announcement in announcements}
@@ -1115,15 +1175,28 @@ class CanvasClient:
         source_id = str(self._attr(event, "id"))
         title = str(self._attr(event, "title", "Untitled calendar event"))
         all_day = bool(self._attr(event, "all_day", False))
-        start_at = self._parse_datetime(
-            self._attr(event, "start_at", None), required=False
+        start_at = (
+            self._parse_all_day_date(self._attr(event, "all_day_date", None))
+            if all_day else None
         )
+        if start_at is None:
+            start_at = self._parse_datetime(
+                self._attr(event, "start_at", None), required=False
+            )
         if start_at is None:
             all_day_date = self._attr(event, "all_day_date", None)
             start_at = self._parse_all_day_date(all_day_date)
         if start_at is None:
             raise ValueError(f"calendar event {source_id} has no start date")
         end_at = self._parse_datetime(self._attr(event, "end_at", None), required=False)
+        if all_day and end_at is not None:
+            # Preserve the civil-day span while anchoring it to all_day_date.
+            original_start = self._parse_datetime(
+                self._attr(event, "start_at", None), required=False
+            ) or start_at
+            days = max(1, (end_at.astimezone(self.timezone).date() - original_start.astimezone(self.timezone).date()).days)
+            end_date = start_at.astimezone(self.timezone).date() + timedelta(days=days)
+            end_at = datetime.combine(end_date, time.min, tzinfo=self.timezone).astimezone(UTC)
         return AcademicItem(
             uid=f"canvas:event:{course.id}:{source_id}",
             source="calendar_event",
@@ -1341,7 +1414,7 @@ class CanvasClient:
         status_code = getattr(response, "status_code", None) or getattr(
             error, "status_code", None
         )
-        return status_code in {401, 403}
+        return isinstance(error, (InvalidAccessToken, Unauthorized)) or status_code in {401, 403}
 
     @staticmethod
     def _course_warning(
