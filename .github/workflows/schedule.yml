@@ -40,6 +40,10 @@ jobs:
           STUDY_WORKER_URL: ${{ secrets.STUDY_WORKER_URL }}
           STUDY_SYNC_SECRET: ${{ secrets.STUDY_SYNC_SECRET }}
           GOOGLE_STUDY_CALENDAR_NAME: ${{ secrets.GOOGLE_STUDY_CALENDAR_NAME }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_ANNOUNCEMENTS_CHANNEL_ID: ${{ secrets.DISCORD_ANNOUNCEMENTS_CHANNEL_ID }}
+          DISCORD_CALENDAR_CHANNEL_ID: ${{ secrets.DISCORD_CALENDAR_CHANNEL_ID }}
+          DISCORD_QUIZ_CHANNEL_ID: ${{ secrets.DISCORD_QUIZ_CHANNEL_ID }}
         run: |
           test -n "$GOOGLE_CREDENTIALS_B64"
           test -n "$GOOGLE_TOKEN_B64"
@@ -61,6 +65,10 @@ jobs:
             printf 'LECTURE_QUIZ_STATE_FILE=data/lecture_quiz_state.json\n'
             printf 'LECTURE_QUIZ_RETRY_HOURS=30\n'
             printf 'DISCORD_WEBHOOK_URL=%s\n' "$DISCORD_WEBHOOK_URL"
+            printf 'DISCORD_BOT_TOKEN=%s\n' "$DISCORD_BOT_TOKEN"
+            printf 'DISCORD_ANNOUNCEMENTS_CHANNEL_ID=%s\n' "$DISCORD_ANNOUNCEMENTS_CHANNEL_ID"
+            printf 'DISCORD_CALENDAR_CHANNEL_ID=%s\n' "$DISCORD_CALENDAR_CHANNEL_ID"
+            printf 'DISCORD_QUIZ_CHANNEL_ID=%s\n' "$DISCORD_QUIZ_CHANNEL_ID"
             printf 'NOTIFICATION_STATE_FILE=data/seen_ids.json\n'
             printf 'GOOGLE_CREDENTIALS_FILE=credentials.json\n'
             printf 'GOOGLE_TOKEN_FILE=token.json\n'

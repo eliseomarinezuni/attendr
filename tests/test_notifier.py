@@ -272,6 +272,41 @@ class DiscordNotifierTests(unittest.TestCase):
         with self.assertRaises(DiscordConfigurationError):
             DiscordNotifier(f"{WEBHOOK_URL}?leak=yes")
 
+    def test_bot_routes_each_notification_to_its_named_channel(self):
+        session = FakeSession([FakeResponse(200), FakeResponse(200)])
+        notifier = DiscordNotifier(
+            WEBHOOK_URL,
+            state_path=self.state_path,
+            bot_token="private-test-token",
+            channel_ids={
+                "announcements": "111111111111111111",
+                "lecture_quizzes": "222222222222222222",
+            },
+            session=session,
+            now_provider=lambda: NOW,
+        )
+
+        notifier.send_announcement_alert(make_announcement())
+        notifier.send_custom_notification(
+            "quiz:test",
+            {"username": "Attendr", "content": "Quiz"},
+            destination="lecture_quizzes",
+        )
+
+        self.assertEqual(
+            session.calls[0][0],
+            "https://discord.com/api/v10/channels/111111111111111111/messages",
+        )
+        self.assertEqual(
+            session.calls[1][0],
+            "https://discord.com/api/v10/channels/222222222222222222/messages",
+        )
+        self.assertNotIn("username", session.calls[1][1]["json"])
+        self.assertEqual(
+            session.calls[1][1]["headers"],
+            {"Authorization": "Bot private-test-token"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
