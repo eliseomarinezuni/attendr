@@ -254,7 +254,12 @@ class GoogleCalendarSync:
             ),
         )
 
-    def sync_items(self, items: Iterable[AcademicItem]) -> CalendarSyncReport:
+    def sync_items(
+        self,
+        items: Iterable[AcademicItem],
+        *,
+        delete_uids: Iterable[str] = (),
+    ) -> CalendarSyncReport:
         """Synchronize items, updating existing events when their content changes."""
         calendar_id, calendar_name = self.resolve_calendar()
         existing_by_uid = self._load_existing_events(calendar_id)
@@ -262,6 +267,29 @@ class GoogleCalendarSync:
 
         # Avoid duplicate writes if the caller provides the same Canvas item twice.
         unique_items = {item.uid: item for item in items}
+        for uid in set(delete_uids) - unique_items.keys():
+            existing = existing_by_uid.pop(uid, None)
+            if existing is None:
+                continue
+            try:
+                self._service.events().delete(
+                    calendarId=calendar_id,
+                    eventId=existing["id"],
+                    sendUpdates="none",
+                ).execute()
+            except HttpError as error:
+                raise self._api_error(
+                    f"Could not remove replaced Attendr event {uid}", error
+                ) from None
+            entries.append(
+                CalendarSyncEntry(
+                    canvas_uid=uid,
+                    title=str(existing.get("summary") or uid),
+                    action="deleted",
+                    google_event_id=str(existing.get("id")) if existing.get("id") else None,
+                    html_link=None,
+                )
+            )
         for item in sorted(
             unique_items.values(), key=lambda value: (value.due_at, value.uid)
         ):

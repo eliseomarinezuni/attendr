@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from .ai_assistant import AIAssistant, AIInputError, AIProviderError, MajorDeadline
 from .canvas_client import AcademicItem, Announcement
+from .course_schedule import CourseSchedule
 
 UTC = timezone.utc
 
@@ -32,10 +33,12 @@ class AnnouncementDatesSync:
         *,
         index_path: str | os.PathLike[str],
         app_timezone: str = "America/Toronto",
+        course_schedule: CourseSchedule | None = None,
     ) -> None:
         self.ai = ai
         self.index_path = Path(index_path).expanduser().resolve()
         self.timezone = ZoneInfo(app_timezone)
+        self.course_schedule = course_schedule
 
     def sync(
         self, announcements: tuple[Announcement, ...]
@@ -94,9 +97,19 @@ class AnnouncementDatesSync:
 
     def _to_item(self, announcement: Announcement, deadline: MajorDeadline) -> AcademicItem:
         actual_date = date.fromisoformat(deadline.due_date)
+        lecture = (
+            self.course_schedule.lecture_for_course_on(
+                announcement.course_name, actual_date
+            )
+            if self.course_schedule and deadline.kind == "exam"
+            else None
+        )
         if deadline.due_time:
             effective_date = actual_date
             effective_time = time.fromisoformat(deadline.due_time)
+        elif lecture is not None:
+            effective_date = actual_date
+            effective_time = lecture.start
         else:
             effective_date = actual_date - timedelta(days=1)
             effective_time = time(23, 59)
@@ -106,6 +119,11 @@ class AnnouncementDatesSync:
         )
         uid_hash = sha256(normalized_title.encode("utf-8")).hexdigest()[:24]
         kind = deadline.kind if deadline.kind in {"exam", "quiz", "assignment"} else "assignment"
+        end_local = (
+            datetime.combine(actual_date, lecture.end, tzinfo=self.timezone)
+            if lecture is not None
+            else due_local + timedelta(hours=2 if kind == "exam" else 1)
+        )
         return AcademicItem(
             uid=f"canvas:material-deadline:{announcement.course_id}:{uid_hash}",
             source="announcement_deadline",
@@ -116,7 +134,7 @@ class AnnouncementDatesSync:
             kind=kind,
             due_at=due_local.astimezone(UTC),
             due_at_local=due_local,
-            end_at=(due_local + timedelta(hours=2 if kind == "exam" else 1)).astimezone(UTC),
+            end_at=end_local.astimezone(UTC),
             all_day=False,
             html_url=announcement.html_url,
             updated_at=announcement.posted_at,

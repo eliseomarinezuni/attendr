@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import sys
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from academic_assistant import CourseSchedule
+from academic_assistant import AcademicItem, CourseSchedule
+
+UTC = timezone.utc
 
 
 class CourseScheduleTests(unittest.TestCase):
@@ -82,6 +84,45 @@ class CourseScheduleTests(unittest.TestCase):
         )
         self.assertEqual(ethics.due_at_local.strftime("%H:%M"), "11:10")
         self.assertEqual(ethics.end_at.astimezone(self.schedule.timezone).strftime("%H:%M"), "14:00")
+
+    def test_midterm_replaces_overlapping_course_lecture(self):
+        start = datetime(2026, 11, 19, 11, 10, tzinfo=self.schedule.timezone)
+        midterm = AcademicItem(
+            uid="canvas:material-deadline:12345:midterm",
+            source="syllabus_deadline",
+            source_id="outline",
+            course_id=12345,
+            course_name="202699 - Eth., Law & Soc. Imp of Comp.",
+            title="Midterm",
+            kind="exam",
+            due_at=start.astimezone(UTC),
+            due_at_local=start,
+            end_at=None,
+            all_day=False,
+            html_url=None,
+            updated_at=None,
+            points_possible=None,
+            submission_types=(),
+            description_html="Extracted from course outline.",
+        )
+
+        merged, removed = self.schedule.merge_with_class_schedule((midterm,))
+
+        replacement = next(
+            item
+            for item in merged
+            if item.due_at_local.date().isoformat() == "2026-11-19"
+            and item.course_name.startswith("Ethics")
+        )
+        self.assertEqual(replacement.title, "Midterm")
+        self.assertEqual(replacement.uid.split(":")[1], "class-session")
+        self.assertEqual(replacement.due_at_local.strftime("%H:%M"), "11:10")
+        self.assertEqual(
+            replacement.end_at.astimezone(self.schedule.timezone).strftime("%H:%M"),
+            "14:00",
+        )
+        self.assertEqual(removed, frozenset({midterm.uid}))
+        self.assertEqual(len(merged), 156)
 
 
 if __name__ == "__main__":

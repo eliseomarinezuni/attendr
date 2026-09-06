@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -108,6 +108,19 @@ class CourseSchedule:
     def matches_course(self, session: ClassSession, canvas_name: str) -> bool:
         name = canvas_name.casefold()
         return any(value in name for value in session.course_match)
+
+    def lecture_for_course_on(
+        self, canvas_name: str, day: date
+    ) -> ClassSession | None:
+        """Return the single scheduled lecture matching a course and date."""
+        matches = [
+            session
+            for session in self.sessions
+            if session.activity == "lecture"
+            and session.weekday == day.weekday()
+            and self.matches_course(session, canvas_name)
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     def context_for_course(self, canvas_name: str) -> str | None:
         matching = [
@@ -226,3 +239,62 @@ class CourseSchedule:
                     )
             day += timedelta(days=1)
         return tuple(sorted(items, key=lambda item: (item.due_at, item.uid)))
+
+    def merge_with_class_schedule(
+        self, academic_items: tuple[AcademicItem, ...]
+    ) -> tuple[tuple[AcademicItem, ...], frozenset[str]]:
+        """Replace a lecture occurrence with an overlapping same-course exam."""
+        exams = tuple(item for item in academic_items if item.kind == "exam")
+        consumed_exam_uids: set[str] = set()
+        class_items: list[AcademicItem] = []
+        for class_item in self.scheduled_class_items():
+            if class_item.kind != "lecture":
+                class_items.append(class_item)
+                continue
+            class_end = class_item.end_at or class_item.due_at + timedelta(hours=1)
+            matching = [
+                exam
+                for exam in exams
+                if exam.uid not in consumed_exam_uids
+                and exam.due_at_local.date() == class_item.due_at_local.date()
+                and self._course_names_match(class_item.course_name, exam.course_name)
+                and exam.due_at < class_end
+                and (exam.end_at or exam.due_at + timedelta(hours=2)) > class_item.due_at
+            ]
+            if not matching:
+                class_items.append(class_item)
+                continue
+            exam = sorted(matching, key=lambda item: (item.due_at, item.uid))[0]
+            consumed_exam_uids.add(exam.uid)
+            class_items.append(
+                replace(
+                    exam,
+                    uid=class_item.uid,
+                    source="class_schedule",
+                    source_id=class_item.source_id,
+                    course_name=class_item.course_name,
+                    due_at=class_item.due_at,
+                    due_at_local=class_item.due_at_local,
+                    end_at=class_item.end_at,
+                    all_day=False,
+                    description_html=(
+                        f"{exam.description_html or 'In-class assessment.'} "
+                        "This event replaces the regularly scheduled lecture."
+                    ),
+                )
+            )
+        remaining = tuple(
+            item for item in academic_items if item.uid not in consumed_exam_uids
+        )
+        merged = remaining + tuple(class_items)
+        return (
+            tuple(sorted(merged, key=lambda item: (item.due_at, item.uid))),
+            frozenset(consumed_exam_uids),
+        )
+
+    def _course_names_match(self, scheduled_name: str, canvas_name: str) -> bool:
+        return any(
+            session.course_name == scheduled_name
+            and self.matches_course(session, canvas_name)
+            for session in self.sessions
+        )
