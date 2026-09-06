@@ -48,8 +48,13 @@ class CloudStateClient:
         except requests.RequestException as error:
             raise CloudStateError(f"State checkpoint request failed: {error}") from error
         if not response.ok:
+            try:
+                detail = str(response.json().get("error", ""))
+            except (ValueError, AttributeError):
+                detail = ""
             raise CloudStateError(
                 f"State checkpoint {method} {path} failed: HTTP {response.status_code}"
+                + (f" ({detail})" if detail else "")
             )
         return response
 
