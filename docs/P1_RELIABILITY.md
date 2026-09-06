@@ -1,6 +1,6 @@
 # P1 reliability and rollout
 
-The default production repository is `ATTENDR_DB` (`data/attendr.db`). One database represents one Canvas/Google/Discord account configuration. Keep it on a persistent local disk, outside a runner checkout. Do not use a shared network filesystem, Git commits, Actions caches, or independently restored database copies as the authoritative state.
+The default local repository is `ATTENDR_DB` (`data/attendr.db`). Scheduled GitHub-hosted runs restore it from an encrypted Cloudflare D1 checkpoint. One database represents one Canvas/Google/Discord account configuration.
 
 ## Local upgrade
 
@@ -17,24 +17,13 @@ Migration preserves legacy files, validates their format, and imports each notif
 
 The migration does not infer historical daily quizzes from changing generated-message fingerprints. An already sent daily quiz from the cutover date may need to be skipped manually for that date. Old announcement cache entries lack source metadata: persistent corrections are retained after those announcements are next observed by this version.
 
-## Persistent scheduled runner
+## Hosted scheduled runner
 
-Both scheduled workflows now require one trusted macOS/Linux self-hosted runner labelled `attendr`. Hosted CI still runs tests. Until that runner and repository variable are configured, scheduled jobs will queue. Provisioning is not performed by these code changes.
+Both scheduled workflows use `ubuntu-latest` and share one concurrency group. `scripts/cloud_run.py` acquires an exclusive D1 lease, restores the encrypted SQLite checkpoint, runs the pipeline, and releases the lease. Every committed state change checkpoints before its caller continues. A terminated job leaves a 20-minute lease; a later run safely resumes after expiry.
 
-1. Create a private directory outside the checkout, such as `/srv/attendr-state`, owned by the runner account; set directory permissions to `0700`.
-2. Copy the configured `.env`, `credentials.json`, `token.json`, `materials_index.json`, and `announcement_dates_index.json` into it. Preserve existing material files if desired. Keep secret file permissions at `0600`.
-3. Create `/srv/attendr-state/venv` with Python 3.11 and install the repository's `requirements.lock` into it. Reinstall this lock after dependency updates.
-4. Run the migration against the original legacy directory:
+Configure the integration secrets with `scripts/configure_github_secrets.py`. It derives `ATTENDR_STATE_KEY` from `STUDY_SYNC_SECRET`, so keep that source secret in the local recovery configuration. Rotating or losing it makes the existing checkpoint unreadable. Apply Worker migration `0004_cloud_state.sql` before dispatching either workflow.
 
-   ```bash
-   /srv/attendr-state/venv/bin/python scripts/state_admin.py \
-     --db /srv/attendr-state/attendr.db migrate --legacy-directory data
-   ```
-
-5. Set repository **variable** `ATTENDR_HOME=/srv/attendr-state`. Attach the `attendr` runner label to exactly one persistent machine. Both workflows share a concurrency group and local process locks. Only trusted default-branch code should execute on this runner.
-6. Enable the schedules after the Worker upgrade below, if study controls are configured. A manual workflow dispatch runs the real pipeline and can post messages and change calendars.
-
-The wrapper forces database, material cache, and OAuth paths into `ATTENDR_HOME`. It refuses a missing database, so a lost volume cannot silently create empty deduplication state. It preserves refreshed `token.json` across runs. Browser authorization remains explicit through `scripts/setup_google.py`; a revoked refresh token requires reauthorization using the persistent configuration paths. The old GitHub-secret upload helper is retained for compatibility but is not used by these workflows.
+The OAuth refresh token remains in the encrypted `GOOGLE_TOKEN_B64` repository secret. Access-token refresh does not require a browser. A revoked refresh token fails the run and requires explicit reauthorization with `scripts/setup_google.py`, followed by updating the GitHub secret.
 
 ## State and delivery semantics
 
@@ -72,6 +61,8 @@ The Worker changes require D1 schema migration before deployment. Stop Python sc
 
 ```bash
 npx wrangler d1 execute attendr-study --remote --file=migrations/0002_reliability.sql
+npx wrangler d1 execute attendr-study --remote --file=migrations/0003_study_preferences.sql
+npx wrangler d1 execute attendr-study --remote --file=migrations/0004_cloud_state.sql
 npm run deploy
 ```
 
