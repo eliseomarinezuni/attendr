@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -13,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from academic_assistant import (
+    CourseSchedule,
     CourseMaterialsSync,
     MaterialDownloadReport,
     SyllabusMaterial,
@@ -99,6 +101,34 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             self.assertEqual(second.cached_materials_reused, 1)
             self.assertEqual(cached_ai.calls, [])
             self.assertEqual(second.items[0].uid, first.items[0].uid)
+
+    def test_untimed_midterm_uses_matching_lecture_slot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            html_path = root / "syllabus.html"
+            html_path.write_text("<p>Midterm October 27, 2026</p>")
+            material = replace(
+                self.make_material(html_path),
+                course_name="202609 - Web Dev - CSCI-3230U",
+            )
+            report = CourseMaterialsSync(
+                FakeCanvas([material]),
+                FakeAI([deadline("2026-10-27", None)]),
+                index_path=root / "index.json",
+                course_schedule=CourseSchedule.load(
+                    PROJECT_ROOT / "data/course_schedule.json"
+                ),
+                now_provider=lambda: NOW,
+            ).sync()
+
+            self.assertEqual(
+                report.items[0].due_at_local.isoformat(),
+                "2026-10-27T12:40:00-04:00",
+            )
+            self.assertEqual(
+                report.items[0].end_at.astimezone(report.items[0].due_at_local.tzinfo).strftime("%H:%M"),
+                "14:00",
+            )
 
     def test_conflicting_dates_for_same_exam_are_not_sent_to_calendar(self):
         with tempfile.TemporaryDirectory() as directory:

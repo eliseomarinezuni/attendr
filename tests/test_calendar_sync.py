@@ -250,6 +250,26 @@ class GoogleCalendarSyncTests(unittest.TestCase):
             "attendr_source=study_plan",
         )
 
+    def test_explicit_delete_removes_replaced_event_only(self):
+        service = FakeCalendarService()
+        calendar = GoogleCalendarSync(service, calendar_id="primary")
+        replaced = academic_item(uid="canvas:material-deadline:7:midterm")
+        retained = academic_item(uid="canvas:assignment:7:other")
+        calendar.sync_items([replaced, retained])
+
+        report = calendar.sync_items(
+            [retained], delete_uids={replaced.uid}
+        )
+
+        self.assertEqual([entry.canvas_uid for entry in report.deleted], [replaced.uid])
+        self.assertEqual(len(service.event_delete_calls), 1)
+        self.assertEqual(len(service.event_store), 1)
+        remaining = next(iter(service.event_store.values()))
+        self.assertEqual(
+            remaining["extendedProperties"]["private"]["canvas_uid"],
+            retained.uid,
+        )
+
 
 class GoogleCalendarAuthenticatorTests(unittest.TestCase):
     def test_missing_desktop_credentials_has_actionable_error(self):

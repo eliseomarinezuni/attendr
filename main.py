@@ -442,6 +442,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                     "data/announcement_dates_index.json",
                 ),
                 app_timezone=os.getenv("APP_TIMEZONE", "America/Toronto"),
+                course_schedule=schedule,
             ).sync(recent_announcements)
             announcement_date_items = date_report.items
             results.append(
@@ -469,14 +470,16 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 university_dates = (
                     schedule.academic_calendar_items() if schedule is not None else ()
                 )
-                class_sessions = (
-                    schedule.scheduled_class_items() if schedule is not None else ()
-                )
-                calendar_items = (
-                    canvas_items + derived + university_dates + class_sessions
-                )
+                academic_items = canvas_items + derived + university_dates
+                replaced_exam_uids: frozenset[str] = frozenset()
+                if schedule is not None:
+                    calendar_items, replaced_exam_uids = (
+                        schedule.merge_with_class_schedule(academic_items)
+                    )
+                else:
+                    calendar_items = academic_items
                 report = GoogleCalendarSync.from_env(PROJECT_ROOT / ".env").sync_items(
-                    calendar_items
+                    calendar_items, delete_uids=replaced_exam_uids
                 )
                 items_by_uid = {item.uid: item for item in calendar_items}
                 for entry in report.updated:
@@ -501,7 +504,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                     )
                 return (
                     f"{len(report.created)} created, {len(report.updated)} updated, "
-                    f"{len(report.skipped)} unchanged"
+                    f"{len(report.skipped)} unchanged, {len(report.deleted)} removed"
                 )
 
             results.append(run_step("Calendar", sync_calendar))

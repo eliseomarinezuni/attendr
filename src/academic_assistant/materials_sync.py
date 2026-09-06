@@ -333,8 +333,17 @@ class CourseMaterialsSync:
             )
             deadline_date = date.fromisoformat(deadline.due_date)
             effective_date = deadline_date
+            lecture = (
+                self.course_schedule.lecture_for_course_on(
+                    material.course_name, deadline_date
+                )
+                if self.course_schedule and deadline.kind == "exam"
+                else None
+            )
             if deadline.due_time:
                 parsed_time = time.fromisoformat(deadline.due_time)
+            elif lecture is not None:
+                parsed_time = lecture.start
             else:
                 # A missing time becomes an advance safety reminder.
                 effective_date -= timedelta(days=1)
@@ -344,6 +353,11 @@ class CourseMaterialsSync:
             )
             all_day = False
             duration = timedelta(hours=2 if deadline.kind == "exam" else 1)
+            end_local = (
+                datetime.combine(deadline_date, lecture.end, tzinfo=self.timezone)
+                if lecture is not None
+                else due_local + duration
+            )
             normalized_kind = (
                 deadline.kind
                 if deadline.kind in {"exam", "quiz", "assignment"}
@@ -360,7 +374,7 @@ class CourseMaterialsSync:
                     kind=normalized_kind,
                     due_at=due_local.astimezone(UTC),
                     due_at_local=due_local,
-                    end_at=(due_local + duration).astimezone(UTC),
+                    end_at=end_local.astimezone(UTC),
                     all_day=all_day,
                     html_url=material.html_url,
                     updated_at=material.updated_at,
