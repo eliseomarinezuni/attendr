@@ -151,6 +151,7 @@ class SyllabusMaterial:
 class MaterialDownloadReport:
     materials: tuple[SyllabusMaterial, ...]
     warnings: tuple[str, ...]
+    incomplete_course_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,6 +376,7 @@ class CanvasClient:
         contexts = self._get_active_course_contexts()
         materials: list[SyllabusMaterial] = []
         warnings: list[str] = []
+        incomplete_course_ids: set[int] = set()
 
         for context in contexts:
             course = context.summary
@@ -444,6 +446,7 @@ class CanvasClient:
                     if material:
                         materials.append(material)
             except (CanvasException, RequestException) as error:
+                incomplete_course_ids.add(course.id)
                 warnings.append(self._course_warning("syllabus files", course, error))
 
             # Canvas may omit files hidden from the Files tab even when a syllabus
@@ -470,6 +473,7 @@ class CanvasClient:
                     if material:
                         materials.append(material)
                 except (CanvasException, RequestException, OSError, ValueError):
+                    incomplete_course_ids.add(course.id)
                     warnings.append(
                         f"Could not download a syllabus-linked file in {course.name}."
                     )
@@ -497,6 +501,7 @@ class CanvasClient:
         return MaterialDownloadReport(
             materials=tuple(sorted(unique.values(), key=lambda item: item.uid)),
             warnings=tuple(warnings),
+            incomplete_course_ids=tuple(sorted(incomplete_course_ids)),
         )
 
     def _syllabus_file_material(
