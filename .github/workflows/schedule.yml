@@ -6,7 +6,6 @@ on:
       timezone: "America/Toronto"
   workflow_dispatch:
 
-# This label must identify ONE trusted machine with a persistent ATTENDR_HOME.
 permissions:
   contents: read
 concurrency:
@@ -14,14 +13,34 @@ concurrency:
   cancel-in-progress: false
 jobs:
   run:
-    runs-on: [self-hosted, attendr]
-    timeout-minutes: 15
-    env:
-      ATTENDR_HOME: ${{ vars.ATTENDR_HOME }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-      - name: Run with persistent state and refreshed OAuth token
-        run: '"$ATTENDR_HOME/venv/bin/python" scripts/scheduled_run.py'
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install -r requirements.lock
+      - name: Restore private configuration
+        env:
+          CANVAS_BASE_URL: ${{ secrets.CANVAS_BASE_URL }}
+          CANVAS_API_TOKEN: ${{ secrets.CANVAS_API_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          DISCORD_ANNOUNCEMENTS_CHANNEL_ID: ${{ secrets.DISCORD_ANNOUNCEMENTS_CHANNEL_ID }}
+          DISCORD_CALENDAR_CHANNEL_ID: ${{ secrets.DISCORD_CALENDAR_CHANNEL_ID }}
+          DISCORD_QUIZ_CHANNEL_ID: ${{ secrets.DISCORD_QUIZ_CHANNEL_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
+          GOOGLE_TOKEN_B64: ${{ secrets.GOOGLE_TOKEN_B64 }}
+          GOOGLE_CALENDAR_NAME: ${{ secrets.GOOGLE_CALENDAR_NAME }}
+          GOOGLE_STUDY_CALENDAR_NAME: ${{ secrets.GOOGLE_STUDY_CALENDAR_NAME }}
+          STUDY_WORKER_URL: ${{ secrets.STUDY_WORKER_URL }}
+          STUDY_SYNC_SECRET: ${{ secrets.STUDY_SYNC_SECRET }}
+          DAILY_QUIZ_TOPIC: ${{ secrets.DAILY_QUIZ_TOPIC }}
+        run: bash scripts/restore_ci_config.sh
+      - name: Run with durable cloud state
+        env:
+          ATTENDR_STATE_KEY: ${{ secrets.ATTENDR_STATE_KEY }}
+        run: python scripts/cloud_run.py

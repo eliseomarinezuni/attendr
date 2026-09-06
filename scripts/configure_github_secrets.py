@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import shutil
 import subprocess
 import sys
@@ -74,6 +75,10 @@ def main(argv: list[str] | None = None) -> int:
         value = str(configuration.get(optional) or "").strip()
         if value:
             secrets[optional] = value
+    if "STUDY_SYNC_SECRET" in secrets:
+        secrets["ATTENDR_STATE_KEY"] = base64.b64encode(
+            hashlib.sha256(secrets["STUDY_SYNC_SECRET"].encode("utf-8")).digest()
+        ).decode("ascii")
 
     for env_name, default_name, secret_name in (
         ("GOOGLE_CREDENTIALS_FILE", "credentials.json", "GOOGLE_CREDENTIALS_B64"),

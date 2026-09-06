@@ -1,4 +1,4 @@
-"""Transactional local state. Keep this database on a persistent, local disk."""
+"""Transactional state with optional encrypted cloud checkpoints."""
 
 from __future__ import annotations
 
@@ -79,11 +79,20 @@ class StateStore:
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
         db.execute("PRAGMA synchronous=FULL")
+        changed = False
         try:
+            before = db.total_changes
             with db:
                 yield db
+            changed = db.total_changes != before
         finally:
             db.close()
+        if changed:
+            from .cloud_state import client_from_env
+
+            checkpoint = client_from_env(self.path)
+            if checkpoint is not None:
+                checkpoint.upload(self.path)
 
     def was_sent(self, event_key: str, fingerprint: str) -> bool:
         with self.connect() as db:

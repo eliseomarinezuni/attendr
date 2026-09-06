@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
+import { createHash } from 'node:crypto';
 import test, { afterEach } from 'node:test';
 import ts from 'typescript';
 
@@ -204,5 +205,35 @@ test('Worker skips nonexistent spring-forward slots in custom windows', async ()
   await sync(DB, { sessions: [item], profile });
   globalThis.fetch = async () => Response.json({ items: [] });
   assert.equal(await nextSlot(DB.sqlite.prepare('SELECT * FROM study_sessions').get(), 'fake', { DB }, new Date('2026-03-08T05:00:00Z')), null);
+  DB.sqlite.close();
+});
+
+test('cloud state requires a lease and enforces revisions', async () => {
+  const DB = database();
+  const auth = { authorization: 'Bearer secret' };
+  const token = 'c'.repeat(32);
+  const acquire = await worker.fetch(new Request('https://example.test/api/state-store/acquire', {
+    method: 'POST', headers: auth, body: JSON.stringify({ token }),
+  }), { DB, STUDY_SYNC_SECRET: 'secret' }, {});
+  assert.equal(acquire.status, 200);
+  assert.equal((await acquire.json()).revision, 0);
+  const leaseHeaders = { ...auth, 'x-attendr-lease': token };
+  const payload = { revision: 0, sha256: createHash('sha256').update('abc').digest('hex'), size: 3, chunks: ['YWJj'] };
+  const write = await worker.fetch(new Request('https://example.test/api/state-store', {
+    method: 'PUT', headers: leaseHeaders, body: JSON.stringify(payload),
+  }), { DB, STUDY_SYNC_SECRET: 'secret' }, {});
+  assert.deepEqual(await write.json(), { revision: 1 });
+  const read = await worker.fetch(new Request('https://example.test/api/state-store', {
+    headers: leaseHeaders,
+  }), { DB, STUDY_SYNC_SECRET: 'secret' }, {});
+  assert.deepEqual(await read.json(), { revision: 1, sha256: payload.sha256, size: 3, chunk_count: 1, chunks: ['YWJj'] });
+  const stale = await worker.fetch(new Request('https://example.test/api/state-store', {
+    method: 'PUT', headers: leaseHeaders, body: JSON.stringify(payload),
+  }), { DB, STUDY_SYNC_SECRET: 'secret' }, {});
+  assert.equal(stale.status, 409);
+  const competing = await worker.fetch(new Request('https://example.test/api/state-store/acquire', {
+    method: 'POST', headers: auth, body: JSON.stringify({ token: 'e'.repeat(32) }),
+  }), { DB, STUDY_SYNC_SECRET: 'secret' }, {});
+  assert.equal(competing.status, 409);
   DB.sqlite.close();
 });

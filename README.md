@@ -92,9 +92,9 @@ Check it with `crontab -l`. The Mac must be awake and online.
 
 ## GitHub Actions automation
 
-Scheduled sync and lecture-quiz workflows use a single persistent self-hosted runner labelled `attendr`, with the `ATTENDR_HOME` repository variable pointing outside its checkout. They need only `contents: read`; database and refreshed OAuth tokens stay on the runner. Hosted GitHub runners continue to execute the test workflow.
+Scheduled sync and lecture-quiz workflows run on GitHub-hosted Linux runners, so the Mac may remain off. A Cloudflare D1 lease serializes runs and stores an AES-256-GCM-encrypted SQLite checkpoint after each committed mutation. GitHub holds the encryption key in `ATTENDR_STATE_KEY`; D1 never receives plaintext application state.
 
-The schedules require runner provisioning and state migration before activation. Follow [the P1 rollout guide](docs/P1_RELIABILITY.md). Missing or revoked Google credentials fail promptly; only explicit `scripts/setup_google.py` authorization launches a browser.
+The workflows reconstruct `.env`, Google OAuth files, and the database from repository secrets. Required secrets are documented by `scripts/configure_github_secrets.py`; deployment also requires `ATTENDR_STATE_KEY`, `STUDY_WORKER_URL`, and `STUDY_SYNC_SECRET`. Missing or revoked Google credentials fail promptly, and scheduled runs never launch interactive OAuth.
 
 ## Tests
 

@@ -124,6 +124,84 @@ async function planLease(request: Request, env: Env, release: boolean): Promise<
   return acquired ? json({ acquired: true }) : json({ error: "Another planner or button operation is active" }, 409);
 }
 
+const STATE_LEASE_MS = 20 * 60_000;
+
+function stateLeaseToken(request: Request): string {
+  return request.headers.get("x-attendr-lease") ?? "";
+}
+
+async function stateLease(request: Request, env: Env, release: boolean): Promise<Response> {
+  let body: { token?: unknown };
+  try { body = await request.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
+  if (!body || typeof body.token !== "string" || !/^[a-f0-9]{32}$/.test(body.token)) {
+    return json({ error: "Invalid state lease token" }, 400);
+  }
+  if (release) {
+    await env.DB.prepare("UPDATE attendr_state_control SET lease_token=NULL,lease_until=0 WHERE id=1 AND lease_token=?")
+      .bind(body.token).run();
+    return json({ released: true });
+  }
+  const now = Date.now();
+  const row = await env.DB.prepare(`UPDATE attendr_state_control
+    SET lease_token=?,lease_until=? WHERE id=1 AND (lease_until<? OR lease_token=?)
+    RETURNING revision,sha256,size,chunk_count`)
+    .bind(body.token, now + STATE_LEASE_MS, now, body.token)
+    .first<{ revision: number; sha256: string | null; size: number; chunk_count: number }>();
+  return row ? json({ acquired: true, ...row }) : json({ error: "State is in use" }, 409);
+}
+
+async function readState(request: Request, env: Env): Promise<Response> {
+  const token = stateLeaseToken(request);
+  const control = await env.DB.prepare(`SELECT revision,sha256,size,chunk_count
+    FROM attendr_state_control WHERE id=1 AND lease_token=? AND lease_until>?`)
+    .bind(token, Date.now()).first<{ revision: number; sha256: string | null; size: number; chunk_count: number }>();
+  if (!control) return json({ error: "State lease missing or expired" }, 409);
+  const chunks = await env.DB.prepare(
+    "SELECT data FROM attendr_state_chunks WHERE revision=? ORDER BY chunk_index"
+  ).bind(control.revision).all<{ data: string }>();
+  if (chunks.results.length !== control.chunk_count) return json({ error: "State checkpoint incomplete" }, 500);
+  return json({ ...control, chunks: chunks.results.map((item) => item.data) });
+}
+
+async function writeState(request: Request, env: Env): Promise<Response> {
+  let body: { revision?: unknown; sha256?: unknown; size?: unknown; chunks?: unknown };
+  try { body = await request.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
+  const chunks = body?.chunks;
+  if (!Number.isInteger(body?.revision) || !Number.isInteger(body?.size) ||
+      (body.size as number) < 1 || (body.size as number) > 8 * 1024 * 1024 ||
+      typeof body?.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(body.sha256) ||
+      !Array.isArray(chunks) || chunks.length < 1 || chunks.length > 48 ||
+      !chunks.every((chunk) => typeof chunk === "string" && chunk.length > 0 && chunk.length <= 256 * 1024 && /^[A-Za-z0-9+/=]+$/.test(chunk))) {
+    return json({ error: "Invalid state checkpoint" }, 400);
+  }
+  let bytes: Uint8Array;
+  try {
+    const binary = atob(chunks.join(""));
+    bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  } catch {
+    return json({ error: "Invalid state checkpoint encoding" }, 400);
+  }
+  const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.buffer as ArrayBuffer)))
+    .map((value) => value.toString(16).padStart(2, "0")).join("");
+  if (bytes.length !== body.size || digest !== body.sha256) {
+    return json({ error: "State checkpoint integrity mismatch" }, 400);
+  }
+  const token = stateLeaseToken(request);
+  const control = await env.DB.prepare("SELECT revision FROM attendr_state_control WHERE id=1 AND lease_token=? AND lease_until>?")
+    .bind(token, Date.now()).first<{ revision: number }>();
+  if (!control || control.revision !== body.revision) return json({ error: "State revision conflict" }, 409);
+  const revision = control.revision + 1;
+  const statements = [env.DB.prepare("DELETE FROM attendr_state_chunks")];
+  chunks.forEach((chunk, index) => statements.push(
+    env.DB.prepare("INSERT INTO attendr_state_chunks(revision,chunk_index,data) VALUES(?,?,?)").bind(revision, index, chunk)
+  ));
+  statements.push(env.DB.prepare(`UPDATE attendr_state_control
+    SET revision=?,sha256=?,size=?,chunk_count=?,lease_until=? WHERE id=1 AND lease_token=?`)
+    .bind(revision, body.sha256, body.size, chunks.length, Date.now() + STATE_LEASE_MS, token));
+  await env.DB.batch(statements);
+  return json({ revision });
+}
+
 async function getState(env: Env): Promise<Response> {
   const [tasks, sessions, overrides, operations] = await Promise.all([
     env.DB.prepare("SELECT task_uid FROM completed_tasks").all<{ task_uid: string }>(),
@@ -624,6 +702,15 @@ export default {
     if (url.pathname === "/health") return json({ ok: true });
     if ((url.pathname === "/api/plan/acquire" || url.pathname === "/api/plan/release") && request.method === "POST") {
       return isAuthorized(request, env) ? planLease(request, env, url.pathname.endsWith("release")) : unauthorized();
+    }
+    if ((url.pathname === "/api/state-store/acquire" || url.pathname === "/api/state-store/release") && request.method === "POST") {
+      return isAuthorized(request, env) ? stateLease(request, env, url.pathname.endsWith("release")) : unauthorized();
+    }
+    if (url.pathname === "/api/state-store" && request.method === "GET") {
+      return isAuthorized(request, env) ? readState(request, env) : unauthorized();
+    }
+    if (url.pathname === "/api/state-store" && request.method === "PUT") {
+      return isAuthorized(request, env) ? writeState(request, env) : unauthorized();
     }
     if (url.pathname === "/api/state" && request.method === "GET") {
       return isAuthorized(request, env) ? getState(env) : unauthorized();
