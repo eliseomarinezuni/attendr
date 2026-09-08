@@ -18,6 +18,7 @@ from canvasapi.exceptions import CanvasException
 from requests import RequestException
 
 from .ai_assistant import extract_pdf_text_chunks, extract_powerpoint_text_chunks
+from .canvas_client import CANVAS_FILE_ID_PATTERN
 
 
 class KnowledgeSyncError(RuntimeError):
@@ -127,6 +128,7 @@ class KnowledgeSync:
 
         details = self.canvas._canvas.get_course(summary.id, include=["syllabus_body"])
         syllabus = attr(details, "syllabus_body", "")
+        syllabus_file_ids = set(CANVAS_FILE_ID_PATTERN.findall(str(syllabus or "")))
         if syllabus:
             records["syllabus"] = record("syllabus", "Course syllabus", "syllabus",
                 self.canvas._html_to_text(syllabus), url=f"{base}/assignments/syllabus")
@@ -171,6 +173,11 @@ class KnowledgeSync:
             # Canvas returns 403 when the Files tab is hidden. Published files
             # linked from visible modules remain individually accessible.
             pass
+        # A course can hide its Files tab while exposing a file through the
+        # syllabus. Canvas still permits direct retrieval of that linked file.
+        for key in syllabus_file_ids:
+            if key not in files:
+                files[key] = api.get_file(key)
         for (kind, key), item in module_items.items():
             if kind != "File" or not key or key in files:
                 continue
