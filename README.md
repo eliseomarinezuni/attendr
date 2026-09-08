@@ -119,3 +119,148 @@ For an older installation that also wrote to your primary calendar, preview conf
 Add `--apply` to remove only Attendr-tagged source events whose stable UID already exists in the configured destination. Each cleanup saves a private JSON backup under `data/` and rechecks the destination before deletion. Unmatched events and personal events are preserved.
 
 Cloud checkpoints are compressed before authenticated encryption. Existing uncompressed checkpoints remain readable. After a failed upload, Attendr checks the remote revision and checksum before retrying, including recovery from a successful write whose response was lost. Public calendars that reject free/busy queries are read through paginated event listings; unavailable calendars still block planning safely.
+
+## Course assistant: `/ask` in `#ask`
+
+The existing Cloudflare Worker answers questions even while your Mac is off. In the
+separate `#ask` channel, select `/ask` and enter one sentence in its **question** field:
+
+- `for my web development course whens my midterm`
+- `EXMP 3030, explain HTTP requests`
+- `what is due tomorrow in algorithms`
+- `when is my web dev lecture next week`
+
+There is no structured course option. Names, keys, codes, `match` entries, and optional
+`aliases` from `data/course_schedule.json` identify the course. Unknown or multiple
+matches produce a clarification. The existing owner restriction also protects `/ask`;
+answers are ephemeral, visible only to the requesting owner. Using `/ask` outside
+`#ask` gives a redirect message. Ordinary channel messages are not processed.
+
+### Architecture and grounding
+
+The scheduled GitHub Actions run enables `ATTENDR_ASK_SYNC=true` and uses the same
+`cloud_run.py` encrypted-state lease and checkpoint flow. Canvas enumeration indexes
+published pages, syllabus HTML, PDF/PPTX files, assignments (including undated ones),
+announcements (including read announcements), module metadata, and the verified
+course timetable. Extraction hashes are cached in the existing encrypted SQLite
+checkpoint; keys and private files are never needed on the Mac at question time.
+
+Normalized records are stored separately as searchable text in D1. Uploads use the
+existing bearer-authenticated Worker bridge:
+
+1. `POST /api/knowledge/stage` uploads bounded batches for one course/revision.
+2. `POST /api/knowledge/publish` checks the expected record count and atomically
+   publishes the snapshot, updates changed hashes, and deletes absent records.
+3. Failed enumeration/extraction/uploads leave the previous complete snapshot active.
+   Retries reuse the revision and stable source/part IDs. Older revisions cannot
+   replace newer ones; abandoned staging data expires on subsequent uploads.
+
+`POST /api/knowledge/sync` also accepts a single complete snapshot for small imports.
+All endpoints require `Authorization: Bearer $STUDY_SYNC_SECRET`. No new public data
+endpoint is exposed. D1's searchable records do not replace or change the encryption
+of the existing state/checkpoint; treat the D1 database as private course data.
+
+Retrieval filters by course in SQL **before** selecting up to six relevant chunks.
+Deadline lookup is deterministic and works without Gemini. Explicit Canvas deadlines
+are displayed in `America/Toronto`; other dates are quoted from their source instead
+of inferred. Relative assignment dates and timetable dates use Toronto calendar days
+and Monday–Sunday weeks. The timetable respects the term and no-class ranges.
+
+For explanatory questions, `@google/genai` selects up to three exact source excerpts.
+The Worker verifies each quote against its retrieved chunk and attaches its own source
+title/Canvas link. This deliberately conservative format prevents generated dates,
+policies, grades, or explanations unsupported by synchronized material. Canvas text
+is untrusted reference data, suspicious instruction-bearing chunks are excluded, and
+Gemini receives no tools or other courses. Missing evidence produces an explicit
+missing-information response. Snapshots older than 48 hours show a freshness note.
+
+Limits: 1,000 input characters, six questions/minute, six retrieved chunks, 600 model
+output tokens, 12-second model timeout, and two bounded Discord message-edit attempts.
+Mentions are disabled; questions, reference text, credentials, and interaction tokens
+are not logged. Discord replies are deferred immediately, as required by the
+[Discord interaction API](https://docs.discord.com/developers/interactions/receiving-and-responding).
+
+### Setup and deployment
+
+Existing installations retain the same `DB` binding in `worker/wrangler.jsonc` and the
+same `/interactions` endpoint. No Vectorize binding or gateway process is required.
+
+```bash
+cd worker
+npm ci
+npx wrangler d1 execute attendr-study --remote --file=migrations/0005_ask.sql
+npm run deploy
+cd ..
+.venv/bin/python scripts/setup_ask.py --guild-id YOUR_SERVER_ID --upload-worker-secrets
+.venv/bin/python scripts/configure_discord_endpoint.py
+```
+
+For a **new** D1 database, apply `worker/schema.sql` instead of just migration 0005.
+For local verification, replace `--remote` with `--local`.
+
+`setup_ask.py` creates a private text channel named `ask` (owner and bot access) or
+reuses one existing `#ask`, preserving its permissions. It registers/upserts only the
+`ask` guild command; it does not replace other commands or post messages. The bot needs
+**Manage Channels** for channel creation, and must be installed with **bot** and
+**applications.commands** scopes. Keep **View Channel**, **Send Messages**, and
+**Read Message History** available to the bot, and **Use Application Commands** to
+the owner. Set the application's Interactions Endpoint URL to
+`https://YOUR_WORKER/interactions`. Duplicate existing `#ask` channels must be resolved
+before setup. Existing channel visibility is unchanged; replies remain private.
+
+The setup script reads these values from `.env` or the environment:
+
+| Setting | Used by |
+| --- | --- |
+| `DISCORD_BOT_TOKEN` | Discord setup; existing Worker behavior |
+| `DISCORD_APPLICATION_ID`, `DISCORD_PUBLIC_KEY` | Existing Worker signature/application validation |
+| `DISCORD_OWNER_USER_ID` | Owner authorization and private channel creation |
+| `DISCORD_ASK_CHANNEL_ID` | Written by setup; upload to Worker secrets |
+| `GEMINI_API_KEY` | Worker secret; also existing GitHub secret |
+| `GEMINI_MODEL` | Optional Worker model override, same default as Attendr |
+| `STUDY_WORKER_URL`, `STUDY_SYNC_SECRET` | Existing GitHub/Worker authenticated synchronization bridge |
+| `CANVAS_BASE_URL`, `CANVAS_API_TOKEN` | Existing GitHub secrets for Canvas synchronization |
+
+`--upload-worker-secrets` uploads `DISCORD_ASK_CHANNEL_ID`, `GEMINI_API_KEY`, and
+`GEMINI_MODEL` through your authenticated Wrangler session. Without that flag, setup
+only stores the channel ID locally; upload those three values separately with
+`npx wrangler secret put NAME` from `worker/`. Existing Google, Discord study-channel,
+and encrypted-state secrets stay as configured. No additional GitHub secrets are
+needed. Deploy the migration/Worker **before** enabling the updated workflow.
+
+Push the code/workflow through your normal repository process, then manually run
+**Scheduled Academic Assistant** in GitHub Actions for the first cloud snapshot.
+Subsequent existing scheduled runs keep it current. For a local sync using the same
+cloud-state safeguards, run `ATTENDR_ASK_SYNC=true .venv/bin/python scripts/cloud_run.py`.
+That command also performs the normal Attendr run and can send its normal notifications.
+
+### Verification and troubleshooting
+
+```bash
+.venv/bin/python -m pytest
+npm --prefix worker test
+npm --prefix worker run check
+cd worker && npx wrangler deploy --dry-run
+```
+
+Tests disable live Python sockets and mock Discord, Canvas, D1, and Gemini. They cover
+aliases, ambiguity, signatures, deferred replies, source isolation, deadlines,
+untrusted content, synchronization retries/updates/removals, and existing controls.
+
+- **No `/ask` command:** rerun setup for the correct server and confirm the
+  `applications.commands` installation scope. Guild commands are registered per server.
+- **Use the dedicated channel:** upload the saved `DISCORD_ASK_CHANNEL_ID` to the Worker.
+- **Only owner allowed:** confirm `DISCORD_OWNER_USER_ID` matches your Discord user ID.
+- **No synchronized material:** apply migration 0005 and run the updated scheduled
+  workflow. Inspect its Course search status and verify existing Worker/Canvas secrets.
+- **Missing or outdated answers:** inspect the linked source and last sync status.
+  A failed course snapshot preserves old data rather than publishing incomplete data.
+  Scanned PDFs without extractable text, unsupported legacy `.ppt` files, and files
+  over 25 MB need conversion/OCR or a supported Canvas source. No OCR is performed.
+- **Sync failure:** verify source access, valid timestamps, and database migration.
+  Batches are capped at 300 KB, requests at 900 KB, and each course at 20,000 source
+  parts. The old snapshot is preserved if a limit is exceeded.
+- **AI unavailable:** verify Worker `GEMINI_API_KEY`/`GEMINI_MODEL` access and quota.
+  Deterministic deadline/timetable questions still work without Gemini.
+- **Reply delivery failed:** Discord rejected or timed out on both message edits;
+  ask again. Attendr logs only a generic failure and never persists interaction tokens.

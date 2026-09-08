@@ -375,6 +375,18 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 StepResult("Canvas", "failed", f"Unexpected {type(error).__name__}")
             )
 
+    if plan.materials and os.getenv("ATTENDR_ASK_SYNC", "").lower() == "true" and canvas_client is not None:
+        try:
+            from academic_assistant.knowledge_sync import KnowledgeSync
+            knowledge_store = StateStore(os.environ["ATTENDR_DB"])
+            knowledge_schedule = json.loads((PROJECT_ROOT / os.getenv("COURSE_SCHEDULE_FILE", "data/course_schedule.json")).read_text())
+            count = KnowledgeSync(canvas_client, knowledge_store, knowledge_schedule,
+                PROJECT_ROOT / "data/materials/ask", os.getenv("STUDY_WORKER_URL", ""),
+                os.getenv("STUDY_SYNC_SECRET", "")).sync()
+            results.append(StepResult("Course search", "ok", f"{count} course snapshots synchronized"))
+        except Exception as error:
+            results.append(StepResult("Course search", "failed", f"Snapshot sync failed ({type(error).__name__}); prior snapshots retained"))
+
     if plan.announcements:
         if snapshot is None:
             results.append(
