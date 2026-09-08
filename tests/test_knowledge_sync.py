@@ -159,6 +159,29 @@ def test_disabled_pages_and_files_tabs_still_use_visible_module_items(tmp_path):
     assert records['file:8']['chunks'] == ['Accessible module lecture text']
 
 
+def test_syllabus_linked_file_is_indexed_when_files_tab_is_disabled(tmp_path):
+    sync, context, *_ = build(tmp_path)
+    sync.canvas._canvas.get_course = lambda *a, **kw: NS(
+        syllabus_body='<a href="/courses/1/files/44">Course outline</a>'
+    )
+    context.resource.get_files = lambda: (_ for _ in ()).throw(Unauthorized('files disabled'))
+    linked = NS(id=44, display_name='course-outline.pdf', published=True)
+    fetched = []
+    context.resource.get_file = lambda key: fetched.append(str(key)) or linked
+    material = NS(
+        uid='file:44', content_sha256='b' * 64, content_type='application/pdf',
+        local_path=tmp_path / 'course-outline.pdf', html_url='https://canvas.example/files/44',
+        updated_at=None,
+    )
+    sync.canvas._download_lecture_file = lambda *args: material
+    sync._text = lambda value: 'Midterm October 27, 2026'
+
+    records = {item['id']: item for item in sync.collect(context, COURSE)}
+
+    assert fetched == ['44']
+    assert records['file:44']['chunks'] == ['Midterm October 27, 2026']
+
+
 def test_chunk_bounds_and_url_secrets_removed():
     assert max(map(len, chunks('text ' * 10000))) <= 1400
     source = record('1', 'Title', 'page', 'Text', url='https://canvas.example/page?verifier=secret')
