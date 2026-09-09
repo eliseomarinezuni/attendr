@@ -419,3 +419,27 @@ def test_public_calendar_notfound_falls_back_to_paginated_events():
     assert len(result) == 1
     assert result[0].start.isoformat() == "2026-09-07T00:00:00-04:00"
     assert result[0].end.isoformat() == "2026-09-08T00:00:00-04:00"
+
+
+def test_failed_lecture_quiz_is_reported_and_remains_retryable(store):
+    from academic_assistant.ai_assistant import AIProviderError
+    from academic_assistant.lecture_quiz import LectureQuizRunner
+
+    schedule = Mock()
+    schedule.ended_lecture_sessions.return_value = [
+        (Mock(session_id=Mock(return_value="session")), datetime.now(timezone.utc))
+    ]
+    canvas, ai, notifier = Mock(), Mock(), Mock()
+    canvas.download_lecture_materials.return_value = SimpleNamespace(warnings=(), materials=())
+    ai.generate_hybrid_quiz.side_effect = AIProviderError("Gemini returned an empty response for hybrid quiz generation.")
+    runner = LectureQuizRunner(canvas, ai, notifier, schedule,
+                               materials_directory=store.path.parent, state_path=store.path)
+    with patch.object(runner, "_select_material", return_value=Mock()), patch.object(runner, "_material_text", return_value="lecture"):
+        for _ in range(2):
+            report = runner.run()
+            assert report.failed == 1
+            assert report.sent == 0
+            assert "empty response" in report.warnings[0]
+    assert ai.generate_hybrid_quiz.call_count == 2
+    notifier.send_custom_notification.assert_not_called()
+    assert store.quiz("lecture-quiz:session") is None

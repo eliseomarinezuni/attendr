@@ -662,6 +662,11 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 report = runner.run(force=arguments.force)
                 for warning in report.warnings:
                     logging.getLogger("attendr.lecture_quiz").warning("%s", warning)
+                if report.failed:
+                    raise AIProviderError(
+                        f"{report.failed} lecture quiz(es) failed; {report.sent} sent. "
+                        "Unsent sessions remain eligible for retry."
+                    )
                 return (
                     f"{report.sent} sent, {report.already_sent} already sent, "
                     f"{report.waiting_for_slides} waiting for slides, "

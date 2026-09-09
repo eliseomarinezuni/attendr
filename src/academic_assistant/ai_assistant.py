@@ -292,7 +292,7 @@ class AIAssistant:
         self.model = model
         self.max_input_chars = max_input_chars
         self._uses_auth_key = api_key.startswith("AQ")
-        self._client = client if client is not None else genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=60_000))
+        self._client = client if client is not None else genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=180_000))
 
     @classmethod
     def from_env(
@@ -600,6 +600,12 @@ class AIAssistant:
     @staticmethod
     def _safe_provider_error(error: BaseException, task_name: str) -> AIProviderError:
         """Translate provider details into actionable messages without leaking them."""
+        if isinstance(error, TimeoutError) or type(error).__name__ in {
+            "APITimeoutError", "ReadTimeout", "ConnectTimeout", "WriteTimeout", "PoolTimeout"
+        }:
+            return AIProviderError(
+                f"Gemini timed out during {task_name}. The unsent quiz can be retried."
+            )
         message = str(getattr(error, "message", "") or "").casefold()
         code = (
             getattr(error, "code", None)

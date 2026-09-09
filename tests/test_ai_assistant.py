@@ -335,3 +335,16 @@ class AIAssistantTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_provider_timeout_has_safe_actionable_reason():
+    timeout = type("APITimeoutError", (Exception,), {})("secret provider request")
+    error = AIAssistant._safe_provider_error(timeout, "hybrid quiz generation")
+    assert "timed out" in str(error)
+    assert "secret" not in str(error)
+
+
+def test_gemini_client_allows_three_minutes_for_lecture_generation():
+    with patch("academic_assistant.ai_assistant.genai.Client") as client:
+        AIAssistant("test-key")
+    assert client.call_args.kwargs["http_options"].timeout == 180_000
