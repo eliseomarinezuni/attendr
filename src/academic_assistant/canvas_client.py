@@ -23,7 +23,10 @@ from dotenv import load_dotenv
 from requests import RequestException
 from .http_client import configure_canvas_transport
 from .state_store import StateStore
+from .lecture_files import SMALL_FILE_BYTES, LectureDownloadError, lecture_file_limit, stream_download
+from .google_slides import authenticated_slide_text, SlidesAccessError
 
+NUMBERED_LECTURE_PATTERN = re.compile(r"^\s*\d{1,2}[a-z]\s*[-–:]", re.IGNORECASE)
 UTC = timezone.utc
 EXAM_PATTERN = re.compile(r"\b(exam|midterm|final|test)\b", re.IGNORECASE)
 QUIZ_PATTERN = re.compile(r"\bquiz\b", re.IGNORECASE)
@@ -37,7 +40,7 @@ DOCX_CONTENT_TYPE = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 )
 LECTURE_MATERIAL_PATTERN = re.compile(
-    r"\b(lecture|lect|week|module|chapter|slides?|deck|lesson|topic|notes?)\b",
+    r"\b(lecture|lect|week|module|chapter|slides?|deck|lesson|topic|notes?)(?:\b|(?=\d|_))",
     re.IGNORECASE,
 )
 NON_LECTURE_MATERIAL_PATTERN = re.compile(
@@ -769,9 +772,10 @@ class CanvasClient:
         directory: str | os.PathLike[str],
         *,
         excluded_course_patterns: Iterable[str] = (),
-        max_file_bytes: int = 25 * 1024 * 1024,
+        max_file_bytes: int | None = None,
     ) -> LectureMaterialDownloadReport:
         """Download published lecture PDFs, PowerPoints, and pages from Modules."""
+        max_file_bytes = max_file_bytes if max_file_bytes is not None else lecture_file_limit()
         destination = Path(directory).expanduser().resolve()
         excluded = tuple(value.casefold() for value in excluded_course_patterns)
         materials: dict[str, LectureMaterial] = {}
@@ -787,7 +791,7 @@ class CanvasClient:
                     include=["items", "content_details"]
                 )
                 for module in modules:
-                    if bool(self._attr(module, "locked_for_user", False)):
+                    if self._attr(module, "published", True) is False or bool(self._attr(module, "locked_for_user", False)):
                         continue
                     module_name = str(self._attr(module, "name", "") or "")
                     module_position = self._optional_int(
@@ -797,11 +801,14 @@ class CanvasClient:
                     if items is None:
                         items = module.get_module_items(include=["content_details"])
                     for item in items:
+                        if self._attr(item, "published", True) is False or self._attr(item, "locked_for_user", False):
+                            continue
                         title = str(self._attr(item, "title", "") or "")
                         combined = f"{module_name} {title}"
                         if not (
                             LECTURE_MATERIAL_PATTERN.search(combined)
                             or DATED_MATERIAL_PATTERN.search(combined)
+                            or NUMBERED_LECTURE_PATTERN.search(title)
                         ):
                             continue
                         if NON_LECTURE_MATERIAL_PATTERN.search(combined):
@@ -814,16 +821,28 @@ class CanvasClient:
                         )
                         position = self._optional_int(self._attr(item, "position", None))
                         material = None
-                        if kind == "File" and source_id:
-                            material = self._download_lecture_file(
-                                context.resource, course, source_id, title, destination,
-                                max_file_bytes, module_name, module_position, position,
-                            )
-                        elif kind == "Page" and source_id:
-                            material = self._download_lecture_page(
-                                context.resource, course, source_id, title, destination,
-                                module_name, module_position, position,
-                            )
+                        try:
+                            if kind == "File" and source_id:
+                                material = self._download_lecture_file(
+                                    context.resource, course, source_id, title, destination,
+                                    max_file_bytes, module_name, module_position, position,
+                                )
+                            elif kind == "ExternalUrl":
+                                material = self._download_external_slides(
+                                    course, str(self._attr(item, "external_url", "")), title,
+                                    destination, module_name, module_position, position,
+                                )
+                            elif kind == "Page" and source_id:
+                                material = self._download_lecture_page(
+                                    context.resource, course, source_id, title, destination,
+                                    module_name, module_position, position,
+                                )
+                        except SlidesAccessError:
+                            warnings.append(f"GOOGLE_SLIDES_AUTH_REQUIRED for course {course.id}; authorize Google Slides access.")
+                            continue
+                        except (CanvasException, RequestException, OSError, ValueError):
+                            warnings.append(f"Lecture source unavailable for course {course.id}; remaining sources continued.")
+                            continue
                         if material:
                             materials[material.uid] = material
 
@@ -852,17 +871,23 @@ class CanvasClient:
                     source_id = str(self._attr(file, "id", "") or "")
                     if not source_id:
                         continue
-                    material = self._download_lecture_file(
-                        context.resource,
-                        course,
-                        source_id,
-                        name,
-                        destination,
-                        max_file_bytes,
-                        "",
-                        None,
-                        None,
-                    )
+                    if f"canvas:lecture-file:{course.id}:{source_id}" in materials:
+                        continue
+                    try:
+                        material = self._download_lecture_file(
+                            context.resource,
+                            course,
+                            source_id,
+                            name,
+                            destination,
+                            max_file_bytes,
+                            "",
+                            None,
+                            None,
+                        )
+                    except (CanvasException, RequestException, OSError, ValueError):
+                        warnings.append(f"Lecture source unavailable for course {course.id}; remaining sources continued.")
+                        continue
                     if material and material.uid not in materials:
                         materials[material.uid] = material
             except (CanvasException, RequestException, OSError, ValueError) as error:
@@ -907,6 +932,9 @@ class CanvasClient:
             return None
         if int(self._attr(file, "size", 0) or 0) > limit:
             return None
+        if int(self._attr(file, "size", 0) or 0) > SMALL_FILE_BYTES:
+            return self._large_lecture_text(file, course, source_id, title, destination, limit,
+                                            module_name, module_position, item_position, is_pdf)
         content = file.get_contents(binary=True)
         if not isinstance(content, bytes) or len(content) > limit:
             return None
@@ -936,6 +964,80 @@ class CanvasClient:
             module_name=module_name or None,
             module_position=module_position,
             item_position=item_position,
+        )
+
+    def _large_lecture_text(self, file, course, source_id, title, destination, limit,
+                            module_name, module_position, item_position, is_pdf):
+        from .ai_assistant import extract_pdf_text_chunks, extract_powerpoint_text_chunks
+        import json
+        revision = self._attr(file, "updated_at", None)
+        identity = json.dumps([self.base_url, course.id, source_id, revision,
+                               self._attr(file, "size", None)], sort_keys=True)
+        fingerprint = sha256(identity.encode()).hexdigest()
+        cache_key = "lecture-text-v2:" + sha256(f"{self.base_url}:{course.id}:{source_id}".encode()).hexdigest()
+        cached = self.state_store.cache_get(cache_key) if self.state_store and revision else None
+        text = cached.get("text") if isinstance(cached, dict) and cached.get("revision") == fingerprint else None
+        if not isinstance(text, str) or not text.strip():
+            destination.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="lecture-", dir=destination) as temporary:
+                source = Path(temporary) / ("source.pdf" if is_pdf else "source.pptx")
+                stream_download(str(self._attr(file, "url", "")), source, limit)
+                extract = extract_pdf_text_chunks if is_pdf else extract_powerpoint_text_chunks
+                text = "\n\n".join(c.text for c in extract(source, max_chars=2_000_000))
+                if not text.strip() or len(text) > 2_000_000:
+                    raise ValueError("Lecture text is empty or exceeds extraction limit")
+            if self.state_store and revision:
+                self.state_store.cache_set(cache_key, {"text": text, "revision": fingerprint})
+        path = destination / f"course-{course.id}" / "lectures" / f"{source_id}-extracted.txt"
+        self._atomic_write(path, text.encode())
+        return LectureMaterial(
+            uid=f"canvas:lecture-file:{course.id}:{source_id}", source_id=source_id,
+            course_id=course.id, course_name=course.name, title=title,
+            content_type="text/plain", local_path=path,
+            content_sha256=sha256(text.encode()).hexdigest(),
+            updated_at=self._parse_datetime(revision, required=False),
+            html_url=f"{self.base_url}/courses/{course.id}/files/{source_id}",
+            module_name=module_name or None, module_position=module_position,
+            item_position=item_position,
+        )
+
+    def _download_external_slides(self, course, url, title, destination,
+                                  module_name, module_position, item_position):
+        import time as clock
+        parsed = urlparse(url)
+        match = re.fullmatch(r"/presentation/d/([A-Za-z0-9_-]+)(?:/.*)?", parsed.path)
+        if parsed.scheme != "https" or parsed.netloc != "docs.google.com" or not match:
+            return None
+        document_id = match.group(1)
+        canonical = f"https://docs.google.com/presentation/d/{document_id}"
+        cache_key = "google-slides-text-v1:" + sha256(canonical.encode()).hexdigest()
+        cached = self.state_store.cache_get(cache_key) if self.state_store else None
+        text = None
+        if isinstance(cached, dict) and 0 <= clock.time() - cached.get("fetched_at", 0) < 6 * 3600:
+            text = cached.get("text")
+        if not isinstance(text, str) or not text.strip():
+            destination.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="slides-", dir=destination) as temporary:
+                source = Path(temporary) / "slides.txt"
+                try:
+                    stream_download(canonical + "/export/txt", source, 2_000_000)
+                    text = source.read_text(encoding="utf-8-sig").strip()
+                except LectureDownloadError as error:
+                    if error.status not in (401, 403):
+                        raise
+                    text = authenticated_slide_text(document_id)
+                if not text or re.search(r"<(?:!doctype|html)\b", text[:500], re.I):
+                    raise ValueError("Google Slides text export unavailable")
+            if self.state_store:
+                self.state_store.cache_set(cache_key, {"text": text, "fetched_at": clock.time()})
+        path = destination / f"course-{course.id}" / "lectures" / f"google-{document_id}.txt"
+        self._atomic_write(path, text.encode())
+        return LectureMaterial(
+            uid=f"canvas:google-slides:{course.id}:{document_id}", source_id=document_id,
+            course_id=course.id, course_name=course.name, title=title,
+            content_type="text/plain", local_path=path, content_sha256=sha256(text.encode()).hexdigest(),
+            updated_at=None, html_url=canonical + "/edit", module_name=module_name or None,
+            module_position=module_position, item_position=item_position,
         )
 
     def _download_lecture_page(

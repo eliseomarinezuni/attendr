@@ -4,6 +4,7 @@ from types import SimpleNamespace as NS
 import json
 
 import pytest
+import requests
 from canvasapi.exceptions import Unauthorized
 
 from academic_assistant.knowledge_sync import KnowledgeSync, KnowledgeSyncError, chunks, match_course, record
@@ -246,3 +247,113 @@ def test_powerpoint_extraction_is_cached(tmp_path, monkeypatch):
     monkeypatch.setattr('academic_assistant.knowledge_sync.extract_powerpoint_text_chunks', lambda path, **kwargs: calls.append(path) or [NS(text='PowerPoint slide text')])
     assert sync._text(material) == sync._text(material) == 'PowerPoint slide text'
     assert len(calls) == 1
+
+
+@pytest.mark.parametrize('status,code,attempts', [
+    (401, 'WORKER_AUTH_REJECTED', 1),
+    (403, 'WORKER_AUTH_REJECTED', 1),
+    (400, 'WORKER_REJECTED', 1),
+    (429, 'WORKER_RATE_LIMITED', 3),
+    (503, 'WORKER_SERVER_ERROR', 3),
+])
+def test_safe_worker_diagnostics(tmp_path, caplog, status, code, attempts):
+    sync, *_ = build(tmp_path, Session([status] * 3))
+    with pytest.raises(KnowledgeSyncError) as error:
+        sync.sync()
+    assert code in str(error.value)
+    assert f'HTTP {status}' in str(error.value)
+    assert f'retries={attempts - 1}' in str(error.value)
+    assert 'web-development — upload:' in caplog.text
+    assert len(sync.session.calls) == attempts
+    assert all(url.endswith('/stage') for url, _ in sync.session.calls)
+    assert 'secret' not in caplog.text
+
+
+@pytest.mark.parametrize('exception,code', [
+    (requests.Timeout, 'WORKER_TIMEOUT'),
+    (requests.ConnectionError, 'WORKER_NETWORK_ERROR'),
+])
+def test_network_exception_bodies_never_logged(tmp_path, caplog, exception, code):
+    sync, *_ = build(tmp_path)
+    calls = []
+    def broken(*args, **kwargs):
+        calls.append(1)
+        raise exception('Bearer secret https://private.test?verifier=private-token')
+    sync.session.post = broken
+    with pytest.raises(KnowledgeSyncError) as error:
+        sync.sync()
+    assert len(calls) == 3
+    assert code in str(error.value)
+    for forbidden in ('Bearer', 'secret', 'private.test', 'private-token'):
+        assert forbidden not in str(error.value) + caplog.text
+
+
+def test_publish_failure_stage(tmp_path, caplog):
+    sync, *_ = build(tmp_path, Session([200, 403]))
+    with pytest.raises(KnowledgeSyncError, match='publish: WORKER_AUTH_REJECTED'):
+        sync.sync()
+    assert len(sync.session.calls) == 2
+
+
+@pytest.mark.parametrize('empty', [True, False])
+def test_extraction_diagnostics_preserve_snapshot(tmp_path, monkeypatch, caplog, empty):
+    sync, context, *_ = build(tmp_path)
+    context.resource.get_files = lambda: [NS(id=8, filename='private-title.pdf')]
+    material = NS(uid='file:8', content_sha256='hash', content_type='application/pdf',
+                  local_path=tmp_path / 'private-title.pdf')
+    sync.canvas._download_lecture_file = lambda *args: material
+    def extract(*args):
+        if empty:
+            return []
+        raise ValueError('private document text and secret')
+    monkeypatch.setattr('academic_assistant.knowledge_sync.extract_pdf_text_chunks', extract)
+    code = 'TEXT_EXTRACTION_EMPTY' if empty else 'TEXT_EXTRACTION_FAILED'
+    with pytest.raises(KnowledgeSyncError, match=f'text_extraction: {code}') as error:
+        sync.sync()
+    assert not sync.session.calls
+    assert 'private' not in str(error.value) + caplog.text
+    assert 'secret' not in str(error.value) + caplog.text
+
+
+def test_failed_course_does_not_block_next_course(tmp_path, caplog):
+    sync, context, *_ = build(tmp_path)
+    other = next(c for c in SCHEDULE['courses'] if c['key'] != COURSE['key'])
+    second = NS(resource=context.resource, summary=NS(name=other['name'], course_code='', id=2))
+    sync.canvas._get_active_course_contexts = lambda: [context, second]
+    collect = sync.collect
+    def selective(ctx, course):
+        if ctx is context:
+            raise RuntimeError('private provider body')
+        return collect(ctx, course)
+    sync.collect = selective
+    with pytest.raises(KnowledgeSyncError, match='1 course snapshot'):
+        sync.sync()
+    assert len(sync.session.calls) == 2
+    assert sync.session.calls[-1][0].endswith('/publish')
+    assert sync.session.calls[-1][1]['json']['course']['key'] == other['key']
+    assert 'private provider body' not in caplog.text
+
+
+def test_unexpected_summary_never_exposes_exception_text():
+    from academic_assistant.knowledge_sync import failure_summary
+    assert 'secret' not in failure_summary(RuntimeError('secret'))
+    assert 'UNEXPECTED_ERROR' in failure_summary(RuntimeError('secret'))
+
+
+def test_oversized_source_is_explicitly_excluded_without_blocking_course(tmp_path, caplog):
+    sync, context, *_ = build(tmp_path)
+    context.resource.get_files = lambda: [NS(
+        id=8, filename='large-slides.pptx', size=2 * 1024 * 1024 * 1024,
+    )]
+    def forbidden_download(*args):
+        pytest.fail('Oversized files must not be downloaded')
+    sync.canvas._download_lecture_file = forbidden_download
+    assert sync.sync() == 1
+    records = sync.session.calls[0][1]['json']['records']
+    omitted = next(r for r in records if r['id'] == 'file:8:0')
+    assert 'Contents not indexed' in omitted['chunks'][0]
+    assert omitted['url'] == 'https://canvas.example/courses/1/files/8'
+    assert any(r['id'] == 'assignment:11:0' for r in records)
+    assert sync.session.calls[-1][0].endswith('/publish')
+    assert 'SOURCE_TOO_LARGE' in caplog.text
+    assert 'large-slides.pptx' not in caplog.text

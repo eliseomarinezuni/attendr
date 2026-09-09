@@ -377,7 +377,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
 
     if plan.materials and os.getenv("ATTENDR_ASK_SYNC", "").lower() == "true" and canvas_client is not None:
         try:
-            from academic_assistant.knowledge_sync import KnowledgeSync
+            from academic_assistant.knowledge_sync import KnowledgeSync, failure_summary
             knowledge_store = StateStore(os.environ["ATTENDR_DB"])
             knowledge_schedule = json.loads((PROJECT_ROOT / os.getenv("COURSE_SCHEDULE_FILE", "data/course_schedule.json")).read_text())
             count = KnowledgeSync(canvas_client, knowledge_store, knowledge_schedule,
@@ -385,7 +385,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 os.getenv("STUDY_SYNC_SECRET", "")).sync()
             results.append(StepResult("Course search", "ok", f"{count} course snapshots synchronized"))
         except Exception as error:
-            results.append(StepResult("Course search", "failed", f"Snapshot sync failed ({type(error).__name__}); prior snapshots retained"))
+            results.append(StepResult("Course search", "failed", failure_summary(error)))
 
     if plan.announcements:
         if snapshot is None:
@@ -657,9 +657,11 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                     / os.getenv(
                         "ATTENDR_DB", "data/attendr.db"
                     ),
-                    retry_hours=int(os.getenv("LECTURE_QUIZ_RETRY_HOURS", "30")),
+                    retry_hours=int(os.getenv("LECTURE_QUIZ_RETRY_HOURS", "336")),
                 )
                 report = runner.run(force=arguments.force)
+                for warning in report.warnings:
+                    logging.getLogger("attendr.lecture_quiz").warning("%s", warning)
                 return (
                     f"{report.sent} sent, {report.already_sent} already sent, "
                     f"{report.waiting_for_slides} waiting for slides, "

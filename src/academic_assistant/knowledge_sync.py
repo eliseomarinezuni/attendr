@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,10 +20,30 @@ from requests import RequestException
 
 from .ai_assistant import extract_pdf_text_chunks, extract_powerpoint_text_chunks
 from .canvas_client import CANVAS_FILE_ID_PATTERN
+from .lecture_files import lecture_file_limit
+from .google_slides import SlidesAccessError
 
 
 class KnowledgeSyncError(RuntimeError):
-    pass
+    """Internal messages must be fixed text, never provider exception bodies."""
+
+    def __init__(self, message: str, *, code: str = "SYNC_FAILED",
+                 stage: str = "configuration", status: int | None = None,
+                 retries: int = 0):
+        super().__init__(message)
+        self.code, self.stage, self.status, self.retries = code, stage, status, retries
+
+    def diagnostic(self) -> str:
+        status = f", HTTP {self.status}" if self.status is not None else ""
+        return f"{self.stage}: {self.code}{status}, retries={self.retries}"
+
+
+def failure_summary(error: Exception) -> str:
+    # Never stringify arbitrary exceptions, including provider subclasses.
+    if type(error) is KnowledgeSyncError:
+        detail = str(error) if error.code == "SYNC_FAILED" else error.diagnostic()
+        return f"{detail}; prior snapshots retained"
+    return "Snapshot sync failed (UNEXPECTED_ERROR); prior snapshots retained"
 
 
 def normalize(value: str) -> str:
@@ -38,7 +59,7 @@ def match_course(name: str, code: str, courses: list[dict]) -> dict | None:
         if normalize(alias)
     )]
     if len(matches) > 1:
-        raise KnowledgeSyncError("Canvas course matches multiple configured courses")
+        raise KnowledgeSyncError("Canvas course matches multiple configured courses (COURSE_MATCH_AMBIGUOUS)", code="COURSE_MATCH_AMBIGUOUS", stage="course_matching")
     return matches[0] if matches else None
 
 
@@ -75,10 +96,10 @@ class KnowledgeSync:
     def __init__(self, canvas: Any, store: Any, schedule: dict, directory: Path,
                  url: str, secret: str, session: Any = requests):
         if schedule.get("timezone") != "America/Toronto":
-            raise KnowledgeSyncError("Course schedule timezone must be America/Toronto")
+            raise KnowledgeSyncError("Course schedule timezone must be America/Toronto (INVALID_TIMEZONE)", code="INVALID_TIMEZONE", stage="configuration")
         parsed = urlparse(url)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment or not secret:
-            raise KnowledgeSyncError("Knowledge sync requires an HTTPS Worker URL and sync secret")
+            raise KnowledgeSyncError("Knowledge sync requires an HTTPS Worker URL and sync secret (INVALID_WORKER_CONFIG)", code="INVALID_WORKER_CONFIG", stage="configuration")
         self.canvas, self.store, self.schedule = canvas, store, schedule
         self.directory, self.url, self.secret, self.session = directory, url.rstrip("/"), secret, session
 
@@ -91,13 +112,24 @@ class KnowledgeSync:
             text = "\n\n".join(c.text for c in extract_pdf_text_chunks(material.local_path))
         elif material.local_path.suffix.lower() == ".pptx":
             text = "\n\n".join(c.text for c in extract_powerpoint_text_chunks(material.local_path, max_chars=2_000_000))
+        elif material.content_type == "text/plain":
+            text = material.local_path.read_text(encoding="utf-8")
         else:
             text = self.canvas._html_to_text(material.local_path.read_text(encoding="utf-8"))
         if not text.strip():
-            raise KnowledgeSyncError("A course source has no extractable text")
+            raise KnowledgeSyncError("A course source has no extractable text (TEXT_EXTRACTION_EMPTY)", code="TEXT_EXTRACTION_EMPTY", stage="text_extraction")
         if self.store:
             self.store.cache_set(key, {"hash": material.content_sha256, "text": text})
         return text
+
+    def _source_text(self, material: Any) -> str:
+        try:
+            return self._text(material)
+        except KnowledgeSyncError:
+            raise
+        except Exception:
+            raise KnowledgeSyncError("Source text extraction failed", code="TEXT_EXTRACTION_FAILED",
+                                     stage="text_extraction") from None
 
     def collect(self, context: Any, course: dict) -> list[dict]:
         api, summary = context.resource, context.summary
@@ -111,7 +143,8 @@ class KnowledgeSync:
             visible = attr(module, "published", True) is not False and not attr(module, "locked_for_user", False)
             for item in module.get_module_items():
                 kind = str(attr(item, "type", ""))
-                key = str(attr(item, "page_url", "") if kind == "Page" else attr(item, "content_id", ""))
+                key = str(attr(item, "page_url", "") if kind == "Page" else
+                          attr(item, "external_url", "") if kind == "ExternalUrl" else attr(item, "content_id", ""))
                 if not visible or attr(item, "published", True) is False or attr(item, "locked_for_user", False):
                     excluded.add((kind, key))
                 else:
@@ -184,20 +217,60 @@ class KnowledgeSync:
             try:
                 files[key] = api.get_file(key)
             except (CanvasException, RequestException):
-                raise KnowledgeSyncError("A visible module file could not be read")
+                raise KnowledgeSyncError("A visible module file could not be read (SOURCE_UNREADABLE)", code="SOURCE_UNREADABLE", stage="source_retrieval")
         for key, file in files.items():
             name = str(attr(file, "display_name", None) or attr(file, "filename", ""))
             if not key or not allowed(file, "File", key) or Path(name).suffix.lower() not in {".pdf", ".pptx"}:
                 continue
+            limit = lecture_file_limit()
+            if int(attr(file, "size", 0) or 0) > limit:
+                # This is an explicit indexing limit, not an incomplete retrieval.
+                # Keep a citation explaining the omission so search cannot imply
+                # that it has read this source's contents.
+                course_key = re.sub(r"[^a-zA-Z0-9_-]", "_", str(course["key"]))[:80]
+                logging.getLogger("attendr.knowledge_sync").warning(
+                    "Course source excluded: %s — SOURCE_TOO_LARGE, limit_bytes=%d",
+                    course_key, limit,
+                )
+                source_id = f"file:{key}"
+                records[source_id] = record(
+                    source_id, name, "file",
+                    f"Contents not indexed: this file exceeds the {limit // (1024 * 1024)} MiB indexing limit. "
+                    "Open the original Canvas file to read it.",
+                    url=f"{base}/files/{key}", module=modules.get(("File", key)),
+                )
+                continue
             material = self.canvas._download_lecture_file(api, summary, key, name, self.directory,
-                25 * 1024 * 1024, "", None, None)
+                limit, "", None, None)
             if material is None:
-                raise KnowledgeSyncError("A published PDF/PowerPoint could not be downloaded safely")
+                raise KnowledgeSyncError("A published PDF/PowerPoint could not be downloaded safely (SOURCE_UNREADABLE)", code="SOURCE_UNREADABLE", stage="source_retrieval")
             source_id = f"file:{key}"
             records[source_id] = record(source_id, name, "pdf" if name.lower().endswith(".pdf") else "powerpoint",
-                self._text(material), url=material.html_url,
+                self._source_text(material), url=material.html_url,
                 updated_at=material.updated_at.isoformat() if material.updated_at else None,
                 module=modules.get(("File", key)))
+        for (kind, key), item in module_items.items():
+            if kind != "ExternalUrl" or not key or not allowed(item, kind, key):
+                continue
+            try:
+                material = self.canvas._download_external_slides(
+                    summary, key, str(attr(item, "title", "Lecture slides")), self.directory,
+                    "", None, None,
+                )
+            except SlidesAccessError:
+                source_id = "external:" + hashlib.sha256(key.encode()).hexdigest()
+                records[source_id] = record(source_id, str(attr(item, "title", "Lecture slides")),
+                    "presentation", "Contents not indexed: Google Slides read access is required.",
+                    url=key, module=modules.get((kind, key)))
+                logging.getLogger("attendr.knowledge_sync").warning("Linked slides excluded: GOOGLE_SLIDES_AUTH_REQUIRED")
+                continue
+            except (ValueError, OSError, RequestException):
+                raise KnowledgeSyncError("Linked slides could not be read", code="SOURCE_UNREADABLE",
+                                         stage="source_retrieval") from None
+            if material is not None:
+                source_id = f"external:{material.source_id}"
+                records[source_id] = record(source_id, material.title, "presentation",
+                    self._source_text(material), url=material.html_url, module=modules.get((kind, key)))
         for assignment in api.get_assignments(override_assignment_dates=True):
             key = str(attr(assignment, "id", ""))
             if not key or not allowed(assignment, "Assignment", key):
@@ -230,7 +303,7 @@ class KnowledgeSync:
         return list(records.values())
 
     def sync(self) -> int:
-        failures, count = 0, 0
+        failures, count = [], 0
         # Resolve the complete inventory first; never let ambiguous courses overwrite one another.
         mapped = []
         seen = set()
@@ -238,14 +311,16 @@ class KnowledgeSync:
             course = match_course(context.summary.name, context.summary.course_code or "", self.schedule["courses"])
             if course:
                 if course["key"] in seen:
-                    raise KnowledgeSyncError("Multiple active Canvas courses map to the same course key")
+                    raise KnowledgeSyncError("Multiple active Canvas courses map to the same course key (COURSE_MATCH_AMBIGUOUS)", code="COURSE_MATCH_AMBIGUOUS", stage="course_matching")
                 seen.add(course["key"])
                 mapped.append((context, course))
         for context, course in mapped:
+            stage = "source_retrieval"
             try:
                 # Revision starts before enumeration: late retries cannot overwrite a newer snapshot.
                 revision = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
                 records = self.collect(context, course)
+                stage = "snapshot_build"
                 payload = {"course": {**course, "code": context.summary.course_code or "", "term": self.schedule["term"]},
                            "complete": True, "synced_at": revision, "records": records}
                 # Bound each D1 value/upload while preserving every extracted chunk.
@@ -256,7 +331,8 @@ class KnowledgeSync:
                         part["hash"] = hashlib.sha256(json.dumps({k: v for k, v in part.items() if k != "hash"}, sort_keys=True).encode()).hexdigest()
                         parts.append(part)
                 if len(parts) > 20_000:
-                    raise KnowledgeSyncError("Course snapshot exceeds source limit")
+                    raise KnowledgeSyncError("Course snapshot exceeds source limit (SNAPSHOT_TOO_LARGE)", code="SNAPSHOT_TOO_LARGE", stage="snapshot_build")
+                stage = "upload"
                 batch, size = [], 0
                 for part in parts:
                     length = len(json.dumps(part).encode())
@@ -267,26 +343,45 @@ class KnowledgeSync:
                     size += length
                 if batch:
                     self._upload("stage", {**payload, "records": batch})
+                stage = "publish"
                 self._upload("publish", {**payload, "records": [], "count": len(parts)})
                 count += 1
-            except Exception:
-                # Do not log Canvas text, request URLs, or provider exception bodies.
-                failures += 1
+            except Exception as error:
+                if type(error) is KnowledgeSyncError:
+                    detail = error.diagnostic()
+                else:
+                    code = "SOURCE_UNREADABLE" if isinstance(error, (CanvasException, RequestException)) else "UNEXPECTED_ERROR"
+                    detail = f"{stage}: {code}"
+                # Only configured keys and fixed diagnostics enter logs; no source data.
+                key = re.sub(r"[^a-zA-Z0-9_-]", "_", str(course["key"]))[:80]
+                detail = f"{key} — {detail}"
+                failures.append(detail)
+                logging.getLogger("attendr.knowledge_sync").error("Course snapshot failed: %s", detail)
         if failures:
-            raise KnowledgeSyncError(f"{failures} course snapshot(s) failed; previous complete snapshots preserved")
+            raise KnowledgeSyncError(f"{len(failures)} course snapshot(s) failed; previous complete snapshots preserved: " + "; ".join(failures))
         if not count:
-            raise KnowledgeSyncError("No configured active Canvas courses were found")
+            raise KnowledgeSyncError("No configured active Canvas courses were found (NO_MATCHING_COURSES)", code="NO_MATCHING_COURSES", stage="course_matching")
         return count
 
     def _upload(self, action: str, payload: dict) -> None:
+        stage = "publish" if action == "publish" else "upload"
         for attempt in range(3):
+            status = None
             try:
                 response = self.session.post(f"{self.url}/api/knowledge/{action}",
                     headers={"Authorization": f"Bearer {self.secret}"}, json=payload, timeout=30)
-                if response.status_code == 200:
+                status = response.status_code
+                if status == 200:
                     return
-                if response.status_code < 500 and response.status_code != 429:
-                    raise KnowledgeSyncError("Worker rejected the course snapshot")
+                code = ("WORKER_AUTH_REJECTED" if status in (401, 403) else
+                        "WORKER_RATE_LIMITED" if status == 429 else
+                        "WORKER_SERVER_ERROR" if status >= 500 else "WORKER_REJECTED")
+                if status < 500 and status != 429:
+                    raise KnowledgeSyncError("Worker rejected the course snapshot", code=code,
+                                             stage=stage, status=status, retries=attempt)
+            except requests.Timeout:
+                code = "WORKER_TIMEOUT"
             except requests.RequestException:
-                pass
-        raise KnowledgeSyncError("Course snapshot upload failed")
+                code = "WORKER_NETWORK_ERROR"
+        raise KnowledgeSyncError("Course snapshot upload failed", code=code,
+                                 stage=stage, status=status, retries=attempt)

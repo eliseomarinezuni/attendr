@@ -14,7 +14,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -44,5 +44,7 @@ jobs:
       - name: Run with durable cloud state
         env:
           ATTENDR_ASK_SYNC: "true"
+          LECTURE_MAX_FILE_MB: "768"
+          LECTURE_QUIZ_RETRY_HOURS: "336"
           ATTENDR_STATE_KEY: ${{ secrets.STUDY_SYNC_SECRET }}
         run: python scripts/cloud_run.py
