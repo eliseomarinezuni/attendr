@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from io import BytesIO
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from canvasapi.exceptions import CanvasException, InvalidAccessToken
+from pptx import Presentation
 
 from academic_assistant.canvas_client import (
     CanvasAuthenticationError,
@@ -363,6 +365,39 @@ class CanvasClientTests(unittest.TestCase):
             report = self.make_client(FakeCanvas([active_course])).download_lecture_materials(directory)
         self.assertEqual([item.title for item in report.materials], ["Lecture 1"])
         self.assertEqual(report.materials[0].module_name, "Week 1")
+
+    def test_downloads_first_lecture_from_introduction_module(self):
+        presentation = Presentation()
+        presentation.slides.add_slide(presentation.slide_layouts[1])
+        output = BytesIO()
+        presentation.save(output)
+        content = output.getvalue()
+        introduction = FakeFile(
+            id=23,
+            display_name="Introduction_canvas.pptx",
+            content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            size=len(content),
+            content=content,
+            updated_at="2026-09-09T10:00:00Z",
+        )
+        module = SimpleNamespace(
+            name="Introduction",
+            position=4,
+            locked_for_user=False,
+            items=[
+                {
+                    "type": "File",
+                    "content_id": 23,
+                    "title": "Introduction_canvas.pptx",
+                    "position": 4,
+                }
+            ],
+        )
+        active_course = course(files=[introduction], modules=[module])
+        with tempfile.TemporaryDirectory() as directory:
+            report = self.make_client(FakeCanvas([active_course])).download_lecture_materials(directory)
+        self.assertEqual([item.title for item in report.materials], ["Introduction_canvas.pptx"])
+        self.assertEqual(report.materials[0].module_name, "Introduction")
 
     def test_upcoming_window_includes_boundaries_and_excludes_invalid_dates(self):
         active_course = course(

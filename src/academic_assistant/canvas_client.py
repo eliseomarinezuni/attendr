@@ -43,6 +43,10 @@ LECTURE_MATERIAL_PATTERN = re.compile(
     r"\b(lecture|lect|week|module|chapter|slides?|deck|lesson|topic|notes?)(?:\b|(?=\d|_))",
     re.IGNORECASE,
 )
+INTRODUCTORY_MATERIAL_PATTERN = re.compile(
+    r"\b(introduction|introductory|overview|getting[\s_-]+started)\b",
+    re.IGNORECASE,
+)
 NON_LECTURE_MATERIAL_PATTERN = re.compile(
     r"\b(lab|laboratory|tutorial|workshop)\b", re.IGNORECASE
 )
@@ -809,6 +813,7 @@ class CanvasClient:
                             LECTURE_MATERIAL_PATTERN.search(combined)
                             or DATED_MATERIAL_PATTERN.search(combined)
                             or NUMBERED_LECTURE_PATTERN.search(title)
+                            or INTRODUCTORY_MATERIAL_PATTERN.search(combined)
                         ):
                             continue
                         if NON_LECTURE_MATERIAL_PATTERN.search(combined):
@@ -864,6 +869,7 @@ class CanvasClient:
                     if not (
                         LECTURE_MATERIAL_PATTERN.search(name)
                         or DATED_MATERIAL_PATTERN.search(name)
+                        or INTRODUCTORY_MATERIAL_PATTERN.search(name)
                     ):
                         continue
                     if NON_LECTURE_MATERIAL_PATTERN.search(name):

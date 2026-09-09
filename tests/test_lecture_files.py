@@ -150,6 +150,31 @@ def test_numbered_week_labels_match_correct_session(tmp_path):
     assert any(day.date() == ended.date() and s == session for s, day in due)
 
 
+def test_introduction_module_matches_only_first_course_lecture(tmp_path):
+    from datetime import datetime
+    from academic_assistant.course_schedule import CourseSchedule
+    from academic_assistant.lecture_quiz import LectureQuizRunner
+    root = Path(__file__).resolve().parents[1]
+    schedule = CourseSchedule.load(root / 'data/course_schedule.json')
+    sessions = sorted(
+        (s for s in schedule.sessions if s.course_key == 'computer-graphics' and s.activity == 'lecture'),
+        key=lambda session: (session.weekday, session.start),
+    )
+    runner = LectureQuizRunner(None, None, None, schedule, materials_directory=tmp_path, state_path=tmp_path / 'state.db')
+    material = NS(
+        course_name='Computer Graphics & Visualization',
+        module_name='Introduction',
+        module_position=4,
+        title='Introduction_canvas.pptx',
+        item_position=4,
+        updated_at=None,
+    )
+    first_end = datetime(2026, 9, 9, 11, tzinfo=schedule.timezone)
+    second_end = datetime(2026, 9, 11, 11, tzinfo=schedule.timezone)
+    assert runner._select_material(sessions[0], first_end, (material,)) is material
+    assert runner._select_material(sessions[1], second_end, (material,)) is None
+
+
 def test_private_slides_requires_explicit_scope(tmp_path, monkeypatch):
     import json
     from academic_assistant.google_slides import authenticated_slide_text, SlidesAccessError

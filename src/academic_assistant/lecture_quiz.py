@@ -20,7 +20,7 @@ from .ai_assistant import (
     extract_powerpoint_text_chunks,
     hybrid_quiz_discord_payload,
 )
-from .canvas_client import CanvasClient, LectureMaterial
+from .canvas_client import CanvasClient, INTRODUCTORY_MATERIAL_PATTERN, LectureMaterial
 from .lecture_files import lecture_file_limit
 from .course_schedule import ClassSession, CourseSchedule
 from .state_store import StateStore
@@ -191,6 +191,10 @@ class LectureQuizRunner:
                 score += 60
             if re.search(rf"\b(?:lecture|lect)\s*0?{lecture}\b", text):
                 score += 80
+            if INTRODUCTORY_MATERIAL_PATTERN.search(text):
+                if week != 1 or lecture != 1:
+                    continue
+                score += 90
             if material.module_position == week:
                 score += 35
             if material.item_position == lecture:
