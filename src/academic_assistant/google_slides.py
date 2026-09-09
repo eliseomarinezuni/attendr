@@ -16,7 +16,7 @@ class SlidesAccessError(ValueError):
 
 
 def authenticated_slide_text(document_id: str) -> str:
-    path = Path(os.getenv('GOOGLE_TOKEN_FILE', 'token.json')).expanduser()
+    path = Path(os.getenv('GOOGLE_SLIDES_TOKEN_FILE', 'google_slides_token.json')).expanduser()
     if not path.is_file():
         raise SlidesAccessError('GOOGLE_SLIDES_AUTH_REQUIRED')
     data = json.loads(path.read_text())

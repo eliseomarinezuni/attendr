@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from academic_assistant.calendar_sync import GoogleCalendarAuthenticator, SCOPES
+from academic_assistant.calendar_sync import GoogleCalendarAuthenticator
 from academic_assistant.google_slides import SLIDES_SCOPE
 from google_auth_oauthlib.flow import InstalledAppFlow
 
@@ -28,7 +28,8 @@ def main() -> int:
         interactive=True,
     )
     if args.lecture_slides:
-        flow = InstalledAppFlow.from_client_secrets_file(str(authenticator.credentials_path), [*SCOPES, SLIDES_SCOPE])
+        authenticator.token_path = ROOT / Path(os.getenv("GOOGLE_SLIDES_TOKEN_FILE", "google_slides_token.json")).expanduser()
+        flow = InstalledAppFlow.from_client_secrets_file(str(authenticator.credentials_path), [SLIDES_SCOPE])
         credentials = flow.run_local_server(port=0, access_type="offline", prompt="consent", timeout_seconds=120)
         authenticator._save_token(credentials)
     else:
