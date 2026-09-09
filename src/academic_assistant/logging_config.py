@@ -3,15 +3,22 @@
 import json
 import logging
 import os
+import re
 import traceback
+
+
+_SENSITIVE_QUERY = re.compile(
+    r"(?i)([?&](?:access_token|auth|key|signature|token|verifier)=)[^&\s\"']+"
+)
 
 
 class RedactedJSONFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
+        message = _SENSITIVE_QUERY.sub(r"\1[REDACTED]", record.getMessage())
         value = {
             "level": record.levelname,
             "source": record.name,
-            "message": record.getMessage(),
+            "message": message,
             "run_id": getattr(record, "run_id", None),
         }
         if record.exc_info:
@@ -42,3 +49,6 @@ def configure_logging(run_id: str | None = None) -> None:
 
     handler.addFilter(add_context)
     logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
+    # canvasapi logs signed download URLs at INFO. Application-level summaries
+    # retain failures without exposing temporary access parameters.
+    logging.getLogger("canvasapi.requester").setLevel(logging.WARNING)
