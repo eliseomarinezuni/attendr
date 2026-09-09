@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import json
 import tempfile
 import unittest
 from dataclasses import replace
@@ -14,6 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 from academic_assistant import (
+    AIProviderError,
     CourseSchedule,
     CourseMaterialsSync,
     MaterialDownloadReport,
@@ -46,13 +48,19 @@ class FakeAI:
         return self.deadlines
 
 
-def deadline(date_value="2026-10-20", time_value="13:30"):
+def deadline(
+    date_value="2026-10-20",
+    time_value="13:30",
+    *,
+    title="Midterm Exam",
+    evidence="Midterm Exam: October 20 at 1:30 PM",
+):
     return {
-        "title": "Midterm Exam",
+        "title": title,
         "due_date": date_value,
         "due_time": time_value,
         "kind": "exam",
-        "source_evidence": "Midterm Exam: October 20 at 1:30 PM",
+        "source_evidence": evidence,
     }
 
 
@@ -106,11 +114,75 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             self.assertEqual(cached_ai.calls, [])
             self.assertEqual(second.items[0].uid, first.items[0].uid)
 
+    def test_schema_valid_hallucinated_date_never_becomes_academic_item(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            html_path = root / "syllabus.html"
+            html_path.write_text("<p>Midterm Exam date will be announced later.</p>")
+            material = self.make_material(html_path)
+            hallucination = {
+                "title": "Midterm Exam",
+                "due_date": "2026-10-20",
+                "due_time": None,
+                "kind": "exam",
+                "source_evidence": "Midterm Exam date will be announced later.",
+            }
+
+            report = CourseMaterialsSync(
+                FakeCanvas([material]),
+                FakeAI([hallucination]),
+                index_path=root / "index.json",
+                now_provider=lambda: NOW,
+            ).sync()
+
+        self.assertEqual(report.items, ())
+        self.assertFalse(report.complete)
+        self.assertTrue(any("Rejected ungrounded AI deadline" in warning for warning in report.warnings))
+
+    def test_legacy_unverified_cache_is_revalidated_on_provider_failure(self):
+        class FailingAI:
+            def extract_major_deadlines(self, *args, **kwargs):
+                raise AIProviderError("provider unavailable")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            html_path = root / "syllabus.html"
+            html_path.write_text("<p>Midterm Exam: October 20, 2026</p>")
+            material = self.make_material(html_path)
+            index_path = root / "index.json"
+            index_path.write_text(json.dumps({
+                "version": 1,
+                "sources": {
+                    material.uid: {
+                        "content_sha256": material.content_sha256,
+                        "course_id": material.course_id,
+                        "course_name": material.course_name,
+                        "title": material.title,
+                        "deadlines": [deadline(
+                            "2026-10-21", None,
+                            evidence="Midterm Exam: October 20, 2026",
+                        )],
+                        "extraction_version": 3,
+                        "context_hash": "legacy",
+                    }
+                },
+            }))
+
+            report = CourseMaterialsSync(
+                FakeCanvas([material]),
+                FailingAI(),
+                index_path=index_path,
+                now_provider=lambda: NOW,
+            ).sync()
+
+        self.assertEqual(report.items, ())
+        self.assertTrue(any("Rejected ungrounded AI deadline" in warning for warning in report.warnings))
+
     def test_untimed_midterm_uses_matching_lecture_slot(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             html_path = root / "syllabus.html"
-            html_path.write_text("<p>Midterm October 27, 2026</p>")
+            html_path.write_text("<p>Midterm Exam October 27, 2026</p>")
             material = replace(
                 self.make_material(html_path),
                 course_name="202699 - Web Dev - EXMP-3030",
@@ -139,14 +211,16 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             root = Path(directory)
             first_path = root / "one.html"
             second_path = root / "two.html"
-            first_path.write_text("<p>Midterm October 20</p>")
-            second_path.write_text("<p>Midterm October 21</p>")
+            first_path.write_text("<p>Midterm Exam October 20</p>")
+            second_path.write_text("<p>Midterm Exam October 21</p>")
             first = self.make_material(first_path, uid="canvas:syllabus-page:1")
             second = self.make_material(second_path, uid="canvas:syllabus-file:1:2")
 
             class ConflictingAI:
                 def extract_major_deadlines(self, text, **kwargs):
-                    return [deadline("2026-10-21" if "21" in text else "2026-10-20")]
+                    return [deadline(
+                        "2026-10-21" if "21" in text else "2026-10-20", None
+                    )]
 
             report = CourseMaterialsSync(
                 FakeCanvas([first, second]),
@@ -182,7 +256,12 @@ class CourseMaterialsSyncTests(unittest.TestCase):
                 updated_at=None,
                 html_url=None,
             )
-            ai = FakeAI([deadline("2026-10-16", None)])
+            ai = FakeAI([deadline(
+                "2026-10-16",
+                None,
+                title="Assignment 1",
+                evidence="Assignment 1 | October 16, 2026",
+            )])
             report = CourseMaterialsSync(
                 FakeCanvas([material]),
                 ai,

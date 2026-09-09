@@ -67,6 +67,7 @@ def main(argv: list[str] | None = None) -> int:
         "DAILY_QUIZ_TOPIC",
         "STUDY_WORKER_URL",
         "STUDY_SYNC_SECRET",
+        "ATTENDR_STATE_KEY",
         "DISCORD_BOT_TOKEN",
         "DISCORD_ANNOUNCEMENTS_CHANNEL_ID",
         "DISCORD_CALENDAR_CHANNEL_ID",
@@ -75,6 +76,25 @@ def main(argv: list[str] | None = None) -> int:
         value = str(configuration.get(optional) or "").strip()
         if value:
             secrets[optional] = value
+
+    cloud_names = ("STUDY_WORKER_URL", "STUDY_SYNC_SECRET", "ATTENDR_STATE_KEY")
+    configured_cloud = [name for name in cloud_names if name in secrets]
+    if configured_cloud and len(configured_cloud) != len(cloud_names):
+        missing_cloud = [name for name in cloud_names if name not in secrets]
+        print(
+            f"Missing cloud runner values: {', '.join(missing_cloud)}",
+            file=sys.stderr,
+        )
+        return 1
+    if (
+        "ATTENDR_STATE_KEY" in secrets
+        and secrets["ATTENDR_STATE_KEY"] == secrets["STUDY_SYNC_SECRET"]
+    ):
+        print(
+            "ATTENDR_STATE_KEY must be independent from STUDY_SYNC_SECRET.",
+            file=sys.stderr,
+        )
+        return 1
 
     for env_name, default_name, secret_name in (
         ("GOOGLE_CREDENTIALS_FILE", "credentials.json", "GOOGLE_CREDENTIALS_B64"),

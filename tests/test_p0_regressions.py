@@ -280,7 +280,7 @@ class SourceSafetyTests(unittest.TestCase):
             {
                 "title": "Essay",
                 "due_date": text,
-                "due_time": "12:00",
+                "due_time": None,
                 "kind": "assignment",
                 "source_evidence": text,
             }

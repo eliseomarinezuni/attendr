@@ -96,11 +96,11 @@ Check it with `crontab -l`. The Mac must be awake and online.
 
 ## GitHub Actions automation
 
-Scheduled sync and lecture-quiz workflows run on GitHub-hosted Linux runners, so the Mac may remain off. A Cloudflare D1 lease serializes runs and stores an AES-256-GCM-encrypted SQLite checkpoint after each committed mutation. The key is derived at runtime from the existing `STUDY_SYNC_SECRET`; D1 never receives plaintext application state.
+Scheduled sync and lecture-quiz workflows run on GitHub-hosted Linux runners, so the Mac may remain off. A Cloudflare D1 lease serializes runs and stores an AES-256-GCM-encrypted SQLite checkpoint after each committed mutation. `STUDY_SYNC_SECRET` authenticates Worker requests; an independent `ATTENDR_STATE_KEY` encrypts the checkpoint. D1 never receives plaintext application state. Existing installations must follow the one-time key-separation procedure in [P1 reliability and rollout](docs/P1_RELIABILITY.md#one-time-checkpoint-key-separation) before changing the GitHub secret.
 
 The main cron runs at minute 17 to avoid top-of-hour GitHub congestion. Each hosted run records an authenticated heartbeat in D1. The Worker's five-minute cron dispatches a recovery run when the academic heartbeat is more than 150 minutes old during the 8:00 AM–10:00 PM Toronto window. Configure a fine-grained GitHub token with Actions write access as the Worker secret `GITHUB_ACTIONS_TOKEN`; repository, workflow, and ref are non-secret Wrangler variables.
 
-The workflows reconstruct `.env`, Google OAuth files, and the database from repository secrets. Required secrets are documented by `scripts/configure_github_secrets.py`; deployment also requires `STUDY_WORKER_URL` and `STUDY_SYNC_SECRET`. Missing or revoked Google credentials fail promptly, and scheduled runs never launch interactive OAuth.
+The workflows reconstruct `.env`, Google OAuth files, and the database from repository secrets. Required secrets are documented by `scripts/configure_github_secrets.py`; deployment also requires `STUDY_WORKER_URL`, `STUDY_SYNC_SECRET`, and an independent `ATTENDR_STATE_KEY`. Missing or revoked credentials fail promptly, and scheduled runs never launch interactive OAuth.
 
 ## Tests
 
@@ -224,15 +224,17 @@ The setup script reads these values from `.env` or the environment:
 | `DISCORD_ASK_CHANNEL_ID` | Written by setup; upload to Worker secrets |
 | `GEMINI_API_KEY` | Worker secret; also existing GitHub secret |
 | `GEMINI_MODEL` | Optional Worker model override, same default as Attendr |
-| `STUDY_WORKER_URL`, `STUDY_SYNC_SECRET` | Existing GitHub/Worker authenticated synchronization bridge |
+| `STUDY_WORKER_URL`, `STUDY_SYNC_SECRET` | GitHub/Worker authenticated synchronization bridge |
+| `ATTENDR_STATE_KEY` | Independent AES-GCM checkpoint encryption key; never a Worker bearer credential |
 | `CANVAS_BASE_URL`, `CANVAS_API_TOKEN` | Existing GitHub secrets for Canvas synchronization |
 
 `--upload-worker-secrets` uploads `DISCORD_ASK_CHANNEL_ID`, `GEMINI_API_KEY`, and
 `GEMINI_MODEL` through your authenticated Wrangler session. Without that flag, setup
 only stores the channel ID locally; upload those three values separately with
 `npx wrangler secret put NAME` from `worker/`. Existing Google, Discord study-channel,
-and encrypted-state secrets stay as configured. No additional GitHub secrets are
-needed. Deploy the migration/Worker **before** enabling the updated workflow.
+and encrypted-state secrets stay as configured. No additional `/ask`-specific GitHub
+secrets are needed; `ATTENDR_STATE_KEY` is still required for hosted checkpoint runs.
+Deploy the migration/Worker **before** enabling the updated workflow.
 
 Push the code/workflow through your normal repository process, then manually run
 **Scheduled Academic Assistant** in GitHub Actions for the first cloud snapshot.

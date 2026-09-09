@@ -30,6 +30,7 @@ data/materials/*
 
 # Private recovery exports from managed calendar cleanup.
 data/calendar-duplicates-*.json
+data/cloud-state-rotation-*.json
 
 # Independent read-only Google Slides OAuth token
 google_slides_token.json
