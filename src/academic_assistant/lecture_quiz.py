@@ -21,6 +21,7 @@ from .ai_assistant import (
     hybrid_quiz_discord_payload,
 )
 from .canvas_client import CanvasClient, LectureMaterial
+from .lecture_files import lecture_file_limit
 from .course_schedule import ClassSession, CourseSchedule
 from .state_store import StateStore
 from .notifier import DiscordNotificationError, DiscordNotifier
@@ -55,8 +56,8 @@ class LectureQuizRunner:
         *,
         materials_directory: str | os.PathLike[str],
         state_path: str | os.PathLike[str],
-        retry_hours: int = 30,
-        max_file_bytes: int = 25 * 1024 * 1024,
+        retry_hours: int = 336,
+        max_file_bytes: int | None = None,
     ) -> None:
         self.canvas = canvas
         self.ai = ai
@@ -66,7 +67,7 @@ class LectureQuizRunner:
         self.state_path = Path(state_path).expanduser().resolve()
         self.store = StateStore(self.state_path) if self.state_path.suffix != ".json" else None
         self.retry_hours = retry_hours
-        self.max_file_bytes = max_file_bytes
+        self.max_file_bytes = max_file_bytes if max_file_bytes is not None else lecture_file_limit()
 
     def run(self, *, now: datetime | None = None, force: bool = False) -> LectureQuizReport:
         current = now or datetime.now(UTC)
@@ -97,6 +98,7 @@ class LectureQuizRunner:
             material = self._select_material(session, ended_at, downloads.materials) if not cached else None
             if material is None and not cached:
                 waiting += 1
+                warnings.append(f"No matching slides for session {session_id}; will retry while in the configured window.")
                 continue
             try:
                 key = f"lecture-quiz:{session_id}"
@@ -169,7 +171,18 @@ class LectureQuizRunner:
                 continue
             text = f"{material.module_name or ''} {material.title}".casefold()
             score = 0
-            if any(token in text for token in date_tokens):
+            numbered = re.match(r"^\s*(\d{1,2})([a-z])\s*[-–:]", material.title, re.I)
+            if numbered:
+                weekly = sorted((s for s in self.schedule.sessions if s.course_key == session.course_key
+                                 and s.activity == "lecture"), key=lambda s: (s.weekday, s.start))
+                slot = weekly.index(session) if session in weekly else -1
+                if int(numbered[1]) != week or ord(numbered[2].lower()) - ord('a') != slot:
+                    continue
+                score += 120
+            explicit_lecture = re.search(r"\b(?:lecture|lect)[\s_-]*(\d+)\b", text)
+            if explicit_lecture and int(explicit_lecture[1]) != lecture:
+                continue
+            if any(re.search(r"(?<!\d)" + re.escape(token) + r"(?!\d)", text) for token in date_tokens):
                 score += 100
             if re.search(rf"\bweek\s*0?{week}\b", text):
                 score += 60
@@ -188,6 +201,8 @@ class LectureQuizRunner:
 
     @staticmethod
     def _material_text(material: LectureMaterial) -> str:
+        if material.local_path.suffix.casefold() == ".txt":
+            return material.local_path.read_text(encoding="utf-8")
         if material.local_path.suffix.casefold() == ".pdf":
             chunks = extract_pdf_text_chunks(material.local_path)
         elif material.local_path.suffix.casefold() == ".pptx":

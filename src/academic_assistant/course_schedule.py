@@ -93,7 +93,7 @@ class CourseSchedule:
     ) -> tuple[tuple[ClassSession, datetime], ...]:
         local_now = now.astimezone(self.timezone)
         found: list[tuple[ClassSession, datetime]] = []
-        for offset in range(0, 3):
+        for offset in range(0, max(1, (retry_hours + 23) // 24 + 1)):
             day = local_now.date() - timedelta(days=offset)
             if not self.term_start <= day <= self.term_end or self.is_no_class_day(day):
                 continue
@@ -169,7 +169,15 @@ class CourseSchedule:
         return number
 
     def teaching_week(self, day: date) -> int:
-        return ((day - self.term_start).days // 7) + 1
+        # Course week labels follow calendar weeks and omit full reading weeks.
+        cursor = self.term_start - timedelta(days=self.term_start.weekday())
+        target = day - timedelta(days=day.weekday())
+        week = 0
+        while cursor <= target:
+            if not all(self.is_no_class_day(cursor + timedelta(days=i)) for i in range(5)):
+                week += 1
+            cursor += timedelta(days=7)
+        return max(1, week)
 
     def academic_calendar_items(self) -> tuple[AcademicItem, ...]:
         """Preserve academic dates as all-day events with exclusive end dates."""

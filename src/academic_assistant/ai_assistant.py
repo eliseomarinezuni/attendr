@@ -26,7 +26,8 @@ from pydantic import (
 )
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
-from pptx import Presentation
+from zipfile import BadZipFile
+from xml.etree.ElementTree import ParseError
 
 from .notifier import DiscordNotifier
 
@@ -256,44 +257,14 @@ def extract_powerpoint_text_chunks(
     path = Path(pptx_path).expanduser().resolve()
     if not path.is_file() or path.suffix.casefold() != ".pptx":
         raise AIInputError(f"PowerPoint file was not found: {path}")
+    from .lecture_files import powerpoint_slide_text
     try:
-        presentation = Presentation(path)
-    except (OSError, ValueError, KeyError) as error:
-        raise AIInputError("The PowerPoint is damaged or cannot be opened.") from error
-
-    chunks: list[PDFTextChunk] = []
-    for slide_number, slide in enumerate(presentation.slides, start=1):
-        parts: list[str] = []
-        for shape in slide.shapes:
-            if getattr(shape, "has_text_frame", False):
-                text = " ".join(str(shape.text).split())
-                if text:
-                    parts.append(text)
-            if getattr(shape, "has_table", False):
-                for row in shape.table.rows:
-                    row_text = " | ".join(
-                        " ".join(cell.text.split())
-                        for cell in row.cells
-                        if cell.text.strip()
-                    )
-                    if row_text:
-                        parts.append(row_text)
-        try:
-            notes = " ".join(slide.notes_slide.notes_text_frame.text.split())
-        except (AttributeError, ValueError):
-            notes = ""
-        if notes:
-            parts.append(f"Speaker notes: {notes}")
-        slide_text = "\n".join(parts).strip()
-        if slide_text:
-            chunks.append(
-                PDFTextChunk(
-                    index=len(chunks) + 1,
-                    page_start=slide_number,
-                    page_end=slide_number,
-                    text=f"[Slide {slide_number}]\n{slide_text[:max_chars]}",
-                )
-            )
+        slides = powerpoint_slide_text(path)
+    except (OSError, ValueError, KeyError, BadZipFile, ParseError) as error:
+        raise AIInputError("The PowerPoint is damaged or exceeds extraction limits.") from error
+    chunks = [PDFTextChunk(index=index, page_start=number, page_end=number,
+                          text=f"[Slide {number}]\n{text[:max_chars]}")
+              for index, (number, text) in enumerate(slides, 1)]
     if not chunks:
         raise AIInputError("No readable text was found in the PowerPoint.")
     return tuple(chunks)
