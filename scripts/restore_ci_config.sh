@@ -7,6 +7,11 @@ if [[ -n "${GOOGLE_CREDENTIALS_B64:-}" ]]; then
   chmod 600 credentials.json token.json
 fi
 
+if [[ -n "${GOOGLE_SLIDES_TOKEN_B64:-}" ]]; then
+  printf '%s' "$GOOGLE_SLIDES_TOKEN_B64" | base64 --decode > google_slides_token.json
+  chmod 600 google_slides_token.json
+fi
+
 cat > .env <<EOF
 CANVAS_BASE_URL=${CANVAS_BASE_URL}
 CANVAS_API_TOKEN=${CANVAS_API_TOKEN}
@@ -29,6 +34,7 @@ DISCORD_CALENDAR_CHANNEL_ID=${DISCORD_CALENDAR_CHANNEL_ID}
 DISCORD_QUIZ_CHANNEL_ID=${DISCORD_QUIZ_CHANNEL_ID}
 GOOGLE_CREDENTIALS_FILE=credentials.json
 GOOGLE_TOKEN_FILE=token.json
+GOOGLE_SLIDES_TOKEN_FILE=google_slides_token.json
 GOOGLE_CALENDAR_ID=${GOOGLE_CALENDAR_ID:-}
 GOOGLE_CALENDAR_NAME=${GOOGLE_CALENDAR_NAME:-Attendr}
 GOOGLE_CREATE_CALENDAR_IF_MISSING=true

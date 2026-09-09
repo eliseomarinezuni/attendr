@@ -38,6 +38,7 @@ jobs:
           DISCORD_CALENDAR_CHANNEL_ID: ${{ secrets.DISCORD_CALENDAR_CHANNEL_ID }}
           DISCORD_QUIZ_CHANNEL_ID: ${{ secrets.DISCORD_QUIZ_CHANNEL_ID }}
           GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
+          GOOGLE_SLIDES_TOKEN_B64: ${{ secrets.GOOGLE_SLIDES_TOKEN_B64 }}
           GOOGLE_TOKEN_B64: ${{ secrets.GOOGLE_TOKEN_B64 }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           STUDY_WORKER_URL: ${{ secrets.STUDY_WORKER_URL }}

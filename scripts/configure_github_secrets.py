@@ -87,6 +87,12 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         secrets[secret_name] = base64.b64encode(path.read_bytes()).decode("ascii")
 
+    slides_token = Path(str(configuration.get("GOOGLE_SLIDES_TOKEN_FILE") or "google_slides_token.json")).expanduser()
+    if not slides_token.is_absolute():
+        slides_token = PROJECT_ROOT / slides_token
+    if slides_token.is_file():
+        secrets["GOOGLE_SLIDES_TOKEN_B64"] = base64.b64encode(slides_token.read_bytes()).decode("ascii")
+
     try:
         for name, value in secrets.items():
             set_secret(arguments.repo, name, value)

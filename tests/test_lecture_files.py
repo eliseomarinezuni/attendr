@@ -155,7 +155,7 @@ def test_private_slides_requires_explicit_scope(tmp_path, monkeypatch):
     from academic_assistant.google_slides import authenticated_slide_text, SlidesAccessError
     path = tmp_path / 'token.json'
     path.write_text(json.dumps({'scopes': ['https://www.googleapis.com/auth/calendar']}))
-    monkeypatch.setenv('GOOGLE_TOKEN_FILE', str(path))
+    monkeypatch.setenv('GOOGLE_SLIDES_TOKEN_FILE', str(path))
     with pytest.raises(SlidesAccessError, match='AUTH_REQUIRED'):
         authenticated_slide_text('test')
 
