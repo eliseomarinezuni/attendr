@@ -14,6 +14,10 @@ SLIDES_SCOPE = 'https://www.googleapis.com/auth/presentations.readonly'
 class SlidesAccessError(ValueError):
     """Fixed, safe diagnostic for missing Google access."""
 
+    def __init__(self, code):
+        self.code = code if code in {"GOOGLE_SLIDES_AUTH_REQUIRED", "GOOGLE_SLIDES_ACCESS_DENIED", "GOOGLE_SLIDES_API_DISABLED"} else "GOOGLE_SLIDES_ACCESS_DENIED"
+        super().__init__(self.code)
+
 
 def authenticated_slide_text(document_id: str) -> str:
     path = Path(os.getenv('GOOGLE_SLIDES_TOKEN_FILE', 'google_slides_token.json')).expanduser()
@@ -31,6 +35,10 @@ def authenticated_slide_text(document_id: str) -> str:
                 timeout=(10, 30), stream=True,
             ) as response:
                 if response.status_code in (401, 403, 404):
+                    # Classify only an allowlisted provider reason; never log its body.
+                    detail = response.json().get('error', {}).get('details', [])
+                    if any(item.get('reason') == 'SERVICE_DISABLED' for item in detail):
+                        raise SlidesAccessError('GOOGLE_SLIDES_API_DISABLED')
                     raise SlidesAccessError('GOOGLE_SLIDES_ACCESS_DENIED')
                 response.raise_for_status()
                 body = bytearray()

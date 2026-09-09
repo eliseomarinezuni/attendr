@@ -837,8 +837,8 @@ class CanvasClient:
                                     context.resource, course, source_id, title, destination,
                                     module_name, module_position, position,
                                 )
-                        except SlidesAccessError:
-                            warnings.append(f"GOOGLE_SLIDES_AUTH_REQUIRED for course {course.id}; authorize Google Slides access.")
+                        except SlidesAccessError as error:
+                            warnings.append(f"{error.code} for course {course.id}; check Google Slides access.")
                             continue
                         except (CanvasException, RequestException, OSError, ValueError):
                             warnings.append(f"Lecture source unavailable for course {course.id}; remaining sources continued.")
@@ -895,7 +895,7 @@ class CanvasClient:
 
         return LectureMaterialDownloadReport(
             materials=tuple(sorted(materials.values(), key=lambda value: value.uid)),
-            warnings=tuple(warnings),
+            warnings=tuple(dict.fromkeys(warnings)),
         )
 
     def _download_lecture_file(
