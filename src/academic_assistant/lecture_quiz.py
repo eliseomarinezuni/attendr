@@ -35,6 +35,7 @@ class LectureQuizReport:
     already_sent: int
     waiting_for_slides: int
     warnings: tuple[str, ...]
+    failed: int = 0
 
 
 class _HTMLText(HTMLParser):
@@ -86,7 +87,7 @@ class LectureQuizRunner:
             excluded_course_patterns=self.schedule.excluded_course_patterns,
             max_file_bytes=self.max_file_bytes,
         ) if needs_materials else SimpleNamespace(materials=(), warnings=()))
-        sent = waiting = 0
+        sent = waiting = failed = 0
         warnings = list(downloads.warnings)
         for session, ended_at in pending:
             session_id = session.session_id(ended_at.date())
@@ -133,10 +134,12 @@ class LectureQuizRunner:
                         self.store.complete_quiz(key)
                     already += 1
             except (AIInputError, AIProviderError, DiscordNotificationError, OSError) as error:
+                failed += 1
+                detail = str(error) if isinstance(error, AIProviderError) else type(error).__name__
                 warnings.append(
-                    f"Quiz failed for session {session_id}: {type(error).__name__}."
+                    f"Quiz failed for session {session_id}: {detail}"
                 )
-        return LectureQuizReport(sent, already, waiting, tuple(warnings))
+        return LectureQuizReport(sent, already, waiting, tuple(warnings), failed)
 
     def _already_sent(self, session_id: str, state: dict[str, object]) -> bool:
         if self.store:
