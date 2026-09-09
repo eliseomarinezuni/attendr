@@ -283,8 +283,8 @@ def test_force_lecture_quiz_does_not_consume_quiz_state(store):
         uid="material", course_name="Math", title="Slides", content_sha256="a" * 64
     )
     with (
-        patch.object(runner, "_select_material", return_value=material),
-        patch.object(runner, "_material_text", return_value="slides"),
+        patch.object(runner, "_select_materials", return_value=(material,)),
+        patch.object(runner, "_materials_text", return_value="slides"),
         patch(
             "academic_assistant.lecture_quiz.hybrid_quiz_discord_payload",
             return_value={"content": "forced quiz"},
@@ -434,7 +434,7 @@ def test_failed_lecture_quiz_is_reported_and_remains_retryable(store):
     ai.generate_hybrid_quiz.side_effect = AIProviderError("Gemini returned an empty response for hybrid quiz generation.")
     runner = LectureQuizRunner(canvas, ai, notifier, schedule,
                                materials_directory=store.path.parent, state_path=store.path)
-    with patch.object(runner, "_select_material", return_value=Mock()), patch.object(runner, "_material_text", return_value="lecture"):
+    with patch.object(runner, "_select_materials", return_value=(Mock(),)), patch.object(runner, "_materials_text", return_value="lecture"):
         for _ in range(2):
             report = runner.run()
             assert report.failed == 1
