@@ -257,12 +257,12 @@ class KnowledgeSync:
                     summary, key, str(attr(item, "title", "Lecture slides")), self.directory,
                     "", None, None,
                 )
-            except SlidesAccessError:
+            except SlidesAccessError as error:
                 source_id = "external:" + hashlib.sha256(key.encode()).hexdigest()
                 records[source_id] = record(source_id, str(attr(item, "title", "Lecture slides")),
                     "presentation", "Contents not indexed: Google Slides read access is required.",
                     url=key, module=modules.get((kind, key)))
-                logging.getLogger("attendr.knowledge_sync").warning("Linked slides excluded: GOOGLE_SLIDES_AUTH_REQUIRED")
+                logging.getLogger("attendr.knowledge_sync").warning("Linked slides excluded: %s", error.code)
                 continue
             except (ValueError, OSError, RequestException):
                 raise KnowledgeSyncError("Linked slides could not be read", code="SOURCE_UNREADABLE",

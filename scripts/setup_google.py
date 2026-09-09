@@ -30,7 +30,7 @@ def main() -> int:
     if args.lecture_slides:
         authenticator.token_path = ROOT / Path(os.getenv("GOOGLE_SLIDES_TOKEN_FILE", "google_slides_token.json")).expanduser()
         flow = InstalledAppFlow.from_client_secrets_file(str(authenticator.credentials_path), [SLIDES_SCOPE])
-        credentials = flow.run_local_server(port=0, access_type="offline", prompt="consent", timeout_seconds=120)
+        credentials = flow.run_local_server(port=0, access_type="offline", prompt="select_account consent", timeout_seconds=120)
         authenticator._save_token(credentials)
     else:
         authenticator.authenticate()
