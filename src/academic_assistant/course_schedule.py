@@ -50,6 +50,31 @@ class CourseSchedule:
         self.excluded_course_patterns = tuple(
             str(value).casefold() for value in data.get("excluded_course_patterns", [])
         )
+        self.lecture_material_rules: dict[str, dict[str, Any]] = {}
+        for course in data["courses"]:
+            rules = course.get("lecture_materials", {})
+            if not isinstance(rules, dict):
+                raise ValueError(f"lecture_materials for {course['key']} must be an object")
+            sessions = rules.get("sessions", {})
+            if not isinstance(sessions, dict):
+                raise ValueError(f"lecture_materials.sessions for {course['key']} must be an object")
+            for field in ("include_modules", "exclude_modules"):
+                values = rules.get(field, [])
+                if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+                    raise ValueError(f"lecture_materials.{field} for {course['key']} must be a string list")
+            for session_key, override in sessions.items():
+                if not isinstance(session_key, str) or not isinstance(override, dict):
+                    raise ValueError(f"lecture material overrides for {course['key']} must be objects")
+                for field in ("module", "module_id"):
+                    if field in override and not isinstance(override[field], str):
+                        raise ValueError(f"lecture material override {field} must be a string")
+                for field in ("item_ids", "source_ids"):
+                    values = override.get(field, [])
+                    if not isinstance(values, list) or not all(
+                        isinstance(value, (str, int)) for value in values
+                    ):
+                        raise ValueError(f"lecture material override {field} must be an ID list")
+            self.lecture_material_rules[str(course["key"])] = rules
         self.sessions = tuple(
             ClassSession(
                 course_key=str(course["key"]),
@@ -108,6 +133,35 @@ class CourseSchedule:
     def matches_course(self, session: ClassSession, canvas_name: str) -> bool:
         name = canvas_name.casefold()
         return any(value in name for value in session.course_match)
+
+    def lecture_material_override(
+        self, session: ClassSession, day: date
+    ) -> dict[str, Any] | None:
+        sessions = self.lecture_material_rules.get(session.course_key, {}).get("sessions", {})
+        value = sessions.get(session.session_id(day), sessions.get(day.isoformat()))
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError(f"Lecture material override for {session.session_id(day)} must be an object")
+        return value
+
+    def lecture_module_policy(self, canvas_name: str, module_name: str) -> bool | None:
+        """Return an explicit per-course include/exclude decision, or no decision."""
+        matches = {
+            session.course_key
+            for session in self.sessions
+            if self.matches_course(session, canvas_name)
+        }
+        normalized = module_name.strip().casefold()
+        for key in matches:
+            rules = self.lecture_material_rules.get(key, {})
+            included = {str(value).strip().casefold() for value in rules.get("include_modules", [])}
+            excluded = {str(value).strip().casefold() for value in rules.get("exclude_modules", [])}
+            if normalized in included:
+                return True
+            if normalized in excluded:
+                return False
+        return None
 
     def lecture_for_course_on(
         self, canvas_name: str, day: date

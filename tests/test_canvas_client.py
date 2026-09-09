@@ -399,6 +399,58 @@ class CanvasClientTests(unittest.TestCase):
         self.assertEqual([item.title for item in report.materials], ["Introduction_canvas.pptx"])
         self.assertEqual(report.materials[0].module_name, "Introduction")
 
+    def test_downloads_topic_named_module_without_lecture_filename_and_keeps_ids(self):
+        pdf = b"%PDF-1.4\ntransformations"
+        material = FakeFile(
+            id=31,
+            display_name="coordinate_systems.pdf",
+            content_type="application/pdf",
+            size=len(pdf),
+            content=pdf,
+            updated_at="2026-09-10T10:00:00Z",
+        )
+        module = SimpleNamespace(
+            id=401,
+            name="Geometric Transformations",
+            position=5,
+            locked_for_user=False,
+            items=[{
+                "id": 501,
+                "type": "File",
+                "content_id": 31,
+                "title": "Coordinate Systems",
+                "position": 2,
+            }],
+        )
+        active_course = course(files=[material], modules=[module])
+        with tempfile.TemporaryDirectory() as directory:
+            report = self.make_client(FakeCanvas([active_course])).download_lecture_materials(directory)
+        self.assertEqual([item.title for item in report.materials], ["Coordinate Systems"])
+        self.assertEqual(report.materials[0].module_id, "401")
+        self.assertEqual(report.materials[0].item_id, "501")
+
+    def test_skips_resource_module_during_broad_discovery(self):
+        pdf = b"%PDF-1.4\nreference"
+        material = FakeFile(
+            id=32,
+            display_name="reference.pdf",
+            content_type="application/pdf",
+            size=len(pdf),
+            content=pdf,
+            updated_at="2026-09-10T10:00:00Z",
+        )
+        module = SimpleNamespace(
+            id=402,
+            name="Resources",
+            position=1,
+            locked_for_user=False,
+            items=[{"id": 502, "type": "File", "content_id": 32, "title": "Reference", "position": 1}],
+        )
+        active_course = course(files=[material], modules=[module])
+        with tempfile.TemporaryDirectory() as directory:
+            report = self.make_client(FakeCanvas([active_course])).download_lecture_materials(directory)
+        self.assertEqual(report.materials, ())
+
     def test_upcoming_window_includes_boundaries_and_excludes_invalid_dates(self):
         active_course = course(
             assignments=[

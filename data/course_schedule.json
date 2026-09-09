@@ -15,6 +15,9 @@
       "key": "computer-graphics",
       "name": "Computer Graphics & Visualization",
       "match": ["computer graphics", "graphics and visualization", "csci 4110"],
+      "lecture_materials": {
+        "exclude_modules": ["Resources", "Examples"]
+      },
       "sessions": [
         {"weekday": 0, "start": "17:10", "end": "18:30", "type": "lab"},
         {"weekday": 2, "start": "09:40", "end": "11:00", "type": "lecture"},

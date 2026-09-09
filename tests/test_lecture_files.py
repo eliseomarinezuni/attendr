@@ -175,6 +175,89 @@ def test_introduction_module_matches_only_first_course_lecture(tmp_path):
     assert runner._select_material(sessions[1], second_end, (material,)) is None
 
 
+def test_topic_modules_map_by_canvas_order_and_bundle_same_module(tmp_path):
+    from datetime import datetime
+    from academic_assistant.course_schedule import CourseSchedule
+    from academic_assistant.lecture_quiz import LectureQuizRunner
+    root = Path(__file__).resolve().parents[1]
+    schedule = CourseSchedule.load(root / 'data/course_schedule.json')
+    sessions = sorted(
+        (s for s in schedule.sessions if s.course_key == 'computer-graphics' and s.activity == 'lecture'),
+        key=lambda item: (item.weekday, item.start),
+    )
+    runner = LectureQuizRunner(None, None, None, schedule, materials_directory=tmp_path, state_path=tmp_path / 'state.db')
+    common = dict(course_id=1, course_name='Computer Graphics & Visualization', updated_at=None)
+    intro = NS(uid='intro', source_id='1', title='Welcome', module_name='Introduction', module_position=4,
+               item_position=1, module_id='40', item_id='401', **common)
+    modeling_a = NS(uid='model-a', source_id='2', title='Coordinate Systems', module_name='Modeling', module_position=5,
+                    item_position=1, module_id='50', item_id='501', **common)
+    modeling_b = NS(uid='model-b', source_id='3', title='Transformations', module_name='Modeling', module_position=5,
+                    item_position=2, module_id='50', item_id='502', **common)
+    rendering = NS(uid='render', source_id='4', title='Rasterization', module_name='Rendering', module_position=6,
+                   item_position=1, module_id='60', item_id='601', **common)
+    ended = datetime(2026, 9, 11, 11, tzinfo=schedule.timezone)
+    selected = runner._select_materials(sessions[1], ended, (rendering, modeling_b, intro, modeling_a))
+    assert selected == (modeling_a, modeling_b)
+
+
+def test_topic_module_order_fails_closed_when_positions_are_ambiguous(tmp_path):
+    from datetime import datetime
+    from academic_assistant.course_schedule import CourseSchedule
+    from academic_assistant.lecture_quiz import LectureQuizRunner
+    root = Path(__file__).resolve().parents[1]
+    schedule = CourseSchedule.load(root / 'data/course_schedule.json')
+    session = next(s for s in schedule.sessions if s.course_key == 'computer-graphics' and s.weekday == 2 and s.activity == 'lecture')
+    runner = LectureQuizRunner(None, None, None, schedule, materials_directory=tmp_path, state_path=tmp_path / 'state.db')
+    common = dict(course_id=1, course_name='Computer Graphics & Visualization', updated_at=None,
+                  item_position=1)
+    one = NS(uid='one', source_id='1', title='Vectors', module_name='Vectors', module_position=4,
+             module_id='40', item_id='401', **common)
+    two = NS(uid='two', source_id='2', title='Matrices', module_name='Matrices', module_position=4,
+             module_id='41', item_id='402', **common)
+    ended = datetime(2026, 9, 9, 11, tzinfo=schedule.timezone)
+    assert runner._select_materials(session, ended, (one, two)) == ()
+
+
+def test_explicit_session_mapping_overrides_module_order(tmp_path):
+    from datetime import datetime
+    import json
+    from academic_assistant.course_schedule import CourseSchedule
+    from academic_assistant.lecture_quiz import LectureQuizRunner
+    root = Path(__file__).resolve().parents[1]
+    data = json.loads((root / 'data/course_schedule.json').read_text())
+    data['courses'][0]['lecture_materials']['sessions'] = {
+        '2026-09-09': {'module_id': '60'}
+    }
+    schedule = CourseSchedule(data)
+    session = next(s for s in schedule.sessions if s.course_key == 'computer-graphics' and s.weekday == 2 and s.activity == 'lecture')
+    runner = LectureQuizRunner(None, None, None, schedule, materials_directory=tmp_path, state_path=tmp_path / 'state.db')
+    common = dict(course_id=1, course_name='Computer Graphics & Visualization', updated_at=None,
+                  item_position=1)
+    intro = NS(uid='intro', source_id='1', title='Welcome', module_name='Introduction', module_position=4,
+               module_id='40', item_id='401', **common)
+    rendering = NS(uid='render', source_id='4', title='Rasterization', module_name='Rendering', module_position=6,
+                   module_id='60', item_id='601', **common)
+    ended = datetime(2026, 9, 9, 11, tzinfo=schedule.timezone)
+    assert runner._select_materials(session, ended, (intro, rendering)) == (rendering,)
+
+
+def test_stable_material_mapping_survives_title_and_position_changes(tmp_path):
+    from datetime import datetime
+    from academic_assistant.course_schedule import CourseSchedule
+    from academic_assistant.lecture_quiz import LectureQuizRunner
+    root = Path(__file__).resolve().parents[1]
+    schedule = CourseSchedule.load(root / 'data/course_schedule.json')
+    session = next(s for s in schedule.sessions if s.course_key == 'computer-graphics' and s.weekday == 2 and s.activity == 'lecture')
+    runner = LectureQuizRunner(None, None, None, schedule, materials_directory=tmp_path, state_path=tmp_path / 'state.db')
+    ended = datetime(2026, 9, 9, 11, tzinfo=schedule.timezone)
+    material = NS(uid='canvas:lecture-file:1:99', source_id='99', title='Renamed Topic',
+                  module_name='Moved Topic', module_position=99, item_position=8,
+                  module_id='60', item_id='601', course_id=1,
+                  course_name='Computer Graphics & Visualization', updated_at=None)
+    runner._save_material_mapping(session.session_id(ended.date()), (material,))
+    assert runner._select_materials(session, ended, (material,)) == (material,)
+
+
 def test_private_slides_requires_explicit_scope(tmp_path, monkeypatch):
     import json
     from academic_assistant.google_slides import authenticated_slide_text, SlidesAccessError

@@ -86,6 +86,7 @@ class LectureQuizRunner:
             self.materials_directory,
             excluded_course_patterns=self.schedule.excluded_course_patterns,
             max_file_bytes=self.max_file_bytes,
+            module_policy=self.schedule.lecture_module_policy,
         ) if needs_materials else SimpleNamespace(materials=(), warnings=()))
         sent = waiting = failed = 0
         warnings = list(downloads.warnings)
@@ -96,8 +97,8 @@ class LectureQuizRunner:
                 continue
             key = f"lecture-quiz:{session_id}"
             cached = self.store.quiz(key) if self.store and not force else None
-            material = self._select_material(session, ended_at, downloads.materials) if not cached else None
-            if material is None and not cached:
+            selected = self._select_materials(session, ended_at, downloads.materials) if not cached else ()
+            if not selected and not cached:
                 waiting += 1
                 warnings.append(f"No matching slides for session {session_id}; will retry while in the configured window.")
                 continue
@@ -107,9 +108,9 @@ class LectureQuizRunner:
                 if cached:
                     payload = cached["payload"]
                 else:
-                    source = self._material_text(material)
+                    source = self._materials_text(selected)
                     questions = self.ai.generate_hybrid_quiz(source)
-                    title = f"{material.course_name} — {material.title}"
+                    title = self._materials_title(selected)
                     payload = hybrid_quiz_discord_payload(title, questions)
                     if self.store and not force:
                         payload = self.store.save_quiz(key, payload)
@@ -120,11 +121,12 @@ class LectureQuizRunner:
                 if delivered:
                     state.setdefault("sent", {})[session_id] = {
                         "sent_at": current.astimezone(UTC).isoformat(),
-                        "material_uid": material.uid if material else "cached",
-                        "content_sha256": material.content_sha256 if material else "cached",
+                        "material_uid": ",".join(item.uid for item in selected) if selected else "cached",
+                        "content_sha256": ",".join(item.content_sha256 for item in selected) if selected else "cached",
                     }
                     if not force:
                         if self.store:
+                            self._save_material_mapping(session_id, selected)
                             self.store.complete_quiz(key)
                         else:
                             self._save_state(state)
@@ -153,9 +155,30 @@ class LectureQuizRunner:
         ended_at: datetime,
         materials: tuple[LectureMaterial, ...],
     ) -> LectureMaterial | None:
+        selected = self._select_materials(session, ended_at, materials)
+        return selected[0] if selected else None
+
+    def _select_materials(
+        self,
+        session: ClassSession,
+        ended_at: datetime,
+        materials: tuple[LectureMaterial, ...],
+    ) -> tuple[LectureMaterial, ...]:
         day = ended_at.date()
         week = self.schedule.teaching_week(day)
         lecture = self.schedule.lecture_number(session, day)
+        course_materials = tuple(
+            material
+            for material in materials
+            if self.schedule.matches_course(session, material.course_name)
+        )
+        session_id = session.session_id(day)
+        override = self.schedule.lecture_material_override(session, day)
+        if override is not None:
+            return self._override_materials(override, course_materials)
+        cached = self._mapped_materials(session_id, course_materials)
+        if cached:
+            return cached
         date_tokens = {
             day.isoformat().casefold(),
             day.strftime("%b %d").casefold(),
@@ -169,9 +192,8 @@ class LectureQuizRunner:
         if day.month == 9:
             date_tokens.add(f"sept {day.day}")
         candidates: list[tuple[int, datetime, LectureMaterial]] = []
-        for material in materials:
-            if not self.schedule.matches_course(session, material.course_name):
-                continue
+        structurally_allowed: list[LectureMaterial] = []
+        for material in course_materials:
             text = f"{material.module_name or ''} {material.title}".casefold()
             score = 0
             numbered = re.match(r"^\s*(\d{1,2})([a-z])\s*[-–:]", material.title, re.I)
@@ -195,6 +217,7 @@ class LectureQuizRunner:
                 if week != 1 or lecture != 1:
                     continue
                 score += 90
+            structurally_allowed.append(material)
             if material.module_position == week:
                 score += 35
             if material.item_position == lecture:
@@ -202,9 +225,136 @@ class LectureQuizRunner:
             updated = material.updated_at or datetime.min.replace(tzinfo=UTC)
             candidates.append((score, updated, material))
         if not candidates:
-            return None
+            return self._ordered_module_materials(
+                lecture, course_materials, tuple(structurally_allowed)
+            )
         score, _, selected = max(candidates, key=lambda value: (value[0], value[1]))
-        return selected if score >= 20 else None
+        if score < 60:
+            return self._ordered_module_materials(
+                lecture, course_materials, tuple(structurally_allowed)
+            )
+        module_key = self._module_key(selected)
+        if module_key is None:
+            return (selected,)
+        bundled = tuple(
+            material for _, _, material in candidates
+            if self._module_key(material) == module_key
+        )
+        return self._sort_materials(bundled)
+
+    @staticmethod
+    def _module_key(material: LectureMaterial) -> tuple[object, ...] | None:
+        module_id = getattr(material, "module_id", None)
+        if module_id:
+            return (getattr(material, "course_id", None), "id", str(module_id))
+        module_name = getattr(material, "module_name", None)
+        module_position = getattr(material, "module_position", None)
+        if module_name and module_position is not None:
+            return (getattr(material, "course_id", None), "position", module_position, module_name.casefold())
+        return None
+
+    @staticmethod
+    def _sort_materials(materials: tuple[LectureMaterial, ...]) -> tuple[LectureMaterial, ...]:
+        return tuple(sorted(materials, key=lambda item: (
+            getattr(item, "item_position", None) is None,
+            getattr(item, "item_position", None) or 0,
+            getattr(item, "title", "").casefold(),
+        )))
+
+    def _ordered_module_materials(
+        self,
+        lecture: int,
+        materials: tuple[LectureMaterial, ...],
+        allowed: tuple[LectureMaterial, ...],
+    ) -> tuple[LectureMaterial, ...]:
+        groups: dict[tuple[object, ...], list[LectureMaterial]] = {}
+        positions: dict[tuple[object, ...], int] = {}
+        for material in materials:
+            key = self._module_key(material)
+            position = getattr(material, "module_position", None)
+            if key is None or position is None:
+                continue
+            groups.setdefault(key, []).append(material)
+            positions[key] = position
+        ordered = sorted(groups, key=lambda key: (positions[key], str(key)))
+        if len({positions[key] for key in ordered}) != len(ordered):
+            return ()
+        if lecture < 1 or lecture > len(ordered):
+            return ()
+        allowed_ids = {id(item) for item in allowed}
+        selected = tuple(
+            item for item in groups[ordered[lecture - 1]] if id(item) in allowed_ids
+        )
+        return self._sort_materials(selected)
+
+    def _override_materials(
+        self, override: dict[str, object], materials: tuple[LectureMaterial, ...]
+    ) -> tuple[LectureMaterial, ...]:
+        module_id = str(override.get("module_id", "")).strip()
+        module_name = str(override.get("module", "")).strip().casefold()
+        item_ids = {str(value) for value in override.get("item_ids", [])}
+        source_ids = {str(value) for value in override.get("source_ids", [])}
+        selected = tuple(material for material in materials if (
+            (not module_id or str(getattr(material, "module_id", "") or "") == module_id)
+            and (not module_name or str(getattr(material, "module_name", "") or "").strip().casefold() == module_name)
+            and (not item_ids or str(getattr(material, "item_id", "") or "") in item_ids)
+            and (not source_ids or str(getattr(material, "source_id", "") or "") in source_ids)
+        ))
+        if not any((module_id, module_name, item_ids, source_ids)):
+            return ()
+        keys = {self._module_key(item) for item in selected}
+        if module_name and len(keys) > 1:
+            return ()
+        return self._sort_materials(selected)
+
+    def _mapped_materials(
+        self, session_id: str, materials: tuple[LectureMaterial, ...]
+    ) -> tuple[LectureMaterial, ...]:
+        if not self.store:
+            return ()
+        value = self.store.cache_get(f"lecture-material-map:v1:{session_id}")
+        if not isinstance(value, dict) or not isinstance(value.get("material_uids"), list):
+            return ()
+        by_uid = {getattr(item, "uid", None): item for item in materials}
+        selected = tuple(by_uid.get(uid) for uid in value["material_uids"])
+        if not selected or any(item is None for item in selected):
+            return ()
+        return tuple(item for item in selected if item is not None)
+
+    def _save_material_mapping(
+        self, session_id: str, materials: tuple[LectureMaterial, ...]
+    ) -> None:
+        if self.store and materials:
+            self.store.cache_set(
+                f"lecture-material-map:v1:{session_id}",
+                {
+                    "material_uids": [item.uid for item in materials],
+                    "module_ids": [getattr(item, "module_id", None) for item in materials],
+                    "item_ids": [getattr(item, "item_id", None) for item in materials],
+                },
+            )
+
+    @classmethod
+    def _materials_text(cls, materials: tuple[LectureMaterial, ...]) -> str:
+        sections = [
+            f"Material: {material.title}\n{cls._material_text(material)}"
+            for material in materials
+        ]
+        text = "\n\n---\n\n".join(section for section in sections if section.strip())
+        if not text.strip():
+            raise AIInputError("Canvas lecture materials contain no readable text.")
+        return text
+
+    @staticmethod
+    def _materials_title(materials: tuple[LectureMaterial, ...]) -> str:
+        first = materials[0]
+        module_names = {
+            getattr(item, "module_name", None)
+            for item in materials
+            if getattr(item, "module_name", None)
+        }
+        subject = next(iter(module_names)) if len(module_names) == 1 else " + ".join(item.title for item in materials)
+        return f"{first.course_name} — {subject}"
 
     @staticmethod
     def _material_text(material: LectureMaterial) -> str:
