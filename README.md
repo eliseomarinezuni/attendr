@@ -98,6 +98,8 @@ Check it with `crontab -l`. The Mac must be awake and online.
 
 Scheduled sync and lecture-quiz workflows run on GitHub-hosted Linux runners, so the Mac may remain off. A Cloudflare D1 lease serializes runs and stores an AES-256-GCM-encrypted SQLite checkpoint after each committed mutation. The key is derived at runtime from the existing `STUDY_SYNC_SECRET`; D1 never receives plaintext application state.
 
+The main cron runs at minute 17 to avoid top-of-hour GitHub congestion. Each hosted run records an authenticated heartbeat in D1. The Worker's five-minute cron dispatches a recovery run when the academic heartbeat is more than 150 minutes old during the 8:00 AM–10:00 PM Toronto window. Configure a fine-grained GitHub token with Actions write access as the Worker secret `GITHUB_ACTIONS_TOKEN`; repository, workflow, and ref are non-secret Wrangler variables.
+
 The workflows reconstruct `.env`, Google OAuth files, and the database from repository secrets. Required secrets are documented by `scripts/configure_github_secrets.py`; deployment also requires `STUDY_WORKER_URL` and `STUDY_SYNC_SECRET`. Missing or revoked Google credentials fail promptly, and scheduled runs never launch interactive OAuth.
 
 ## Tests

@@ -12,6 +12,10 @@ interface Env {
   GOOGLE_CLIENT_ID: string;
   GOOGLE_CLIENT_SECRET: string;
   GOOGLE_REFRESH_TOKEN: string;
+  GITHUB_ACTIONS_TOKEN?: string;
+  GITHUB_REPOSITORY?: string;
+  GITHUB_WORKFLOW?: string;
+  GITHUB_REF?: string;
 }
 
 interface StudySession {
@@ -221,6 +225,87 @@ async function getState(env: Env): Promise<Response> {
     completed_sessions: sessions.results.map((item) => item.session_id),
     rescheduled_sessions: Object.fromEntries(overrides.results.map((item) => [item.session_id, { start: item.start_at, end: item.end_at }])),
   });
+}
+
+async function automationHeartbeat(request: Request, env: Env): Promise<Response> {
+  let body: { name?: unknown; status?: unknown; run_id?: unknown };
+  try { body = await request.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
+  if (!body || !["academic", "lecture-quizzes"].includes(String(body.name)) ||
+      !["started", "success", "failure", "degraded"].includes(String(body.status)) ||
+      typeof body.run_id !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(body.run_id)) {
+    return json({ error: "Invalid heartbeat" }, 400);
+  }
+  const now = Date.now();
+  if (body.status === "started") {
+    await env.DB.prepare(`INSERT INTO automation_heartbeats(name,status,run_id,started_at,finished_at,updated_at)
+      VALUES(?,?,?, ?,NULL,?) ON CONFLICT(name) DO UPDATE SET
+      status=excluded.status,run_id=excluded.run_id,started_at=excluded.started_at,
+      finished_at=NULL,updated_at=excluded.updated_at`)
+      .bind(body.name, body.status, body.run_id, now, now).run();
+  } else {
+    await env.DB.prepare(`INSERT INTO automation_heartbeats(name,status,run_id,started_at,finished_at,updated_at)
+      VALUES(?,?,?, ?,?,?) ON CONFLICT(name) DO UPDATE SET
+      status=excluded.status,run_id=excluded.run_id,finished_at=excluded.finished_at,
+      updated_at=excluded.updated_at`)
+      .bind(body.name, body.status, body.run_id, now, now, now).run();
+  }
+  return json({ ok: true });
+}
+
+function torontoHour(now: Date): number {
+  const hour = new Intl.DateTimeFormat("en-CA", {
+    timeZone: TIME_ZONE, hour: "2-digit", hourCycle: "h23",
+  }).formatToParts(now).find((part) => part.type === "hour")?.value;
+  return Number(hour);
+}
+
+async function automationWatchdog(env: Env, now = new Date()): Promise<void> {
+  const token = env.GITHUB_ACTIONS_TOKEN?.trim();
+  const repository = env.GITHUB_REPOSITORY?.trim();
+  if (!token || !repository || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) return;
+  const hour = torontoHour(now);
+  if (hour < 8 || hour > 22) return;
+  const current = now.getTime();
+  const successFreshness = current - 150 * 60_000;
+  const runningFreshness = current - 45 * 60_000;
+  const failureFreshness = current - 20 * 60_000;
+  const dispatchCooldown = current - 45 * 60_000;
+  const claimed = await env.DB.prepare(`INSERT INTO automation_watchdog(name,last_dispatch_at)
+    SELECT 'academic', ? WHERE NOT EXISTS(
+      SELECT 1 FROM automation_heartbeats WHERE name='academic' AND (
+        (status IN ('success','degraded') AND updated_at>=?) OR
+        (status='started' AND updated_at>=?) OR
+        (status='failure' AND updated_at>=?)
+      )
+    ) ON CONFLICT(name) DO UPDATE SET last_dispatch_at=excluded.last_dispatch_at
+    WHERE automation_watchdog.last_dispatch_at<? AND NOT EXISTS(
+      SELECT 1 FROM automation_heartbeats WHERE name='academic' AND (
+        (status IN ('success','degraded') AND updated_at>=?) OR
+        (status='started' AND updated_at>=?) OR
+        (status='failure' AND updated_at>=?)
+      )
+    ) RETURNING name`)
+    .bind(
+      current, successFreshness, runningFreshness, failureFreshness,
+      dispatchCooldown, successFreshness, runningFreshness, failureFreshness,
+    ).first();
+  if (!claimed) return;
+  const workflow = encodeURIComponent(env.GITHUB_WORKFLOW?.trim() || "schedule.yml");
+  const response = await boundedFetch(
+    `https://api.github.com/repos/${repository}/actions/workflows/${workflow}/dispatches`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        accept: "application/vnd.github+json",
+        "content-type": "application/json",
+        "user-agent": "attendr-watchdog",
+        "x-github-api-version": "2022-11-28",
+      },
+      body: JSON.stringify({ ref: env.GITHUB_REF?.trim() || "main" }),
+    },
+  );
+  if (!response.ok) console.error("Academic workflow watchdog dispatch failed", response.status);
 }
 
 function validSession(value: unknown): value is SyncedSession {
@@ -787,6 +872,9 @@ export default {
     if (url.pathname === "/api/state" && request.method === "GET") {
       return isAuthorized(request, env) ? getState(env) : unauthorized();
     }
+    if (url.pathname === "/api/automation/heartbeat" && request.method === "POST") {
+      return isAuthorized(request, env) ? automationHeartbeat(request, env) : unauthorized();
+    }
     if (url.pathname === "/api/sessions/sync" && request.method === "POST") {
       return isAuthorized(request, env) ? syncSessions(request, env) : unauthorized();
     }
@@ -799,7 +887,10 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(recoverOperations(env).then(() => sendDueReminders(env)));
+    ctx.waitUntil(Promise.all([
+      recoverOperations(env).then(() => sendDueReminders(env)),
+      automationWatchdog(env).catch(() => console.error("Academic workflow watchdog unavailable")),
+    ]).then(() => undefined));
   },
 } satisfies ExportedHandler<Env>;
 

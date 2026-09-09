@@ -6,9 +6,9 @@ import test, { afterEach } from 'node:test';
 import ts from 'typescript';
 
 const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8') +
-  '\nexport { busyIntervals, allCalendarIds, verifyDiscord, handleButton, recoverOperations, nextSlot };';
+  '\nexport { busyIntervals, allCalendarIds, verifyDiscord, handleButton, recoverOperations, nextSlot, automationWatchdog };';
 const { outputText } = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
-const { default: worker, busyIntervals, allCalendarIds, verifyDiscord, handleButton, recoverOperations, nextSlot } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
+const { default: worker, busyIntervals, allCalendarIds, verifyDiscord, handleButton, recoverOperations, nextSlot, automationWatchdog } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
@@ -235,6 +235,38 @@ test('cloud state requires a lease and enforces revisions', async () => {
     method: 'POST', headers: auth, body: JSON.stringify({ token: 'e'.repeat(32) }),
   }), { DB, STUDY_SYNC_SECRET: 'secret' }, {});
   assert.equal(competing.status, 409);
+  DB.sqlite.close();
+});
+
+test('automation heartbeat is authenticated and suppresses watchdog recovery', async () => {
+  const DB = database();
+  const heartbeat = await worker.fetch(new Request('https://example.test/api/automation/heartbeat', {
+    method: 'POST', headers: { authorization: 'Bearer secret' },
+    body: JSON.stringify({ name: 'academic', status: 'success', run_id: '12345' }),
+  }), { DB, STUDY_SYNC_SECRET: 'secret' }, {});
+  assert.equal(heartbeat.status, 200);
+  assert.equal(DB.sqlite.prepare("SELECT status FROM automation_heartbeats WHERE name='academic'").get().status, 'success');
+  let dispatches = 0;
+  globalThis.fetch = async () => { dispatches++; return new Response(null, { status: 204 }); };
+  await automationWatchdog({ DB, GITHUB_ACTIONS_TOKEN: 'token', GITHUB_REPOSITORY: 'owner/repo' }, new Date());
+  assert.equal(dispatches, 0);
+  DB.sqlite.close();
+});
+
+test('stale heartbeat dispatches one rate-limited recovery run', async () => {
+  const DB = database();
+  let dispatches = 0;
+  globalThis.fetch = async (url, init) => {
+    dispatches++;
+    assert.equal(String(url), 'https://api.github.com/repos/owner/repo/actions/workflows/schedule.yml/dispatches');
+    assert.deepEqual(JSON.parse(init.body), { ref: 'main' });
+    return new Response(null, { status: 204 });
+  };
+  const now = new Date('2026-09-09T16:00:00Z');
+  const env = { DB, GITHUB_ACTIONS_TOKEN: 'token', GITHUB_REPOSITORY: 'owner/repo' };
+  await automationWatchdog(env, now);
+  await automationWatchdog(env, new Date(now.getTime() + 5 * 60_000));
+  assert.equal(dispatches, 1);
   DB.sqlite.close();
 });
 

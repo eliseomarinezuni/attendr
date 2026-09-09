@@ -251,10 +251,26 @@ class CourseMaterialsSync:
         found = {material.uid for material in downloads.materials}
         active_courses = active_course_ids if active_course_ids is not None else {value.course_id for value in index.sources.values()}
         material_courses = {material.course_id for material in downloads.materials}
-        for uid, previous in index.sources.items():
+        for uid, previous in list(index.sources.items()):
             if uid not in found and previous.course_id in active_courses:
-                blocking_courses.add(previous.course_id)
-                warnings.append(f"Previously indexed syllabus unavailable: {previous.course_name} — {previous.title}; cached deadlines retained for review.")
+                scan_incomplete = previous.course_id in incomplete_downloads
+                if not scan_incomplete:
+                    # A complete course scan is authoritative: the source was removed or
+                    # replaced. Retiring it prevents old deadlines from living forever.
+                    del index.sources[uid]
+                    changed = True
+                    continue
+
+                # Canvas commonly hides the Files tab while keeping module- or
+                # syllabus-linked files readable. If another current source for the
+                # course was found, stale cached deadlines are a safe degraded input,
+                # not grounds to freeze every calendar and study-plan update.
+                if previous.course_id not in material_courses:
+                    blocking_courses.add(previous.course_id)
+                warnings.append(
+                    f"Previously indexed syllabus temporarily unavailable: "
+                    f"{previous.course_name} — {previous.title}; cached deadlines retained."
+                )
                 fallback = SyllabusMaterial(uid=uid, source_id=uid, course_id=previous.course_id,
                     course_name=previous.course_name, title=previous.title, content_type="text/html",
                     local_path=self.materials_directory, content_sha256=previous.content_sha256,

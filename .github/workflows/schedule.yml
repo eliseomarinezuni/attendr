@@ -2,7 +2,9 @@ name: Scheduled Academic Assistant
 
 on:
   schedule:
-    - cron: "0 8-22/2 * * *"
+    # Avoid GitHub's documented top-of-hour scheduling congestion. The Worker
+    # watchdog dispatches a recovery run if this heartbeat becomes stale.
+    - cron: "17 8-22/2 * * *"
       timezone: "America/Toronto"
   workflow_dispatch:
 

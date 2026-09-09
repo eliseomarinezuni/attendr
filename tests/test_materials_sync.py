@@ -211,6 +211,75 @@ class CourseMaterialsSyncTests(unittest.TestCase):
 
         self.assertTrue(report.complete)
 
+    def test_hidden_files_tab_retains_missing_cached_source_without_blocking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_path = root / "old.html"
+            old_path.write_text("<p>Midterm Exam: October 20, 2026 at 1:30 PM</p>")
+            old = self.make_material(
+                old_path, uid="canvas:syllabus-file:1:old"
+            )
+            first = CourseMaterialsSync(
+                FakeCanvas([old]),
+                FakeAI([deadline()]),
+                index_path=root / "index.json",
+                now_provider=lambda: NOW,
+            ).sync(active_course_ids={1})
+            self.assertTrue(first.complete)
+
+            current_path = root / "current.html"
+            current_path.write_text("<p>Current course outline</p>")
+            current = self.make_material(
+                current_path, uid="canvas:syllabus-page:1"
+            )
+            second = CourseMaterialsSync(
+                FakeCanvas(
+                    [current],
+                    warnings=("Could not retrieve syllabus files",),
+                    incomplete_course_ids=(1,),
+                ),
+                FakeAI([]),
+                index_path=root / "index.json",
+                now_provider=lambda: NOW,
+            ).sync(active_course_ids={1})
+
+        self.assertTrue(second.complete)
+        self.assertEqual(len(second.items), 1)
+        self.assertTrue(any("cached deadlines retained" in item for item in second.warnings))
+
+    def test_complete_scan_retires_removed_cached_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_path = root / "old.html"
+            old_path.write_text("<p>Midterm Exam: October 20, 2026 at 1:30 PM</p>")
+            old = self.make_material(
+                old_path, uid="canvas:syllabus-file:1:old"
+            )
+            CourseMaterialsSync(
+                FakeCanvas([old]),
+                FakeAI([deadline()]),
+                index_path=root / "index.json",
+                now_provider=lambda: NOW,
+            ).sync(active_course_ids={1})
+
+            current_path = root / "current.html"
+            current_path.write_text("<p>Current course outline</p>")
+            current = self.make_material(
+                current_path, uid="canvas:syllabus-page:1"
+            )
+            report = CourseMaterialsSync(
+                FakeCanvas([current]),
+                FakeAI([]),
+                index_path=root / "index.json",
+                now_provider=lambda: NOW,
+            ).sync(active_course_ids={1})
+
+            index_text = (root / "index.json").read_text()
+
+        self.assertTrue(report.complete)
+        self.assertEqual(report.items, ())
+        self.assertNotIn("canvas:syllabus-file:1:old", index_text)
+
 
 if __name__ == "__main__":
     unittest.main()

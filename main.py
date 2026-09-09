@@ -362,7 +362,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
             results.append(
                 StepResult(
                     "Canvas",
-                    "ok",
+                    "ok" if snapshot.complete else "failed",
                     f"{len(snapshot.courses)} courses, {len(snapshot.items)} upcoming "
                     f"items, {len(snapshot.announcements)} unread announcements, "
                     f"{len(snapshot.warnings)} warnings",
@@ -385,7 +385,9 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 os.getenv("STUDY_SYNC_SECRET", "")).sync()
             results.append(StepResult("Course search", "ok", f"{count} course snapshots synchronized"))
         except Exception as error:
-            results.append(StepResult("Course search", "failed", failure_summary(error)))
+            # Search snapshots are independently atomic and retain their previous
+            # published version. Their outage must not invalidate calendar inputs.
+            results.append(StepResult("Course search", "degraded", failure_summary(error)))
 
     if plan.announcements:
         if snapshot is None:
@@ -458,7 +460,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 results.append(
                     StepResult(
                         "Materials",
-                        "ok",
+                        "ok" if materials_report.complete else "failed",
                         f"{materials_report.materials_found} syllabus source(s), "
                         f"{materials_report.materials_analyzed} analyzed, "
                         f"{materials_report.cached_materials_reused} cached, "
@@ -505,7 +507,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
             results.append(
                 StepResult(
                     "Announcement dates",
-                    "ok",
+                    "ok" if not date_report.warnings else "failed",
                     f"{date_report.analyzed} analyzed, {date_report.cached} cached, "
                     f"{len(date_report.items)} dated item(s), {len(date_report.warnings)} warnings",
                 )
@@ -722,12 +724,27 @@ def run_recorded(arguments: argparse.Namespace, store: StateStore) -> int:
         with store.connect() as db:
             db.execute("UPDATE runs SET finished_at=?,status='failed' WHERE run_id=?", (time.time(), run_id))
         return 1
+    run_status = (
+        "failed"
+        if any(result.status == "failed" for result in results)
+        else "degraded"
+        if any(result.status == "degraded" for result in results)
+        else "ok"
+    )
     with store.connect() as db:
         db.execute("UPDATE runs SET finished_at=?,status=?,detail=? WHERE run_id=?",
-                   (time.time(), "failed" if any(result.status == "failed" for result in results) else "ok",
+                   (time.time(), run_status,
                     json.dumps([{ "step": result.name, "status": result.status} for result in results]), run_id))
     for result in results:
-        print(f"[{result.status.upper():7}] {result.name}: {result.detail}")
+        print(f"[{result.status.upper():8}] {result.name}: {result.detail}")
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY", "").strip()
+    if summary_path:
+        with Path(summary_path).open("a", encoding="utf-8") as summary:
+            summary.write(f"## Attendr run: {run_status}\n\n")
+            summary.write("| Step | Status | Detail |\n|---|---|---|\n")
+            for result in results:
+                detail = result.detail.replace("|", "\\|").replace("\n", " ")
+                summary.write(f"| {result.name} | {result.status} | {detail} |\n")
     return 1 if any(result.status == "failed" for result in results) else 0
 
 
