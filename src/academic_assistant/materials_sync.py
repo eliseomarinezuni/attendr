@@ -28,10 +28,11 @@ from .ai_assistant import (
 )
 from .canvas_client import AcademicItem, CanvasClient, SyllabusMaterial
 from .course_schedule import CourseSchedule
+from .deadline_grounding import ground_deadline
 from .state_store import StateStore
 
 UTC = timezone.utc
-EXTRACTION_VERSION = 3
+EXTRACTION_VERSION = 4
 DOCX_CONTENT_TYPE = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 )
@@ -192,13 +193,24 @@ class CourseMaterialsSync:
                 self.course_schedule.context_for_course(material.course_name) if self.course_schedule else None,
                 self.timezone.key, EXTRACTION_VERSION)).encode()).hexdigest()
             cached = index.sources.get(material.uid)
+            source_text: str | None = None
             if (
                 cached
                 and cached.content_sha256 == material.content_sha256
                 and cached.extraction_version == EXTRACTION_VERSION
                 and cached.context_hash == context_hash
             ):
-                deadlines = cached.deadlines
+                try:
+                    source_text = self._material_text(material)
+                except (AIInputError, PDFExtractionError):
+                    # A current-version entry with the same content hash was grounded
+                    # before it was cached, so it remains a known-good degraded input.
+                    deadlines = cached.deadlines
+                else:
+                    deadlines = self._ground_deadlines(
+                        source_text, cached.deadlines, material, local_today,
+                        warnings, blocking_courses,
+                    )
                 reused += 1
             else:
                 try:
@@ -216,9 +228,13 @@ class CourseMaterialsSync:
                             else None
                         ),
                     )
-                    deadlines = [
+                    validated = [
                         MajorDeadline.model_validate(item) for item in raw_deadlines
                     ]
+                    deadlines = self._ground_deadlines(
+                        source_text, validated, material, local_today,
+                        warnings, blocking_courses,
+                    )
                 except (
                     AIInputError,
                     AIProviderError,
@@ -230,7 +246,13 @@ class CourseMaterialsSync:
                         f"Could not extract deadlines from {material.course_name}: "
                         f"{material.title}."
                     )
-                    if cached:
+                    if cached and source_text is not None:
+                        grounded_cached = self._ground_deadlines(
+                            source_text, cached.deadlines, material, local_today,
+                            warnings, blocking_courses,
+                        )
+                        extracted.extend((material, deadline) for deadline in grounded_cached)
+                    elif cached and cached.extraction_version == EXTRACTION_VERSION:
                         extracted.extend((material, deadline) for deadline in cached.deadlines)
                     continue
                 index.sources[material.uid] = CachedMaterial(
@@ -275,7 +297,14 @@ class CourseMaterialsSync:
                     course_name=previous.course_name, title=previous.title, content_type="text/html",
                     local_path=self.materials_directory, content_sha256=previous.content_sha256,
                     updated_at=None, html_url=None)
-                extracted.extend((fallback, deadline) for deadline in previous.deadlines)
+                if previous.extraction_version == EXTRACTION_VERSION:
+                    extracted.extend((fallback, deadline) for deadline in previous.deadlines)
+                else:
+                    blocking_courses.add(previous.course_id)
+                    warnings.append(
+                        f"Unverified cached deadlines were not retained for "
+                        f"{previous.course_name} — {previous.title}."
+                    )
         if changed:
             self._save_index(index)
 
@@ -296,6 +325,30 @@ class CourseMaterialsSync:
                 }
             ),
         )
+
+    @staticmethod
+    def _ground_deadlines(
+        source_text: str,
+        deadlines: list[MajorDeadline],
+        material: SyllabusMaterial,
+        reference_date: date,
+        warnings: list[str],
+        blocking_courses: set[int],
+    ) -> list[MajorDeadline]:
+        grounded: list[MajorDeadline] = []
+        for deadline in deadlines:
+            result = ground_deadline(
+                source_text, deadline, reference_date=reference_date
+            )
+            if result.accepted:
+                grounded.append(deadline)
+            else:
+                blocking_courses.add(material.course_id)
+                warnings.append(
+                    f"Rejected ungrounded AI deadline in {material.course_name} — "
+                    f"{material.title}: {deadline.title} ({result.reason})."
+                )
+        return grounded
 
     def _material_text(self, material: SyllabusMaterial) -> str:
         if material.content_type == "application/pdf":

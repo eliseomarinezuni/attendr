@@ -49,5 +49,5 @@ jobs:
           ATTENDR_ASK_SYNC: "true"
           LECTURE_MAX_FILE_MB: "768"
           LECTURE_QUIZ_RETRY_HOURS: "336"
-          ATTENDR_STATE_KEY: ${{ secrets.STUDY_SYNC_SECRET }}
+          ATTENDR_STATE_KEY: ${{ secrets.ATTENDR_STATE_KEY }}
         run: python scripts/cloud_run.py

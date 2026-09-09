@@ -28,22 +28,26 @@ class FakeAI:
 
 
 class AnnouncementDatesTests(unittest.TestCase):
-    def test_no_time_preserves_stated_date_and_cache_prevents_second_ai_call(self):
+    @staticmethod
+    def announcement(message="Reflection due September 20"):
         posted = datetime(2026, 9, 10, 14, 0, tzinfo=timezone.utc)
-        announcement = Announcement(
+        return Announcement(
             uid="canvas:announcement:1:2",
             source_id="2",
             course_id=1,
             course_name="Ethics",
             title="Reflection date",
-            message_html="<p>Reflection due September 20</p>",
-            message_text="Reflection due September 20",
+            message_html=f"<p>{message}</p>",
+            message_text=message,
             posted_at=posted,
             posted_at_local=posted,
             html_url="https://canvas.example/announcements/2",
             author_name="Professor",
             read_state="read",
         )
+
+    def test_no_time_preserves_stated_date_and_cache_prevents_second_ai_call(self):
+        announcement = self.announcement()
         with tempfile.TemporaryDirectory() as directory:
             ai = FakeAI()
             sync = AnnouncementDatesSync(ai, index_path=Path(directory) / "dates.json")
@@ -53,6 +57,16 @@ class AnnouncementDatesTests(unittest.TestCase):
         self.assertTrue(first.items[0].all_day)
         self.assertEqual(second.cached, 1)
         self.assertEqual(ai.calls, 1)
+
+    def test_announcement_hallucinated_date_is_rejected(self):
+        announcement = self.announcement("Reflection date will be announced later")
+        with tempfile.TemporaryDirectory() as directory:
+            report = AnnouncementDatesSync(
+                FakeAI(), index_path=Path(directory) / "dates.json"
+            ).sync((announcement,))
+
+        self.assertEqual(report.items, ())
+        self.assertTrue(any("Rejected ungrounded AI deadline" in warning for warning in report.warnings))
 
 
 if __name__ == "__main__":

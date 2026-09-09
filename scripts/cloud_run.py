@@ -62,6 +62,10 @@ def main() -> int:
     url = required("STUDY_WORKER_URL").rstrip("/")
     secret = required("STUDY_SYNC_SECRET")
     key = required("ATTENDR_STATE_KEY")
+    if secret == key:
+        raise CloudStateError(
+            "ATTENDR_STATE_KEY must be independent from STUDY_SYNC_SECRET"
+        )
     token = secrets.token_hex(16)
     headers = {"Authorization": f"Bearer {secret}"}
     response = requests.post(

@@ -21,7 +21,63 @@ The migration does not infer historical daily quizzes from changing generated-me
 
 Both scheduled workflows use `ubuntu-latest` and share one concurrency group. `scripts/cloud_run.py` acquires an exclusive D1 lease, restores the encrypted SQLite checkpoint, runs the pipeline, and releases the lease. Every committed state change checkpoints before its caller continues. A terminated job leaves a 20-minute lease; a later run safely resumes after expiry.
 
-Configure the integration secrets with `scripts/configure_github_secrets.py`. The checkpoint key is derived at runtime from `STUDY_SYNC_SECRET`, so keep that secret in the local recovery configuration. Rotating or losing it makes the existing checkpoint unreadable. Apply Worker migration `0004_cloud_state.sql` before dispatching either workflow.
+Configure the integration secrets with `scripts/configure_github_secrets.py`.
+`STUDY_SYNC_SECRET` remains the Worker/API bearer credential.
+`ATTENDR_STATE_KEY` is a separate secret used only to derive the AES-256-GCM
+checkpoint key. The hosted workflows require both and never substitute one for the
+other. `ATTENDR_STATE_SECRET` is the runtime name used for state-endpoint bearer
+authentication and may continue to receive `STUDY_SYNC_SECRET`; it is not an
+encryption key. Apply Worker migration `0004_cloud_state.sql` before dispatching
+either workflow.
+
+### One-time checkpoint key separation
+
+Existing hosted checkpoints created before this change were encrypted with the value
+of `STUDY_SYNC_SECRET`. Do not update the workflow secret before rotating that
+checkpoint.
+
+1. Disable both scheduled workflows and wait for any active run and its state lease to
+   finish.
+2. Generate a new independent key locally and save it in a password manager:
+
+   ```bash
+   python -c 'import secrets; print(secrets.token_urlsafe(48))'
+   ```
+
+3. In the private, mode-`0600` `.env`, set `ATTENDR_STATE_KEY` to that new value. Add
+   `ATTENDR_STATE_OLD_KEY` temporarily with the current `STUDY_SYNC_SECRET` value.
+   Keep `STUDY_SYNC_SECRET` unchanged.
+4. Choose a private backup path outside the repository and rotate under the Worker's
+   lease:
+
+   ```bash
+   .venv/bin/python scripts/rotate_state_key.py \
+     --backup /path/to/private/attendr-state-before-key-rotation.json
+   ```
+
+   The command first decrypts and SQLite-integrity-checks the old checkpoint. It saves
+   the untouched encrypted remote payload with exclusive file creation, encrypts the
+   exact SQLite bytes with the new key, locally decrypts that candidate, and only then
+   performs the revision-checked upload. Finally it downloads with the new key, repeats
+   SQLite integrity verification, and compares the database bytes. It never prints key
+   values. An interruption before upload leaves the old remote checkpoint in place; an
+   interruption after the atomic upload is safe because the new ciphertext was already
+   verified. Re-running the command recognizes an already-rotated checkpoint.
+5. Set the dedicated GitHub Actions secret without displaying it in logs:
+
+   ```bash
+   gh secret set ATTENDR_STATE_KEY --repo OWNER/REPOSITORY
+   ```
+
+   Paste the new key when prompted. Alternatively, after `.env` contains all cloud
+   values, run `scripts/configure_github_secrets.py --repo OWNER/REPOSITORY`.
+6. Remove `ATTENDR_STATE_OLD_KEY` from `.env`, re-enable the workflows, and manually
+   run each once. Retain the private encrypted backup and old key until both runs pass;
+   never commit the backup.
+
+If rotation fails, leave the workflows disabled. The remote checkpoint remains on its
+last atomic revision, and the private old-key backup is never overwritten. Do not
+initialize a new checkpoint to work around a decryption failure.
 
 The OAuth refresh token remains in the encrypted `GOOGLE_TOKEN_B64` repository secret. Access-token refresh does not require a browser. A revoked refresh token fails the run and requires explicit reauthorization with `scripts/setup_google.py`, followed by updating the GitHub secret.
 

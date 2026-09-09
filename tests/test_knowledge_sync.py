@@ -215,10 +215,20 @@ def test_setup_reuses_channel_and_preserves_other_commands(existing):
 
 
 def test_scheduled_sync_keeps_encrypted_runner():
-    workflow = (ROOT / '.github/workflows/schedule.yml').read_text()
-    assert 'ATTENDR_ASK_SYNC: "true"' in workflow
-    assert 'python scripts/cloud_run.py' in workflow
-    assert 'ATTENDR_STATE_KEY:' in workflow
+    workflows = [
+        (ROOT / '.github/workflows/schedule.yml').read_text(),
+        (ROOT / '.github/workflows/class-quizzes.yml').read_text(),
+    ]
+    assert 'ATTENDR_ASK_SYNC: "true"' in workflows[0]
+    assert all('python scripts/cloud_run.py' in workflow for workflow in workflows)
+    assert all(
+        'ATTENDR_STATE_KEY: ${{ secrets.ATTENDR_STATE_KEY }}' in workflow
+        for workflow in workflows
+    )
+    assert all(
+        'ATTENDR_STATE_KEY: ${{ secrets.STUDY_SYNC_SECRET }}' not in workflow
+        for workflow in workflows
+    )
 
 
 def test_large_course_batches_preserve_every_chunk_before_publish(tmp_path):

@@ -14,10 +14,12 @@ from zoneinfo import ZoneInfo
 from .ai_assistant import AIAssistant, AIInputError, AIProviderError, MajorDeadline
 from .canvas_client import AcademicItem, Announcement
 from .course_schedule import CourseSchedule
+from .deadline_grounding import ground_deadline
 from .materials_sync import CourseMaterialsSync
 from .state_store import StateStore
 
 UTC = timezone.utc
+EXTRACTION_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,12 +67,13 @@ class AnnouncementDatesSync:
             if not announcement.message_text.strip():
                 continue
             digest = sha256(
-                str(("announcement-v2", getattr(self.ai, "model", "injected"), self.timezone.key,
+                str((f"announcement-v{EXTRACTION_VERSION}", getattr(self.ai, "model", "injected"), self.timezone.key,
                      self.course_schedule.context_for_course(announcement.course_name) if self.course_schedule else None,
                      announcement.title, announcement.message_text)).encode("utf-8")
             ).hexdigest()
             record = index.get(announcement.uid)
             raw_deadlines: list[dict[str, object]]
+            newly_analyzed = False
             if isinstance(record, dict) and record.get("sha256") == digest:
                 raw_deadlines = list(record.get("deadlines", []))
                 cached += 1
@@ -90,23 +93,47 @@ class AnnouncementDatesSync:
                     warnings.append(
                         f"Could not inspect announcement dates: {announcement.course_name} — {announcement.title}."
                     )
-                    continue
-                index[announcement.uid] = {
-                    "sha256": digest,
-                    "deadlines": raw_deadlines,
-                    "source": {key: value.isoformat() if isinstance(value, datetime) else value
-                               for key, value in asdict(announcement).items()},
-                }
-                analyzed += 1
-                changed = True
+                    raw_deadlines = (
+                        list(record.get("deadlines", []))
+                        if isinstance(record, dict)
+                        else []
+                    )
+                    if not raw_deadlines:
+                        continue
+                else:
+                    newly_analyzed = True
+                    analyzed += 1
+            grounded_raw: list[dict[str, object]] = []
             for raw in raw_deadlines:
                 try:
                     deadline = MajorDeadline.model_validate(raw)
-                    items.append(self._to_item(announcement, deadline))
                 except (ValueError, TypeError):
                     warnings.append(
                         f"Ignored an invalid date in announcement: {announcement.title}."
                     )
+                    continue
+                result = ground_deadline(
+                    announcement.message_text,
+                    deadline,
+                    reference_date=announcement.posted_at_local.date(),
+                )
+                if not result.accepted:
+                    warnings.append(
+                        f"Rejected ungrounded AI deadline in announcement "
+                        f"{announcement.course_name} — {announcement.title}: "
+                        f"{deadline.title} ({result.reason})."
+                    )
+                    continue
+                grounded_raw.append(deadline.model_dump(mode="json"))
+                items.append(self._to_item(announcement, deadline))
+            if newly_analyzed:
+                index[announcement.uid] = {
+                    "sha256": digest,
+                    "deadlines": grounded_raw,
+                    "source": {key: value.isoformat() if isinstance(value, datetime) else value
+                               for key, value in asdict(announcement).items()},
+                }
+                changed = True
         if changed:
             self._save(index)
         unique = {item.uid: item for item in items}
