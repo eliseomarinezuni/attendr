@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import test, { afterEach } from 'node:test';
 import ts from 'typescript';
+import { freshDatabase } from './helpers/database.mjs';
 
 const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8') +
   '\nexport { busyIntervals, allCalendarIds, verifyDiscord, handleButton, recoverOperations, nextSlot, automationWatchdog };';
@@ -13,19 +13,7 @@ const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
 function database() {
-  const sqlite = new DatabaseSync(':memory:');
-  sqlite.exec(readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
-  const wrap = (sql, values = []) => ({
-    bind: (...args) => wrap(sql, args),
-    all: async () => ({ results: sqlite.prepare(sql).all(...values) }),
-    first: async () => sqlite.prepare(sql).get(...values) ?? null,
-    run: async () => sqlite.prepare(sql).run(...values),
-  });
-  return { sqlite, prepare: (sql) => wrap(sql), batch: async (statements) => {
-    sqlite.exec('BEGIN');
-    try { const results = []; for (const statement of statements) results.push(await statement.run()); sqlite.exec('COMMIT'); return results; }
-    catch (error) { sqlite.exec('ROLLBACK'); throw error; }
-  } };
+  return freshDatabase();
 }
 const sessionId = 'attendr:study:' + 'a'.repeat(20) + ':1';
 function session() {
@@ -45,6 +33,12 @@ async function sync(DB, payload) {
       method: 'POST', headers: { authorization: 'Bearer secret' }, body: JSON.stringify(payload && typeof payload === 'object' ? { ...payload, plan_token: 'a'.repeat(32) } : payload),
     }), { DB, STUDY_SYNC_SECRET: 'secret' }, {});
   } finally { await lease(DB, 'release'); }
+}
+function reminderRequest() {
+  return new Request('https://example.test/api/reminders/run', { method: 'POST', headers: { authorization: 'Bearer secret' } });
+}
+function reminderEnv(DB) {
+  return { DB, STUDY_SYNC_SECRET: 'secret', DISCORD_BOT_TOKEN: 'bot', DISCORD_STUDY_CHANNEL_ID: 'channel' };
 }
 
 for (const payload of [null, {}, { sessions: {} }, { sessions: 'bad' }, { sessions: [], replace: 'false' }]) {
@@ -81,10 +75,43 @@ test('concurrent reminder workers send once', async () => {
   await sync(DB, { sessions: [session()] });
   let sends = 0;
   globalThis.fetch = async () => { sends++; return Response.json({ id: 'message' }); };
-  const request = () => new Request('https://example.test/api/reminders/run', { method: 'POST', headers: { authorization: 'Bearer secret' } });
-  await Promise.all([1, 2].map(() => worker.fetch(request(), { DB, STUDY_SYNC_SECRET: 'secret' }, {})));
+  await Promise.all([1, 2].map(() => worker.fetch(reminderRequest(), reminderEnv(DB), {})));
   assert.equal(sends, 1);
   assert.equal(DB.sqlite.prepare('SELECT notified FROM study_sessions').get().notified, 1);
+  assert.equal(DB.sqlite.prepare('SELECT count(*) AS count FROM plan_lease').get().count, 0);
+  DB.sqlite.close();
+});
+
+test('planner cannot acquire while a reminder delivery is in flight', async () => {
+  const DB = database();
+  const original = session();
+  await sync(DB, { sessions: [original] });
+  let startSend;
+  const sendStarted = new Promise((resolve) => { startSend = resolve; });
+  let finishSend;
+  globalThis.fetch = async () => {
+    startSend();
+    return new Promise((resolve) => { finishSend = () => resolve(Response.json({ id: 'message' })); });
+  };
+  const delivery = worker.fetch(reminderRequest(), reminderEnv(DB), {});
+  await sendStarted;
+  assert.equal(DB.sqlite.prepare('SELECT notified FROM study_sessions').get().notified, -1);
+  assert.equal((await lease(DB, 'acquire', 'b'.repeat(32))).status, 409);
+  const shifted = { ...original,
+    start: new Date(Date.now() + 86400_000).toISOString(),
+    end: new Date(Date.now() + 88200_000).toISOString(),
+    task_due_at: new Date(Date.now() + 2 * 86400_000).toISOString() };
+  const rejectedSync = await worker.fetch(new Request('https://example.test/api/sessions/sync', {
+    method: 'POST', headers: { authorization: 'Bearer secret' },
+    body: JSON.stringify({ sessions: [shifted], plan_token: 'b'.repeat(32) }),
+  }), { DB, STUDY_SYNC_SECRET: 'secret' }, {});
+  assert.equal(rejectedSync.status, 409);
+  assert.equal(DB.sqlite.prepare('SELECT start_at FROM study_sessions').get().start_at, original.start);
+  finishSend();
+  assert.equal((await delivery).status, 200);
+  assert.equal(DB.sqlite.prepare('SELECT notified FROM study_sessions').get().notified, 1);
+  assert.equal((await lease(DB, 'acquire', 'b'.repeat(32))).status, 200);
+  await lease(DB, 'release', 'b'.repeat(32));
   DB.sqlite.close();
 });
 
@@ -93,11 +120,80 @@ test('lost reminder response stays unresolved instead of automatically repeating
   await sync(DB, { sessions: [session()] });
   let sends = 0;
   globalThis.fetch = async () => { sends++; throw new Error('response lost'); };
-  const request = () => new Request('https://example.test/api/reminders/run', { method: 'POST', headers: { authorization: 'Bearer secret' } });
-  await worker.fetch(request(), { DB, STUDY_SYNC_SECRET: 'secret' }, {});
-  await worker.fetch(request(), { DB, STUDY_SYNC_SECRET: 'secret' }, {});
+  await worker.fetch(reminderRequest(), reminderEnv(DB), {});
+  assert.equal((await lease(DB, 'acquire', 'b'.repeat(32))).status, 409);
+  DB.sqlite.exec('UPDATE plan_lease SET lease_until=0');
+  assert.equal((await lease(DB, 'acquire', 'b'.repeat(32))).status, 200);
+  await lease(DB, 'release', 'b'.repeat(32));
+  await worker.fetch(reminderRequest(), reminderEnv(DB), {});
   assert.equal(sends, 1);
   assert.equal(DB.sqlite.prepare('SELECT notified FROM study_sessions').get().notified, -1);
+  DB.sqlite.close();
+});
+
+test('crash before reminder claim recovers after lease expiry without losing the reminder', async () => {
+  const DB = database();
+  await sync(DB, { sessions: [session()] });
+  const prepare = DB.prepare;
+  let failClaim = true;
+  DB.prepare = (sql) => {
+    if (failClaim && sql.startsWith('UPDATE study_sessions SET notified=-1')) {
+      failClaim = false;
+      throw new Error('injected claim failure');
+    }
+    return prepare(sql);
+  };
+  await assert.rejects(worker.fetch(reminderRequest(), reminderEnv(DB), {}), /injected claim failure/);
+  assert.equal(DB.sqlite.prepare('SELECT notified FROM study_sessions').get().notified, 0);
+  assert.equal((await lease(DB, 'acquire', 'b'.repeat(32))).status, 409);
+  DB.sqlite.exec('UPDATE plan_lease SET lease_until=0');
+  let sends = 0;
+  globalThis.fetch = async () => { sends++; return Response.json({ id: 'message' }); };
+  assert.equal((await worker.fetch(reminderRequest(), reminderEnv(DB), {})).status, 200);
+  assert.equal(sends, 1);
+  assert.equal(DB.sqlite.prepare('SELECT notified FROM study_sessions').get().notified, 1);
+  DB.sqlite.close();
+});
+
+test('planner cancellation cannot race an obsolete reminder delivery', async () => {
+  const DB = database();
+  await sync(DB, { sessions: [session()] });
+  assert.equal((await lease(DB, 'acquire')).status, 200);
+  let sends = 0;
+  globalThis.fetch = async () => { sends++; return Response.json({ id: 'message' }); };
+  await worker.fetch(reminderRequest(), reminderEnv(DB), {});
+  const cancelled = await worker.fetch(new Request('https://example.test/api/sessions/sync', {
+    method: 'POST', headers: { authorization: 'Bearer secret' },
+    body: JSON.stringify({ sessions: [], plan_token: 'a'.repeat(32) }),
+  }), { DB, STUDY_SYNC_SECRET: 'secret' }, {});
+  assert.equal(cancelled.status, 200);
+  await lease(DB, 'release');
+  await worker.fetch(reminderRequest(), reminderEnv(DB), {});
+  assert.equal(sends, 0);
+  assert.equal(DB.sqlite.prepare('SELECT status FROM study_sessions').get().status, 'cancelled');
+  DB.sqlite.close();
+});
+
+test('planner reschedule cannot race an obsolete reminder delivery', async () => {
+  const DB = database();
+  const original = session();
+  await sync(DB, { sessions: [original] });
+  assert.equal((await lease(DB, 'acquire')).status, 200);
+  let sends = 0;
+  globalThis.fetch = async () => { sends++; return Response.json({ id: 'message' }); };
+  await worker.fetch(reminderRequest(), reminderEnv(DB), {});
+  const later = new Date(Date.now() + 86400_000).toISOString();
+  const laterEnd = new Date(new Date(later).getTime() + 1800_000).toISOString();
+  const laterDue = new Date(Date.now() + 2 * 86400_000).toISOString();
+  const rescheduled = await worker.fetch(new Request('https://example.test/api/sessions/sync', {
+    method: 'POST', headers: { authorization: 'Bearer secret' },
+    body: JSON.stringify({ sessions: [{ ...original, start: later, end: laterEnd, task_due_at: laterDue }], plan_token: 'a'.repeat(32) }),
+  }), { DB, STUDY_SYNC_SECRET: 'secret' }, {});
+  assert.equal(rescheduled.status, 200);
+  await lease(DB, 'release');
+  await worker.fetch(reminderRequest(), reminderEnv(DB), {});
+  assert.equal(sends, 0);
+  assert.equal(DB.sqlite.prepare('SELECT start_at FROM study_sessions').get().start_at, later);
   DB.sqlite.close();
 });
 
@@ -168,6 +264,16 @@ test('planner lease excludes both another planner and live buttons', async () =>
   assert.equal(DB.sqlite.prepare('SELECT count(*) AS count FROM study_operations').get().count, 0);
   await lease(DB, 'release');
   assert.equal((await lease(DB, 'acquire', 'b'.repeat(32))).status, 200);
+  DB.sqlite.close();
+});
+
+test('crashed planner lease expires and does not permanently block mutations', async () => {
+  const DB = database();
+  assert.equal((await lease(DB, 'acquire')).status, 200);
+  assert.equal((await lease(DB, 'acquire', 'b'.repeat(32))).status, 409);
+  DB.sqlite.exec('UPDATE plan_lease SET lease_until=0');
+  assert.equal((await lease(DB, 'acquire', 'b'.repeat(32))).status, 200);
+  await lease(DB, 'release', 'b'.repeat(32));
   DB.sqlite.close();
 });
 

@@ -115,21 +115,33 @@ async function verifyDiscord(request: Request, body: string, env: Env): Promise<
   }
 }
 
-async function planLease(request: Request, env: Env, release: boolean): Promise<Response> {
-  let body: { token?: unknown };
-  try { body = await request.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
-  if (!body || typeof body.token !== "string" || !/^[a-f0-9]{32}$/.test(body.token)) return json({ error: "Invalid plan token" }, 400);
-  if (release) {
-    await env.DB.prepare("DELETE FROM plan_lease WHERE id=1 AND token=?").bind(body.token).run();
-    return json({ released: true });
-  }
+const PLAN_LEASE_MS = 20 * 60_000;
+const REMINDER_LEASE_MS = 60_000;
+
+async function acquireMutationLease(env: Env, token: string, duration: number): Promise<boolean> {
   const now = Date.now();
   const acquired = await env.DB.prepare(`INSERT INTO plan_lease(id,token,lease_until)
     SELECT 1,?,? WHERE NOT EXISTS(SELECT 1 FROM study_operations WHERE status!='done')
     ON CONFLICT(id) DO UPDATE SET token=excluded.token,lease_until=excluded.lease_until
     WHERE plan_lease.lease_until<? OR plan_lease.token=excluded.token RETURNING token`)
-    .bind(body.token, now + 20 * 60_000, now).first();
-  return acquired ? json({ acquired: true }) : json({ error: "Another planner or button operation is active" }, 409);
+    .bind(token, now + duration, now).first();
+  return Boolean(acquired);
+}
+
+async function releaseMutationLease(env: Env, token: string): Promise<void> {
+  await env.DB.prepare("DELETE FROM plan_lease WHERE id=1 AND token=?").bind(token).run();
+}
+
+async function planLease(request: Request, env: Env, release: boolean): Promise<Response> {
+  let body: { token?: unknown };
+  try { body = await request.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
+  if (!body || typeof body.token !== "string" || !/^[a-f0-9]{32}$/.test(body.token)) return json({ error: "Invalid plan token" }, 400);
+  if (release) {
+    await releaseMutationLease(env, body.token);
+    return json({ released: true });
+  }
+  const acquired = await acquireMutationLease(env, body.token, PLAN_LEASE_MS);
+  return acquired ? json({ acquired: true }) : json({ error: "Another planner, reminder, or button operation is active" }, 409);
 }
 
 const STATE_LEASE_MS = 20 * 60_000;
@@ -456,12 +468,14 @@ async function sendReminder(session: StudySession, env: Env): Promise<void> {
   if (response.status === 429) {
     await env.DB.prepare("UPDATE study_sessions SET notified=0 WHERE session_id=? AND start_at=? AND notified=-1")
       .bind(session.session_id, session.start_at).run();
+    return;
   }
   if (!response.ok) throw new Error(`Discord reminder failed: ${response.status}`);
   const message = await response.json() as { id: string };
-  await env.DB.prepare(
-    "UPDATE study_sessions SET notified=1, message_id=?, updated_at=? WHERE session_id=? AND start_at=? AND notified=-1",
-  ).bind(message.id, new Date().toISOString(), session.session_id, session.start_at).run();
+  const finalized = await env.DB.prepare(
+    "UPDATE study_sessions SET notified=1, message_id=?, updated_at=? WHERE session_id=? AND start_at=? AND notified=-1 RETURNING session_id",
+  ).bind(message.id, new Date().toISOString(), session.session_id, session.start_at).first();
+  if (!finalized) throw new Error("Reminder claim changed before finalization");
 }
 
 async function sendDueReminders(env: Env): Promise<void> {
@@ -474,13 +488,22 @@ async function sendDueReminders(env: Env): Promise<void> {
      ORDER BY start_at LIMIT 25`,
   ).bind(lower, upper).all<StudySession>();
   for (const session of result.results) {
-    // -1 is an unresolved send, including a crash after Discord accepted it.
-    const claim = await env.DB.prepare("UPDATE study_sessions SET notified=-1,updated_at=? WHERE session_id=? AND status='scheduled' AND notified=0 AND start_at=? AND NOT EXISTS(SELECT 1 FROM plan_lease WHERE lease_until>?) AND NOT EXISTS(SELECT 1 FROM study_operations WHERE status!='done') RETURNING session_id")
-      .bind(new Date().toISOString(), session.session_id, session.start_at, Date.now()).first();
-    if (!claim) continue;
+    const leaseToken = crypto.randomUUID().replaceAll("-", "");
+    if (!await acquireMutationLease(env, leaseToken, REMINDER_LEASE_MS)) continue;
+    // -1 is an unresolved send, including a crash after Discord accepted it. The
+    // separate expiring plan lease blocks mutations only while delivery may be live.
+    const claim = await env.DB.prepare("UPDATE study_sessions SET notified=-1,updated_at=? WHERE session_id=? AND status='scheduled' AND notified=0 AND start_at=? AND EXISTS(SELECT 1 FROM plan_lease WHERE id=1 AND token=? AND lease_until>?) RETURNING session_id")
+      .bind(new Date().toISOString(), session.session_id, session.start_at, leaseToken, Date.now()).first();
+    if (!claim) {
+      await releaseMutationLease(env, leaseToken);
+      continue;
+    }
     try {
       await sendReminder(session, env);
+      await releaseMutationLease(env, leaseToken);
     } catch (error) {
+      // Leave both notified=-1 and the short lease in place. The former prevents an
+      // unsafe resend; the latter expires after the uncertain request has had time to settle.
       console.error("Reminder delivery unresolved", session.session_id);
     }
   }

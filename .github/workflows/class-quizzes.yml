@@ -22,8 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
           cache: pip
@@ -34,12 +34,10 @@ jobs:
           CANVAS_API_TOKEN: ${{ secrets.CANVAS_API_TOKEN }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-          DISCORD_ANNOUNCEMENTS_CHANNEL_ID: ${{ secrets.DISCORD_ANNOUNCEMENTS_CHANNEL_ID }}
-          DISCORD_CALENDAR_CHANNEL_ID: ${{ secrets.DISCORD_CALENDAR_CHANNEL_ID }}
+          DISCORD_ANNOUNCEMENTS_CHANNEL_ID: ""
+          DISCORD_CALENDAR_CHANNEL_ID: ""
           DISCORD_QUIZ_CHANNEL_ID: ${{ secrets.DISCORD_QUIZ_CHANNEL_ID }}
-          GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
           GOOGLE_SLIDES_TOKEN_B64: ${{ secrets.GOOGLE_SLIDES_TOKEN_B64 }}
-          GOOGLE_TOKEN_B64: ${{ secrets.GOOGLE_TOKEN_B64 }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           STUDY_WORKER_URL: ${{ secrets.STUDY_WORKER_URL }}
           STUDY_SYNC_SECRET: ${{ secrets.STUDY_SYNC_SECRET }}

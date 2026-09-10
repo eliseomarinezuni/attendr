@@ -22,15 +22,18 @@ class RedactedJSONFormatter(logging.Formatter):
             "run_id": getattr(record, "run_id", None),
         }
         if record.exc_info:
-            value["exception"] = record.exc_info[0].__name__
+            exception_type, _, exception_traceback = record.exc_info
+            value["exception"] = (
+                exception_type.__name__ if exception_type is not None else "Exception"
+            )
             value["frames"] = [
                 {"file": frame.filename, "line": frame.lineno, "function": frame.name}
-                for frame in traceback.extract_tb(record.exc_info[2])
+                for frame in traceback.extract_tb(exception_traceback)
             ]
         text = json.dumps(value)
         for key, secret in os.environ.items():
             if (
-                any(marker in key for marker in ("TOKEN", "SECRET", "API_KEY", "WEBHOOK"))
+                any(marker in key.upper() for marker in ("TOKEN", "SECRET", "API_KEY", "WEBHOOK"))
                 and len(secret) >= 6
             ):
                 text = text.replace(secret, "[REDACTED]").replace(

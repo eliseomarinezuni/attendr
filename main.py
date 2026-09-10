@@ -50,7 +50,6 @@ from academic_assistant import (
     StudyPlanner,
     PDFExtractionError,
     extract_pdf_text_chunks,
-    send_quiz_to_discord,
     quiz_discord_payload,
 )
 
@@ -82,6 +81,7 @@ KNOWN_ERRORS = (
     OSError,
     ValueError,
 )
+PIPELINE_LOGGER = logging.getLogger("attendr.pipeline")
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +112,11 @@ class StepResult:
     name: str
     status: str
     detail: str
+
+
+def unexpected_step_result(name: str, error: Exception) -> StepResult:
+    PIPELINE_LOGGER.exception("Unexpected failure in pipeline step %s", name)
+    return StepResult(name, "failed", f"Unexpected {type(error).__name__}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -291,7 +296,7 @@ def run_step(name: str, operation: Callable[[], str]) -> StepResult:
     except KNOWN_ERRORS as error:
         return StepResult(name, "failed", str(error))
     except Exception as error:  # noqa: BLE001 - isolate independent pipeline steps.
-        return StepResult(name, "failed", f"Unexpected {type(error).__name__}")
+        return unexpected_step_result(name, error)
 
 
 def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
@@ -371,9 +376,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
         except KNOWN_ERRORS as error:
             results.append(StepResult("Canvas", "failed", str(error)))
         except Exception as error:  # noqa: BLE001 - isolate independent pipeline steps.
-            results.append(
-                StepResult("Canvas", "failed", f"Unexpected {type(error).__name__}")
-            )
+            results.append(unexpected_step_result("Canvas", error))
 
     if plan.materials and os.getenv("ATTENDR_ASK_SYNC", "").lower() == "true" and canvas_client is not None:
         try:
@@ -474,11 +477,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 results.append(StepResult("Materials", "failed", str(error)))
             except Exception as error:  # noqa: BLE001 - isolate pipeline steps.
                 inputs_complete = False
-                results.append(
-                    StepResult(
-                        "Materials", "failed", f"Unexpected {type(error).__name__}"
-                    )
-                )
+                results.append(unexpected_step_result("Materials", error))
 
     if (plan.calendar or plan.study_plan) and canvas_client is not None and snapshot is not None:
         try:
@@ -517,7 +516,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
             results.append(StepResult("Announcement dates", "failed", str(error)))
         except Exception as error:
             inputs_complete = False
-            results.append(StepResult("Announcement dates", "failed", f"Unexpected {type(error).__name__}"))
+            results.append(unexpected_step_result("Announcement dates", error))
 
     if plan.calendar:
         if snapshot is None:

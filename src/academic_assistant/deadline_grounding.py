@@ -60,8 +60,10 @@ def ground_deadline(
         or any(candidate != expected for candidate in evidence_dates)
     ):
         return GroundingResult(False, "source evidence conflicts with the extracted date")
-    if deadline.due_time is not None:
-        expected_minutes = _time_minutes(deadline.due_time)
+    expected_minutes = (
+        _time_minutes(deadline.due_time) if deadline.due_time is not None else None
+    )
+    if expected_minutes is not None:
         evidence_times = _times_in_context(evidence, evidence_words)
         if evidence_times and (
             expected_minutes not in evidence_times
@@ -104,7 +106,7 @@ def ground_deadline(
     if any(candidate != expected for candidate in dates):
         return GroundingResult(False, "nearby source text contains conflicting dates")
 
-    if deadline.due_time is not None:
+    if expected_minutes is not None:
         times = _times_in_context(source, context)
         if expected_minutes not in times:
             return GroundingResult(False, "the extracted time is not supported nearby")
