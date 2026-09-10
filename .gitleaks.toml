@@ -1,14 +1,10 @@
 [extend]
 useDefault = true
 
-[[allowlists]]
-description = "D1 column names mistaken for a generic API key"
-targetRules = ["generic-api-key"]
+[allowlist]
+description = "Narrow false positives supported by the CI action's Gitleaks version"
 regexTarget = "line"
-regexes = ['''excluded\.token,lease_until''']
-
-[[allowlists]]
-description = "Documented Discord application ID placeholder"
-targetRules = ["discord-client-secret"]
-regexTarget = "match"
-regexes = ['''DISCORD_APPLICATION_ID=replace_with_your_application_id''']
+regexes = [
+    '''excluded\.token,lease_until''',
+    '''DISCORD_APPLICATION_ID=replace_with_your_application_id''',
+]
