@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
 import test, { afterEach } from 'node:test';
 import ts from 'typescript';
+import { freshDatabase } from './helpers/database.mjs';
 const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8') + '\nexport { detectCourses, answerAsk, retrieveAsk, handleAsk, scheduleAsk };';
 const { outputText } = ts.transpileModule(source.replace('import("@google/genai")', `import(${JSON.stringify(import.meta.resolve('@google/genai'))})`), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
 const { default: worker, detectCourses, answerAsk, retrieveAsk, handleAsk, scheduleAsk } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
@@ -10,16 +10,7 @@ const courses = JSON.parse(readFileSync(new URL('../../data/course_schedule.json
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 function database() {
-  const sqlite = new DatabaseSync(':memory:');
-  sqlite.exec(readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
-  const wrap = (sql, values = []) => ({ bind: (...args) => wrap(sql, args),
-    all: async () => ({ results: sqlite.prepare(sql).all(...values) }),
-    first: async () => sqlite.prepare(sql).get(...values) ?? null,
-    run: async () => sqlite.prepare(sql).run(...values) });
-  return { sqlite, prepare: sql => wrap(sql), batch: async statements => {
-    sqlite.exec('BEGIN'); try { for (const s of statements) await s.run(); sqlite.exec('COMMIT'); }
-    catch(e) { sqlite.exec('ROLLBACK'); throw e; }
-  }};
+  return freshDatabase();
 }
 const course = courses.find(c => c.key === 'web-development');
 const other = courses.find(c => c.key === 'algorithms');

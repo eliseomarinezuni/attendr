@@ -119,14 +119,16 @@ The Worker changes require D1 schema migration before deployment. Stop Python sc
 npx wrangler d1 execute attendr-study --remote --file=migrations/0002_reliability.sql
 npx wrangler d1 execute attendr-study --remote --file=migrations/0003_study_preferences.sql
 npx wrangler d1 execute attendr-study --remote --file=migrations/0004_cloud_state.sql
+npx wrangler d1 execute attendr-study --remote --file=migrations/0005_ask.sql
+npx wrangler d1 execute attendr-study --remote --file=migrations/0006_automation_watchdog.sql
 npm run deploy
 ```
 
-These are deployment instructions, not commands executed as part of the local implementation. The migration adds resumable operations and canonicalizes existing timestamps to UTC milliseconds. Invalid legacy timestamps fail rather than silently becoming valid dates. New installations can use `schema.sql`.
+These are deployment instructions, not commands executed as part of the local implementation. Apply only migrations not already applied, in filename order. The migrations add resumable operations and canonicalize existing timestamps to UTC milliseconds. Invalid legacy timestamps fail rather than silently becoming valid dates. New installations can use `schema.sql`.
 
 Signed interactions now have a five-minute freshness bound, persistent interaction IDs, and one active operation globally. Selected reschedule destinations are saved before Google PATCH; interrupted operations replay the same destination. Google deletes tolerate already-deleted events. Successful D1 mutations are recorded before editing the Discord response, preventing a failed response update from repeating the action. Recovery runs from the five-minute Worker schedule after an expired ten-minute operation lease. Pending operations block new Python study reconciliation when observed.
 
-Reminders claim `notified=-1` before sending. A lost response remains unresolved. Inspect the Discord channel and the D1 row before setting it to `1` (confirmed sent) or `0` (confirmed absent). Python and Worker FreeBusy requests paginate all calendars, batch groups of 50, and reject incomplete coverage.
+Reminders acquire the shared mutation lease before atomically claiming `notified=-1`, so Python planning and button operations cannot cancel or reschedule a session while its Discord delivery is in flight. Confirmed delivery and confirmed Discord rate limiting release the lease immediately. A crash or uncertain response leaves `notified=-1` to prevent duplicate delivery, while the reminder's 60-second lease expires automatically so planning cannot deadlock. Inspect the Discord channel and the D1 row before setting an unresolved reminder to `1` (confirmed sent) or `0` (confirmed absent). Python and Worker FreeBusy requests paginate all calendars, batch groups of 50, and reject incomplete coverage.
 
 A shared D1 planner lease excludes button operations while Python reads availability and updates Calendar. Button operations are serialized globally because different tasks share calendar openings. Claims capture the current session atomically. The planner stops starting Calendar mutations after 15 minutes; its server lease lasts 20 minutes, with Calendar HTTP calls bounded to 60 seconds. A crashed planner can temporarily block study controls until lease expiry. Pending Worker sync payloads are cached locally and retried under the next acquired lease. The Worker availability windows currently use America/Toronto; retain that timezone for online study controls.
 

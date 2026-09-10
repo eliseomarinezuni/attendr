@@ -1,0 +1,27 @@
+\documentclass[10pt,letterpaper]{article}
+\usepackage[letterpaper,margin=0.55in]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{xcolor}
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\definecolor{rulegray}{HTML}{333333}
+\begin{document}
+
+{\large\bfseries PROJECTS}\par
+\vspace{2pt}\color{rulegray}\hrule\color{black}
+\vspace{7pt}
+
+{\bfseries Attendr} \textbar{} Python 3.11, TypeScript, Cloudflare Workers/D1, SQLite, REST APIs \textbar{}
+\href{https://github.com/eliseomarinezuni/attendr}{\underline{GitHub}}
+
+\begin{itemize}[label={-},leftmargin=0.18in,itemsep=3pt,topsep=4pt,parsep=0pt,partopsep=0pt]
+  \item Eliminated duplicate reminders during concurrent 5-minute check-in windows, measured by one Discord send across simultaneous Worker invocations, by atomically claiming D1 rows and serializing planner and button mutations with expiring leases.
+  \item Rejected 100\% of missing, blank, incorrect, and stale credentials in security tests, by combining bearer authentication, Ed25519 request verification, a 5-minute replay window, owner-only controls, and AES-256-GCM state encryption.
+  \item Preserved calendar, notification, and quiz state across four non-transactional systems, validated by 193 passing Python and TypeScript tests, by using deterministic event IDs, transactional outboxes, revisioned checkpoints, checksums, and fail-closed reconciliation.
+  \item Capped external Worker calls at 15 seconds and processed 51 calendars in two FreeBusy requests, by batching 50 calendars per call, paginating results, and retrying transient timeouts, HTTP 429s, and 5xx failures up to three attempts.
+\end{itemize}
+
+\end{document}

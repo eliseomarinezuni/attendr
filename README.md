@@ -245,11 +245,21 @@ That command also performs the normal Attendr run and can send its normal notifi
 ### Verification and troubleshooting
 
 ```bash
-.venv/bin/python -m pytest
+.venv/bin/ruff check .
+.venv/bin/ruff format --check .
+.venv/bin/pyright --pythonpath .venv/bin/python
+.venv/bin/python -m pytest --cov=src/academic_assistant --cov=main --cov-report=term-missing
+.venv/bin/pip-audit --strict --no-deps --disable-pip -r requirements.lock
 npm --prefix worker test
 npm --prefix worker run check
+npm --prefix worker audit --omit=dev --audit-level=high
 cd worker && npx wrangler deploy --dry-run
 ```
+
+CI enforces Ruff linting, the scoped Pyright baseline, at least 75% branch coverage,
+locked Python dependency auditing, production npm dependency auditing, and secret
+scanning. Ruff formatting is currently report-only while existing formatting drift is
+removed incrementally.
 
 Tests disable live Python sockets and mock Discord, Canvas, D1, and Gemini. They cover
 aliases, ambiguity, signatures, deferred replies, source isolation, deadlines,

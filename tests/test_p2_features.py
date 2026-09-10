@@ -1,8 +1,6 @@
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
-from types import SimpleNamespace
-from unittest.mock import Mock, patch
-import json
+from unittest.mock import patch
 import os
 
 import pytest

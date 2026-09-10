@@ -5,3 +5,8 @@ pluggy==1.6.0
 Pygments==2.21.0
 pytest==8.4.2
 pytest-socket==0.7.0
+coverage==7.16.0
+pip-audit==2.10.1
+pyright==1.1.413
+pytest-cov==7.1.0
+ruff==0.16.6

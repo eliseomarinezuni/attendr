@@ -1,13 +1,22 @@
 from pathlib import Path
 from types import SimpleNamespace as NS
 from unittest.mock import Mock
+import logging
+import socket
 import zipfile
 
 import pytest
 import requests
 from pptx import Presentation
 
-from academic_assistant.lecture_files import stream_download, powerpoint_slide_text
+from academic_assistant.lecture_files import (
+    DownloadDestination,
+    LectureDownloadError,
+    _PinnedHTTPSAdapter,
+    powerpoint_slide_text,
+    stream_download,
+    validate_download_destination,
+)
 from academic_assistant.ai_assistant import extract_powerpoint_text_chunks
 from academic_assistant.canvas_client import CanvasClient
 from academic_assistant.state_store import StateStore
@@ -54,10 +63,35 @@ def response(blocks, status=200, headers=None):
     return r
 
 
+def dns_result(*addresses):
+    return [
+        (
+            socket.AF_INET6 if ':' in address else socket.AF_INET,
+            socket.SOCK_STREAM,
+            socket.IPPROTO_TCP,
+            '',
+            (address, 443, 0, 0) if ':' in address else (address, 443),
+        )
+        for address in addresses
+    ]
+
+
+def public_dns(monkeypatch, mapping=None):
+    mapping = mapping or {}
+    monkeypatch.setattr(
+        socket,
+        'getaddrinfo',
+        lambda hostname, *_args, **_kwargs: dns_result(
+            *mapping.get(hostname, ('93.184.216.34',))
+        ),
+    )
+
+
 def test_stream_counts_actual_bytes_and_removes_partial(tmp_path, monkeypatch):
+    public_dns(monkeypatch)
     r = response([b'123', b'456'])
     get = Mock(return_value=r)
-    monkeypatch.setattr(requests, 'get', get)
+    monkeypatch.setattr(requests.Session, 'get', get)
     path = tmp_path / 'download'
     with pytest.raises(ValueError, match='byte or time'):
         stream_download('https://canvas.test/file', path, 5)
@@ -67,20 +101,145 @@ def test_stream_counts_actual_bytes_and_removes_partial(tmp_path, monkeypatch):
 
 
 def test_stream_rejects_insecure_redirect(tmp_path, monkeypatch):
-    monkeypatch.setattr(requests, 'get', Mock(return_value=response([], 302, {'Location': 'http://unsafe.test'})))
-    with pytest.raises(ValueError, match='Invalid lecture'):
+    public_dns(monkeypatch)
+    monkeypatch.setattr(requests.Session, 'get', Mock(return_value=response([], 302, {'Location': 'http://unsafe.test'})))
+    with pytest.raises(LectureDownloadError, match='invalid URL'):
         stream_download('https://canvas.test/file', tmp_path / 'download', 100)
 
 
 def test_stream_retries_transport_failure(tmp_path, monkeypatch):
+    public_dns(monkeypatch)
     r = response([b'content'])
     get = Mock(side_effect=[requests.Timeout('secret'), r])
-    monkeypatch.setattr(requests, 'get', get)
+    monkeypatch.setattr(requests.Session, 'get', get)
     monkeypatch.setattr('academic_assistant.lecture_files.time.sleep', lambda _: None)
     path = tmp_path / 'download'
     stream_download('https://canvas.test/file', path, 100)
     assert path.read_bytes() == b'content'
     assert get.call_count == 2
+
+
+def test_public_https_destination_and_signed_query_are_accepted(tmp_path, monkeypatch, caplog):
+    public_dns(monkeypatch)
+    get = Mock(return_value=response([b'content']))
+    monkeypatch.setattr(requests.Session, 'get', get)
+    signed_url = 'https://cdn.canvas.test/file?verifier=signed-private-value&download=1'
+    with caplog.at_level(logging.DEBUG):
+        stream_download(signed_url, tmp_path / 'download', 100)
+    assert get.call_args.args[0] == signed_url
+    assert 'signed-private-value' not in caplog.text
+
+
+def test_public_canvas_and_cdn_redirect_chain_is_revalidated(tmp_path, monkeypatch):
+    resolutions = []
+    mapping = {
+        'canvas.test': ('93.184.216.34',),
+        'cdn.canvas.test': ('2606:4700:4700::1111',),
+    }
+    monkeypatch.setattr(socket, 'getaddrinfo', lambda hostname, *_args, **_kwargs: (
+        resolutions.append(hostname) or dns_result(*mapping[hostname])
+    ))
+    get = Mock(side_effect=[
+        response([], 302, {'Location': 'https://cdn.canvas.test/signed?key=value'}),
+        response([b'content']),
+    ])
+    monkeypatch.setattr(requests.Session, 'get', get)
+    path = tmp_path / 'download'
+    stream_download('https://canvas.test/file', path, 100)
+    assert path.read_bytes() == b'content'
+    assert resolutions == ['canvas.test', 'cdn.canvas.test']
+    assert get.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ('url', 'addresses'),
+    [
+        ('https://127.0.0.1/file', ('127.0.0.1',)),
+        ('https://localhost/file', ('127.0.0.1',)),
+        ('https://localhost./file', ('127.0.0.1',)),
+        ('https://10.1.2.3/file', ('10.1.2.3',)),
+        ('https://172.16.2.3/file', ('172.16.2.3',)),
+        ('https://192.168.2.3/file', ('192.168.2.3',)),
+        ('https://169.254.169.254/latest/meta-data', ('169.254.169.254',)),
+        ('https://[::1]/file', ('::1',)),
+        ('https://[fc00::1]/file', ('fc00::1',)),
+        ('https://[fe80::1]/file', ('fe80::1',)),
+        ('https://private.test/file', ('10.0.0.8',)),
+        ('https://mixed.test/file', ('93.184.216.34', '192.168.1.8')),
+    ],
+)
+def test_unsafe_destination_ranges_are_rejected_before_request(
+    url, addresses, tmp_path, monkeypatch
+):
+    monkeypatch.setattr(socket, 'getaddrinfo', Mock(return_value=dns_result(*addresses)))
+    get = Mock()
+    monkeypatch.setattr(requests.Session, 'get', get)
+    with pytest.raises(LectureDownloadError, match='unsafe destination'):
+        stream_download(url, tmp_path / 'download', 100)
+    get.assert_not_called()
+
+
+@pytest.mark.parametrize('url', ['http://public.test/file', 'https://user:password@public.test/file'])
+def test_invalid_url_is_rejected_without_dns_or_request(url, tmp_path, monkeypatch):
+    resolve = Mock()
+    get = Mock()
+    monkeypatch.setattr(socket, 'getaddrinfo', resolve)
+    monkeypatch.setattr(requests.Session, 'get', get)
+    with pytest.raises(LectureDownloadError, match='invalid URL'):
+        stream_download(url, tmp_path / 'download', 100)
+    resolve.assert_not_called()
+    get.assert_not_called()
+
+
+def test_dns_resolution_failure_is_rejected_without_retry(tmp_path, monkeypatch):
+    resolve = Mock(side_effect=socket.gaierror('private resolver detail'))
+    get = Mock()
+    monkeypatch.setattr(socket, 'getaddrinfo', resolve)
+    monkeypatch.setattr(requests.Session, 'get', get)
+    with pytest.raises(LectureDownloadError, match='resolution failed'):
+        stream_download('https://unknown.test/file', tmp_path / 'download', 100)
+    assert resolve.call_count == 1
+    get.assert_not_called()
+
+
+def test_private_metadata_redirect_is_rejected_before_second_request(tmp_path, monkeypatch):
+    mapping = {
+        'canvas.test': ('93.184.216.34',),
+        'metadata.test': ('169.254.169.254',),
+    }
+    public_dns(monkeypatch, mapping)
+    get = Mock(return_value=response([], 302, {'Location': 'https://metadata.test/latest'}))
+    monkeypatch.setattr(requests.Session, 'get', get)
+    with pytest.raises(LectureDownloadError, match='unsafe destination'):
+        stream_download('https://canvas.test/file', tmp_path / 'download', 100)
+    assert get.call_count == 1
+
+
+def test_redirect_chain_remains_capped(tmp_path, monkeypatch):
+    public_dns(monkeypatch)
+    get = Mock(return_value=response([], 302, {'Location': '/next'}))
+    monkeypatch.setattr(requests.Session, 'get', get)
+    with pytest.raises(ValueError, match='Too many lecture download redirects'):
+        stream_download('https://canvas.test/file', tmp_path / 'download', 100)
+    assert get.call_count == 6
+
+
+def test_validator_accepts_all_public_dns_answers(monkeypatch):
+    public_dns(monkeypatch, {'cdn.test': ('93.184.216.34', '2606:4700:4700::1111')})
+    destination = validate_download_destination('https://cdn.test/file')
+    assert destination.addresses == ('93.184.216.34', '2606:4700:4700::1111')
+
+
+def test_connection_pool_pins_ip_but_preserves_tls_hostname():
+    destination = DownloadDestination('cdn.test', 443, ('93.184.216.34',))
+    adapter = _PinnedHTTPSAdapter(destination)
+    request = requests.Request('GET', 'https://cdn.test/file').prepare()
+    pool = adapter.get_connection_with_tls_context(request, verify=True)
+    connection = pool._new_conn()
+    assert connection._dns_host == '93.184.216.34'
+    assert connection.server_hostname == 'cdn.test'
+    assert connection.assert_hostname == 'cdn.test'
+    adapter.close()
 
 
 def test_large_deck_cache_survives_new_runner_and_invalidates_revision(tmp_path, monkeypatch):
