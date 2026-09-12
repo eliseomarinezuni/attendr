@@ -52,6 +52,7 @@ from academic_assistant import (
     extract_pdf_text_chunks,
     quiz_discord_payload,
 )
+from academic_assistant.ai_efficiency import AI_USAGE
 
 from academic_assistant.state_store import StateStore
 from academic_assistant.cloud_state import CloudStateError
@@ -727,6 +728,7 @@ def run_recorded(arguments: argparse.Namespace, store: StateStore) -> int:
     store.migrate_quizzes(PROJECT_ROOT / os.getenv("LECTURE_QUIZ_STATE_FILE", "data/lecture_quiz_state.json"))
     run_id = uuid.uuid4().hex
     configure_logging(run_id)
+    AI_USAGE.reset()
     logging.getLogger("attendr").info("Run started")
     with store.connect() as db:
         db.execute("INSERT INTO runs(run_id,started_at,status) VALUES(?,?,'running')", (run_id, time.time()))
@@ -734,6 +736,7 @@ def run_recorded(arguments: argparse.Namespace, store: StateStore) -> int:
         results = run_pipeline(arguments)
     except Exception:
         logging.getLogger("attendr").exception("Run failed: %s", run_id)
+        AI_USAGE.log_summary()
         with store.connect() as db:
             db.execute("UPDATE runs SET finished_at=?,status='failed' WHERE run_id=?", (time.time(), run_id))
         return 1
@@ -750,6 +753,7 @@ def run_recorded(arguments: argparse.Namespace, store: StateStore) -> int:
                     json.dumps([{ "step": result.name, "status": result.status} for result in results]), run_id))
     for result in results:
         print(f"[{result.status.upper():8}] {result.name}: {result.detail}")
+    AI_USAGE.log_summary()
     summary_path = os.getenv("GITHUB_STEP_SUMMARY", "").strip()
     if summary_path:
         with Path(summary_path).open("a", encoding="utf-8") as summary:
@@ -758,6 +762,16 @@ def run_recorded(arguments: argparse.Namespace, store: StateStore) -> int:
             for result in results:
                 detail = result.detail.replace("|", "\\|").replace("\n", " ")
                 summary.write(f"| {result.name} | {result.status} | {detail} |\n")
+            usage = AI_USAGE.snapshot()
+            summary.write("\n### AI efficiency\n\n")
+            summary.write("| Task | Requests | Cache hits | Deterministic | Input chars | Retries | Rate limits |\n")
+            summary.write("|---|---:|---:|---:|---:|---:|---:|\n")
+            for task, metrics in sorted(usage.items()):
+                summary.write(
+                    f"| {task} | {metrics.requests} | {metrics.cache_hits} | "
+                    f"{metrics.deterministic} | {metrics.input_chars} | "
+                    f"{metrics.retries} | {metrics.rate_limits} |\n"
+                )
     return 1 if any(result.status == "failed" for result in results) else 0
 
 

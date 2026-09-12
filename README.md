@@ -280,5 +280,12 @@ untrusted content, synchronization retries/updates/removals, and existing contro
   parts. The old snapshot is preserved if a limit is exceeded.
 - **AI unavailable:** verify Worker `GEMINI_API_KEY`/`GEMINI_MODEL` access and quota.
   Deterministic deadline/timetable questions still work without Gemini.
+
+Attendr content-addresses verified deadline extractions, rechecks them when grounding
+rules change, and sends only structurally relevant deadline sections to Gemini.
+`GEMINI_DEADLINE_MODEL` and `GEMINI_QUIZ_MODEL` are optional task-specific overrides;
+both inherit `GEMINI_MODEL` when blank. Scheduled Python requests are serialized using
+`GEMINI_MIN_REQUEST_INTERVAL_SECONDS` (default `0.5`), while deterministic extraction
+and verified-cache hits make no provider request and do not sleep.
 - **Reply delivery failed:** Discord rejected or timed out on both message edits;
   ask again. Attendr logs only a generic failure and never persists interaction tokens.

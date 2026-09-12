@@ -8,19 +8,21 @@ import re
 import tempfile
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta, timezone
-from hashlib import sha256
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from .ai_assistant import AIAssistant, AIInputError, AIProviderError, MajorDeadline
+from .ai_assistant import AI_TASKS, AIAssistant, AIInputError, AIProviderError, MajorDeadline
+from .ai_efficiency import AI_USAGE
 from .canvas_client import AcademicItem, Announcement
 from .course_schedule import CourseSchedule
-from .deadline_grounding import ground_deadline
+from .deadline_candidates import deadline_cache_key, normalize_source_text
+from .deadline_grounding import GROUNDING_VERSION, ground_deadline
 from .materials_sync import CourseMaterialsSync
 from .state_store import StateStore
 
 UTC = timezone.utc
-EXTRACTION_VERSION = 3
+AI_EXTRACTION_VERSION = AI_TASKS["deadline_extraction"].prompt_version
+_CONTENT_CACHE_KEY = "__verified_deadline_extractions__"
 _DATE_SIGNAL = re.compile(
     r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
     r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
@@ -70,9 +72,15 @@ class AnnouncementDatesSync:
         warnings: list[str] = []
         blocking_warnings: list[str] = []
         items: list[AcademicItem] = []
+        content_cache = index.get(_CONTENT_CACHE_KEY)
+        if not isinstance(content_cache, dict):
+            content_cache = {}
+            index[_CONTENT_CACHE_KEY] = content_cache
         current = {item.uid: item for item in announcements}
         # Retain dated corrections beyond the Canvas announcement lookback window.
         for uid, record in index.items():
+            if uid == _CONTENT_CACHE_KEY:
+                continue
             if uid not in current and isinstance(record, dict) and record.get("source"):
                 source = dict(record["source"])
                 for key in ("posted_at", "posted_at_local"):
@@ -81,29 +89,48 @@ class AnnouncementDatesSync:
         for announcement in sorted(current.values(), key=lambda item: (item.posted_at, item.uid)):
             if not announcement.message_text.strip():
                 continue
-            digest = sha256(
-                str((f"announcement-v{EXTRACTION_VERSION}", getattr(self.ai, "model", "injected"), self.timezone.key,
-                     self.course_schedule.context_for_course(announcement.course_name) if self.course_schedule else None,
-                     announcement.title, announcement.message_text)).encode("utf-8")
-            ).hexdigest()
+            model = self._task_model()
+            schedule_context = (
+                self.course_schedule.context_for_course(announcement.course_name)
+                if self.course_schedule
+                else None
+            )
+            normalized_text = normalize_source_text(announcement.message_text)
+            content_key = deadline_cache_key(
+                normalized_text,
+                scope="announcement_deadline_extraction",
+                model=model,
+                prompt_version=AI_EXTRACTION_VERSION,
+                course_name=announcement.course_name,
+                schedule_context=schedule_context,
+                academic_year=announcement.posted_at_local.year,
+            )
             record = index.get(announcement.uid)
             raw_deadlines: list[dict[str, object]]
             newly_analyzed = False
             provider_failed = False
-            if isinstance(record, dict) and record.get("sha256") == digest:
+            shared = content_cache.get(content_key)
+            if isinstance(shared, dict) and isinstance(shared.get("deadlines"), list):
+                raw_deadlines = list(shared["deadlines"])
+                cached += 1
+                AI_USAGE.record("deadline_extraction", cache_hits=1)
+            elif (
+                isinstance(record, dict)
+                and record.get("content_key") == content_key
+                and record.get("grounding_version") == GROUNDING_VERSION
+            ):
                 raw_deadlines = list(record.get("deadlines", []))
                 cached += 1
+                AI_USAGE.record("deadline_extraction", cache_hits=1)
             else:
+                AI_USAGE.record("deadline_extraction", cache_misses=1)
                 try:
                     raw_deadlines = self.ai.extract_major_deadlines(
                         announcement.message_text,
                         course_name=announcement.course_name,
                         source_title=f"Announcement: {announcement.title}",
                         current_date=announcement.posted_at_local.date(),
-                        schedule_context=(
-                            self.course_schedule.context_for_course(announcement.course_name)
-                            if self.course_schedule else None
-                        ),
+                        schedule_context=schedule_context,
                     )
                 except (AIInputError, AIProviderError):
                     provider_failed = True
@@ -154,10 +181,20 @@ class AnnouncementDatesSync:
                 )
             if newly_analyzed:
                 index[announcement.uid] = {
-                    "sha256": digest,
+                    "content_key": content_key,
+                    "extraction_version": AI_EXTRACTION_VERSION,
+                    "grounding_version": GROUNDING_VERSION,
+                    "model": model,
+                    "extraction_method": self._extraction_method(),
                     "deadlines": grounded_raw,
                     "source": {key: value.isoformat() if isinstance(value, datetime) else value
                                for key, value in asdict(announcement).items()},
+                }
+                content_cache[content_key] = {
+                    "deadlines": grounded_raw,
+                    "model": model,
+                    "extraction_version": AI_EXTRACTION_VERSION,
+                    "extraction_method": self._extraction_method(),
                 }
                 changed = True
         if changed:
@@ -175,6 +212,15 @@ class AnnouncementDatesSync:
     @staticmethod
     def _may_contain_deadline(text: str) -> bool:
         return bool(_DATE_SIGNAL.search(text) and _DEADLINE_SIGNAL.search(text))
+
+    def _extraction_method(self) -> str:
+        value = getattr(self.ai, "last_deadline_extraction_method", "gemini")
+        return value if value in {"gemini", "deterministic", "hybrid"} else "gemini"
+
+    def _task_model(self) -> str:
+        method = getattr(self.ai, "model_for_task", None)
+        value = method("deadline_extraction") if callable(method) else getattr(self.ai, "model", "injected")
+        return value if isinstance(value, str) else "injected"
 
     def _to_item(self, announcement: Announcement, deadline: MajorDeadline) -> AcademicItem:
         actual_date = date.fromisoformat(deadline.due_date)

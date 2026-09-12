@@ -19,6 +19,7 @@ from docx.opc.exceptions import PackageNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .ai_assistant import (
+    AI_TASKS,
     AIAssistant,
     AIInputError,
     AIProviderError,
@@ -26,13 +27,17 @@ from .ai_assistant import (
     PDFExtractionError,
     extract_pdf_text_chunks,
 )
+from .ai_efficiency import AI_USAGE
 from .canvas_client import AcademicItem, CanvasClient, SyllabusMaterial
 from .course_schedule import CourseSchedule
-from .deadline_grounding import ground_deadline
+from .deadline_candidates import deadline_cache_key
+from .deadline_grounding import GROUNDING_VERSION, ground_deadline
 from .state_store import StateStore
 
 UTC = timezone.utc
-EXTRACTION_VERSION = 4
+AI_EXTRACTION_VERSION = AI_TASKS["deadline_extraction"].prompt_version
+CACHE_FORMAT_VERSION = 1
+LEGACY_COMBINED_VERSION_MAX = 4
 DOCX_CONTENT_TYPE = (
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 )
@@ -55,14 +60,27 @@ class CachedMaterial(BaseModel):
     title: str
     deadlines: list[MajorDeadline]
     extraction_version: int = 1
+    grounding_version: int = 1
     context_hash: str = ""
+    extraction_method: Literal["gemini", "deterministic", "hybrid"] = "gemini"
+    model: str | None = None
+
+
+class CachedExtraction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    deadlines: list[MajorDeadline]
+    model: str
+    prompt_version: int
+    extraction_method: Literal["gemini", "deterministic", "hybrid"] = "gemini"
 
 
 class MaterialsIndex(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    version: Literal[1] = 1
+    version: Literal[1] = CACHE_FORMAT_VERSION
     sources: dict[str, CachedMaterial] = Field(default_factory=dict)
+    extractions: dict[str, CachedExtraction] = Field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -200,23 +218,68 @@ class CourseMaterialsSync:
         extracted: list[tuple[SyllabusMaterial, MajorDeadline]] = []
         local_today = self._now_local().date()
         provider_unavailable = False
+        source_text_by_hash: dict[str, str] = {}
 
         for material in downloads.materials:
-            context_hash = sha256(str((getattr(self.ai, "model", "injected"),
+            model = self._task_model()
+            schedule_context = (
+                self.course_schedule.context_for_course(material.course_name)
+                if self.course_schedule
+                else None
+            )
+            context_hash = sha256(str((model,
                 self.course_schedule.context_for_course(material.course_name) if self.course_schedule else None,
-                self.timezone.key, EXTRACTION_VERSION)).encode()).hexdigest()
+                self.timezone.key, AI_EXTRACTION_VERSION, GROUNDING_VERSION)).encode()).hexdigest()
             cached = index.sources.get(material.uid)
-            source_text: str | None = None
-            deadlines: list[MajorDeadline] | None = None
-            if (
-                cached
-                and cached.content_sha256 == material.content_sha256
-                and cached.extraction_version == EXTRACTION_VERSION
-                and cached.context_hash == context_hash
-            ):
+            source_text: str | None = source_text_by_hash.get(material.content_sha256)
+            if source_text is None:
                 try:
                     source_text = self._material_text(material)
                 except (AIInputError, PDFExtractionError):
+                    source_text = None
+                else:
+                    source_text_by_hash[material.content_sha256] = source_text
+            extraction_key = (
+                deadline_cache_key(
+                    source_text,
+                    scope="syllabus_deadline_extraction",
+                    model=model,
+                    prompt_version=AI_EXTRACTION_VERSION,
+                    course_name=material.course_name,
+                    schedule_context=schedule_context,
+                    academic_year=local_today.year,
+                )
+                if source_text is not None
+                else None
+            )
+            deadlines: list[MajorDeadline] | None = None
+            shared = index.extractions.get(extraction_key) if extraction_key else None
+            if shared is not None and source_text is not None:
+                deadlines = self._ground_deadlines(
+                    source_text, shared.deadlines, material, local_today, warnings
+                )
+                reused += 1
+                AI_USAGE.record("deadline_extraction", cache_hits=1)
+                index.sources[material.uid] = CachedMaterial(
+                    content_sha256=material.content_sha256,
+                    course_id=material.course_id,
+                    course_name=material.course_name,
+                    title=material.title,
+                    deadlines=deadlines,
+                    extraction_version=AI_EXTRACTION_VERSION,
+                    grounding_version=GROUNDING_VERSION,
+                    context_hash=context_hash,
+                    extraction_method=shared.extraction_method,
+                    model=shared.model,
+                )
+                changed = True
+            elif (
+                cached
+                and cached.content_sha256 == material.content_sha256
+                and cached.extraction_version == AI_EXTRACTION_VERSION
+                and cached.context_hash == context_hash
+            ):
+                if source_text is None:
                     # A current-version entry with the same content hash was grounded
                     # before it was cached, so it remains a known-good degraded input.
                     deadlines = cached.deadlines
@@ -226,6 +289,7 @@ class CourseMaterialsSync:
                         warnings,
                     )
                 reused += 1
+                AI_USAGE.record("deadline_extraction", cache_hits=1)
             else:
                 # A grounding-version bump does not require another Gemini call when
                 # the exact source bytes are unchanged and every cached claim passes
@@ -233,13 +297,16 @@ class CourseMaterialsSync:
                 if (
                     cached
                     and cached.content_sha256 == material.content_sha256
-                    and cached.extraction_version < EXTRACTION_VERSION
+                    and (
+                        cached.extraction_version <= LEGACY_COMBINED_VERSION_MAX
+                        or (
+                            cached.extraction_version == AI_EXTRACTION_VERSION
+                            and cached.grounding_version < GROUNDING_VERSION
+                            and cached.model == model
+                        )
+                    )
                     and cached.deadlines
                 ):
-                    try:
-                        source_text = self._material_text(material)
-                    except (AIInputError, PDFExtractionError):
-                        source_text = None
                     if source_text is not None:
                         migration_warnings: list[str] = []
                         migrated = self._ground_deadlines(
@@ -257,15 +324,20 @@ class CourseMaterialsSync:
                                 course_name=material.course_name,
                                 title=material.title,
                                 deadlines=deadlines,
-                                extraction_version=EXTRACTION_VERSION,
+                                extraction_version=AI_EXTRACTION_VERSION,
+                                grounding_version=GROUNDING_VERSION,
                                 context_hash=context_hash,
+                                extraction_method=cached.extraction_method,
+                                model=cached.model,
                             )
                             reused += 1
                             changed = True
+                            AI_USAGE.record("deadline_extraction", cache_hits=1)
                         else:
                             warnings.extend(migration_warnings)
 
             if deadlines is None:
+                AI_USAGE.record("deadline_extraction", cache_misses=1)
                 try:
                     if provider_unavailable:
                         raise AIProviderError(
@@ -279,13 +351,7 @@ class CourseMaterialsSync:
                         course_name=material.course_name,
                         source_title=material.title,
                         current_date=local_today,
-                        schedule_context=(
-                            self.course_schedule.context_for_course(
-                                material.course_name
-                            )
-                            if self.course_schedule
-                            else None
-                        ),
+                        schedule_context=schedule_context,
                     )
                     validated = [
                         MajorDeadline.model_validate(item) for item in raw_deadlines
@@ -316,9 +382,19 @@ class CourseMaterialsSync:
                     course_name=material.course_name,
                     title=material.title,
                     deadlines=deadlines,
-                    extraction_version=EXTRACTION_VERSION,
+                    extraction_version=AI_EXTRACTION_VERSION,
+                    grounding_version=GROUNDING_VERSION,
                     context_hash=context_hash,
+                    extraction_method=self._extraction_method(),
+                    model=model,
                 )
+                if extraction_key is not None:
+                    index.extractions[extraction_key] = CachedExtraction(
+                        deadlines=deadlines,
+                        model=model,
+                        prompt_version=AI_EXTRACTION_VERSION,
+                        extraction_method=self._extraction_method(),
+                    )
                 analyzed += 1
                 changed = True
 
@@ -352,7 +428,10 @@ class CourseMaterialsSync:
                     course_name=previous.course_name, title=previous.title, content_type="text/html",
                     local_path=self.materials_directory, content_sha256=previous.content_sha256,
                     updated_at=None, html_url=None)
-                if previous.extraction_version == EXTRACTION_VERSION:
+                if (
+                    previous.extraction_version == AI_EXTRACTION_VERSION
+                    and previous.grounding_version == GROUNDING_VERSION
+                ):
                     extracted.extend((fallback, deadline) for deadline in previous.deadlines)
                 else:
                     blocking_courses.add(previous.course_id)
@@ -615,6 +694,15 @@ class CourseMaterialsSync:
                 "now_provider must return a timezone-aware datetime."
             )
         return current.astimezone(self.timezone)
+
+    def _extraction_method(self) -> Literal["gemini", "deterministic", "hybrid"]:
+        value = getattr(self.ai, "last_deadline_extraction_method", "gemini")
+        return value if value in {"gemini", "deterministic", "hybrid"} else "gemini"
+
+    def _task_model(self) -> str:
+        method = getattr(self.ai, "model_for_task", None)
+        value = method("deadline_extraction") if callable(method) else getattr(self.ai, "model", "injected")
+        return value if isinstance(value, str) else "injected"
 
     @staticmethod
     def _deadline_uid(course_id: int, title: str) -> str:

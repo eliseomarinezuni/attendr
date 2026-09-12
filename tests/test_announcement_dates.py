@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock
@@ -119,6 +120,20 @@ class AnnouncementDatesTests(unittest.TestCase):
 
         self.assertFalse(report.complete)
         self.assertTrue(report.blocking_warnings)
+
+    def test_identical_announcement_content_reuses_content_cache(self):
+        first = self.announcement()
+        second = replace(
+            self.announcement(), uid="canvas:announcement:1:3", source_id="3"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            ai = FakeAI()
+            report = AnnouncementDatesSync(
+                ai, index_path=Path(directory) / "dates.json"
+            ).sync((first, second))
+
+        self.assertEqual(ai.calls, 1)
+        self.assertEqual(report.cached, 1)
 
 
 if __name__ == "__main__":

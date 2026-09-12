@@ -8,6 +8,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+from unittest.mock import patch
 
 from docx import Document
 
@@ -222,7 +223,7 @@ class CourseMaterialsSyncTests(unittest.TestCase):
         self.assertTrue(report.complete)
         self.assertEqual(report.cached_materials_reused, 1)
         self.assertEqual(len(report.items), 1)
-        self.assertEqual(upgraded["extraction_version"], 4)
+        self.assertEqual(upgraded["extraction_version"], 5)
         self.assertNotEqual(upgraded["context_hash"], "legacy")
 
     def test_changed_source_provider_outage_is_blocking_and_preserves_old_cache(self):
@@ -259,6 +260,80 @@ class CourseMaterialsSyncTests(unittest.TestCase):
         self.assertTrue(report.blocking_warnings)
         self.assertEqual(report.items, ())
         self.assertEqual(preserved_index, original_index)
+
+    def test_identical_content_at_two_canvas_paths_uses_one_extraction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first_path = root / "one.html"
+            second_path = root / "two.html"
+            body = "<p>Midterm Exam: October 20, 2026 at 1:30 PM</p>"
+            first_path.write_text(body)
+            second_path.write_text(body)
+            first = self.make_material(first_path, uid="canvas:syllabus-page:1")
+            second = self.make_material(second_path, uid="canvas:syllabus-file:1:9")
+            ai = FakeAI([deadline()])
+
+            report = CourseMaterialsSync(
+                FakeCanvas([first, second]),
+                ai,
+                index_path=root / "index.json",
+                now_provider=lambda: NOW,
+            ).sync(active_course_ids={1})
+
+        self.assertEqual(len(ai.calls), 1)
+        self.assertEqual(report.materials_analyzed, 1)
+        self.assertEqual(report.cached_materials_reused, 1)
+        self.assertEqual(len(report.items), 1)
+
+    def test_grounding_version_change_reverifies_without_gemini(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "syllabus.html"
+            path.write_text("<p>Midterm Exam: October 20, 2026 at 1:30 PM</p>")
+            material = self.make_material(path)
+            index_path = root / "index.json"
+            CourseMaterialsSync(
+                FakeCanvas([material]),
+                FakeAI([deadline()]),
+                index_path=index_path,
+                now_provider=lambda: NOW,
+            ).sync(active_course_ids={1})
+            forbidden = FakeAI([])
+            with patch("academic_assistant.materials_sync.GROUNDING_VERSION", 3):
+                report = CourseMaterialsSync(
+                    FakeCanvas([material]),
+                    forbidden,
+                    index_path=index_path,
+                    now_provider=lambda: NOW,
+                ).sync(active_course_ids={1})
+
+        self.assertEqual(forbidden.calls, [])
+        self.assertTrue(report.complete)
+
+    def test_prompt_version_change_regenerates_only_affected_extraction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "syllabus.html"
+            path.write_text("<p>Midterm Exam: October 20, 2026 at 1:30 PM</p>")
+            material = self.make_material(path)
+            index_path = root / "index.json"
+            CourseMaterialsSync(
+                FakeCanvas([material]),
+                FakeAI([deadline()]),
+                index_path=index_path,
+                now_provider=lambda: NOW,
+            ).sync(active_course_ids={1})
+            regenerated = FakeAI([deadline()])
+            with patch("academic_assistant.materials_sync.AI_EXTRACTION_VERSION", 6):
+                report = CourseMaterialsSync(
+                    FakeCanvas([material]),
+                    regenerated,
+                    index_path=index_path,
+                    now_provider=lambda: NOW,
+                ).sync(active_course_ids={1})
+
+        self.assertEqual(len(regenerated.calls), 1)
+        self.assertTrue(report.complete)
 
     def test_untimed_midterm_uses_matching_lecture_slot(self):
         with tempfile.TemporaryDirectory() as directory:
