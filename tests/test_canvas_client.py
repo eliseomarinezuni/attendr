@@ -38,6 +38,8 @@ class FakeCourse(SimpleNamespace):
         return iter(getattr(self, "announcements", []))
 
     def get_files(self, **kwargs):
+        if getattr(self, "file_error", None):
+            raise self.file_error
         self.file_kwargs = kwargs
         return iter(getattr(self, "files", []))
 
@@ -332,6 +334,112 @@ class CanvasClientTests(unittest.TestCase):
             report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(directory)
         self.assertEqual(report.materials, ())
         self.assertEqual(len(report.warnings), 2)
+        self.assertEqual(report.incomplete_course_ids, (1,))
+
+    def test_files_endpoint_failure_is_nonblocking_when_module_source_succeeds(self):
+        pdf = b"%PDF-1.4\ncourse dates"
+        syllabus = FakeFile(
+            id=31,
+            display_name="CourseOutline.pdf",
+            content_type="application/pdf",
+            size=len(pdf),
+            content=pdf,
+            updated_at="2026-09-01T10:00:00Z",
+        )
+        active_course = course(
+            file_error=CanvasException("files disabled"),
+            direct_files={"31": syllabus},
+            modules=[
+                SimpleNamespace(
+                    name="Course Syllabus",
+                    locked_for_user=False,
+                    items=[{"type": "File", "content_id": 31, "title": "Outline"}],
+                )
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(
+                directory
+            )
+
+        self.assertEqual([item.source_id for item in report.materials], ["31"])
+        self.assertEqual(report.incomplete_course_ids, ())
+
+    def test_pages_endpoint_failure_is_nonblocking_when_file_source_succeeds(self):
+        pdf = b"%PDF-1.4\ncourse dates"
+        syllabus = FakeFile(
+            id=32,
+            display_name="CourseOutline.pdf",
+            content_type="application/pdf",
+            size=len(pdf),
+            content=pdf,
+            updated_at="2026-09-01T10:00:00Z",
+        )
+        active_course = course(
+            files=[syllabus],
+            page_error=CanvasException("pages disabled"),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(
+                directory
+            )
+
+        self.assertEqual([item.source_id for item in report.materials], ["32"])
+        self.assertEqual(report.incomplete_course_ids, ())
+
+    def test_all_discovery_paths_unavailable_is_incomplete(self):
+        active_course = course(
+            file_error=CanvasException("files disabled"),
+            module_error=CanvasException("modules disabled"),
+            page_error=CanvasException("pages disabled"),
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(
+                directory
+            )
+
+        self.assertEqual(report.materials, ())
+        self.assertEqual(report.incomplete_course_ids, (1,))
+
+    def test_recent_announcements_only_queries_requested_courses(self):
+        included = course(id=1, name="Included", announcements=[])
+        excluded = course(
+            id=2,
+            name="Excluded",
+            announcement_error=CanvasException("announcements disabled"),
+        )
+
+        announcements = self.make_client(
+            FakeCanvas([included, excluded])
+        ).get_recent_announcements(course_ids={1})
+
+        self.assertEqual(announcements, ())
+
+    def test_known_cached_file_is_retrieved_directly_when_files_tab_fails(self):
+        pdf = b"%PDF-1.4\ncourse dates"
+        syllabus = FakeFile(
+            id=33,
+            display_name="CourseOutline.pdf",
+            content_type="application/pdf",
+            size=len(pdf),
+            content=pdf,
+            updated_at="2026-09-01T10:00:00Z",
+        )
+        active_course = course(
+            file_error=CanvasException("files disabled"),
+            direct_files={"33": syllabus},
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(
+                directory, known_file_ids_by_course={1: {"33"}}
+            )
+
+        self.assertEqual([item.source_id for item in report.materials], ["33"])
+        self.assertEqual(report.incomplete_course_ids, ())
 
     def test_downloads_lecture_module_material_but_excludes_lab(self):
         pdf = b"%PDF-1.4\nlecture content"

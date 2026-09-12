@@ -25,6 +25,7 @@ _TOKEN = re.compile(r"[a-z0-9]+")
 class GroundingResult:
     accepted: bool
     reason: str
+    locator: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,22 +98,86 @@ def ground_deadline(
             return GroundingResult(False, "source evidence is not present")
 
     start, length = match
-    context = source_words[max(0, start - 12): min(len(source_words), start + length + 12)]
-    dates, ambiguous = _dates_in_context(source, context, expected, reference_date)
+    match_start = source_words[start].start
+    match_end = source_words[start + length - 1].end
+    context_text, locator = _local_context(source, match_start, match_end, expected, reference_date)
+    context = _words(context_text)
+    dates, ambiguous = _dates_in_context(context_text, context, expected, reference_date)
     if ambiguous and expected not in dates:
-        return GroundingResult(False, "the nearby numeric date is ambiguous")
+        return GroundingResult(False, "the local numeric date is ambiguous", locator)
     if expected not in dates:
-        return GroundingResult(False, "the extracted date is not supported nearby")
+        return GroundingResult(False, "the extracted date is not supported locally", locator)
     if any(candidate != expected for candidate in dates):
-        return GroundingResult(False, "nearby source text contains conflicting dates")
+        return GroundingResult(False, "the local source unit contains conflicting dates", locator)
 
     if expected_minutes is not None:
-        times = _times_in_context(source, context)
+        times = _times_in_context(context_text, context)
         if expected_minutes not in times:
-            return GroundingResult(False, "the extracted time is not supported nearby")
+            return GroundingResult(False, "the extracted time is not supported locally", locator)
         if any(candidate != expected_minutes for candidate in times):
-            return GroundingResult(False, "nearby source text contains conflicting times")
-    return GroundingResult(True, "grounded")
+            return GroundingResult(False, "the local source unit contains conflicting times", locator)
+    return GroundingResult(True, "grounded", locator)
+
+
+def _local_context(
+    source: str,
+    match_start: int,
+    match_end: int,
+    expected: date,
+    reference_date: date | None,
+) -> tuple[str, str]:
+    """Choose the smallest source unit that can prove or contradict the date."""
+    line_start = source.rfind("\n", 0, match_start) + 1
+    line_end = source.find("\n", match_end)
+    if line_end < 0:
+        line_end = len(source)
+    line_number = source.count("\n", 0, match_start) + 1
+
+    sentence_start = max(
+        source.rfind(".", 0, match_start),
+        source.rfind("!", 0, match_start),
+        source.rfind("?", 0, match_start),
+        source.rfind("\n\n", 0, match_start),
+    ) + 1
+    sentence_ends = [
+        position
+        for delimiter in (".", "!", "?", "\n\n")
+        if (position := source.find(delimiter, match_end)) >= 0
+    ]
+    sentence_end = min(sentence_ends) + 1 if sentence_ends else len(source)
+
+    paragraph_start = source.rfind("\n\n", 0, match_start) + 2
+    paragraph_end = source.find("\n\n", match_end)
+    if paragraph_end < 0:
+        paragraph_end = len(source)
+
+    candidates: list[tuple[str, str]] = []
+    for start, end, label in (
+        (line_start, line_end, f"line {line_number}"),
+        (sentence_start, sentence_end, f"sentence near line {line_number}"),
+        (paragraph_start, paragraph_end, f"paragraph near line {line_number}"),
+    ):
+        value = source[start:end].strip()
+        if value and all(value != existing for existing, _ in candidates):
+            candidates.append((value, label))
+
+    # Stop at the first meaningful unit containing any date. A wrong date in the
+    # evidence row must not be rescued by a matching date in an adjacent row.
+    for value, label in candidates:
+        dates, ambiguous = _dates_in_context(value, _words(value), expected, reference_date)
+        if dates or ambiguous:
+            return value, label
+
+    context = _words(source)
+    anchor_index = next(
+        (index for index, word in enumerate(context) if word.start >= match_start), 0
+    )
+    narrowed = context[max(0, anchor_index - 8): min(len(context), anchor_index + 16)]
+    if narrowed:
+        start = narrowed[0].start
+        end = narrowed[-1].end
+        return source[start:end], f"context near line {line_number}"
+    return source[match_start:match_end], f"line {line_number}"
 
 
 def _words(value: str) -> list[_Word]:
@@ -163,20 +228,24 @@ def _dates_in_context(
                 if candidate is not None:
                     found.add(candidate)
 
-        if index + 2 >= len(words):
-            continue
         first = _number(word.value)
+        if first is None or index + 1 >= len(words):
+            continue
         second = _number(words[index + 1].value)
-        third = _number(words[index + 2].value)
-        if first is None or second is None or third is None:
+        if second is None:
             continue
         first_sep = _separator(source, word, words[index + 1])
-        second_sep = _separator(source, words[index + 1], words[index + 2])
-        if first_sep == second_sep == "-" and 1000 <= first <= 9999:
+        third = _number(words[index + 2].value) if index + 2 < len(words) else None
+        second_sep = (
+            _separator(source, words[index + 1], words[index + 2])
+            if index + 2 < len(words)
+            else ""
+        )
+        if third is not None and first_sep == second_sep == "-" and 1000 <= first <= 9999:
             candidate = _safe_date(first, second, third)
             if candidate is not None:
                 found.add(candidate)
-        elif first_sep == second_sep == "/" and 1000 <= third <= 9999:
+        elif third is not None and first_sep == second_sep == "/" and 1000 <= third <= 9999:
             if first <= 12 and second <= 12:
                 ambiguous = True
             elif first <= 12:
@@ -185,6 +254,17 @@ def _dates_in_context(
                     found.add(candidate)
             elif second <= 12:
                 candidate = _safe_date(third, second, first)
+                if candidate is not None:
+                    found.add(candidate)
+        elif first_sep == "/" and second_sep != "/":
+            if first <= 12 and second <= 12:
+                ambiguous = True
+            elif first <= 12:
+                candidate = _make_date(None, first, second, expected, reference_date)
+                if candidate is not None:
+                    found.add(candidate)
+            elif second <= 12:
+                candidate = _make_date(None, second, first, expected, reference_date)
                 if candidate is not None:
                     found.add(candidate)
     return found, ambiguous
@@ -199,14 +279,14 @@ def _make_date(
 ) -> date | None:
     if year is not None:
         return _safe_date(year, month, day)
-    if reference_date is None or (month, day) != (expected.month, expected.day):
+    if reference_date is None:
         return None
     candidates = []
     for candidate_year in range(reference_date.year - 1, reference_date.year + 2):
         candidate = _safe_date(candidate_year, month, day)
         if candidate and reference_date - timedelta(days=30) <= candidate <= reference_date + timedelta(days=370):
             candidates.append(candidate)
-    return expected if candidates == [expected] else None
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _safe_date(year: int, month: int, day: int) -> date | None:

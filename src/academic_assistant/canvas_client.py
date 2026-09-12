@@ -327,9 +327,17 @@ class CanvasClient:
         warnings: list[str] = []
         return self._fetch_announcements(contexts, warnings, unread_only=True)
 
-    def get_recent_announcements(self) -> tuple[Announcement, ...]:
+    def get_recent_announcements(
+        self, *, course_ids: set[int] | None = None
+    ) -> tuple[Announcement, ...]:
         """Return recent announcements without changing their read state."""
         contexts = self._get_active_course_contexts()
+        if course_ids is not None:
+            contexts = tuple(
+                context
+                for context in contexts
+                if context.summary.id in course_ids
+            )
         warnings: list[str] = []
         announcements = self._fetch_announcements(contexts, warnings, unread_only=False)
         if warnings:
@@ -384,6 +392,7 @@ class CanvasClient:
         directory: str | os.PathLike[str],
         *,
         max_file_bytes: int = 25 * 1024 * 1024,
+        known_file_ids_by_course: dict[int, set[str]] | None = None,
     ) -> MaterialDownloadReport:
         """Download accessible syllabus pages, PDFs, and Word documents read-only."""
         if max_file_bytes < 1:
@@ -395,9 +404,12 @@ class CanvasClient:
         materials: list[SyllabusMaterial] = []
         warnings: list[str] = []
         incomplete_course_ids: set[int] = set()
+        known_file_ids_by_course = known_file_ids_by_course or {}
 
         for context in contexts:
             course = context.summary
+            material_count_before = len(materials)
+            discovery_failed = False
             course_directory = destination / f"course-{course.id}"
             syllabus_html = str(self._attr(context.resource, "syllabus_body", "") or "")
             linked_file_ids = set(CANVAS_FILE_ID_PATTERN.findall(syllabus_html))
@@ -464,7 +476,7 @@ class CanvasClient:
                     if material:
                         materials.append(material)
             except (CanvasException, RequestException) as error:
-                incomplete_course_ids.add(course.id)
+                discovery_failed = True
                 warnings.append(self._course_warning("syllabus files", course, error))
 
             # Canvas may omit files hidden from the Files tab even when a syllabus
@@ -491,12 +503,12 @@ class CanvasClient:
                     if material:
                         materials.append(material)
                 except (CanvasException, RequestException, OSError, ValueError):
-                    incomplete_course_ids.add(course.id)
+                    discovery_failed = True
                     warnings.append(
                         f"Could not download a syllabus-linked file in {course.name}."
                     )
 
-            self._discover_syllabus_in_modules(
+            modules_complete = self._discover_syllabus_in_modules(
                 context.resource,
                 course,
                 course_directory,
@@ -505,7 +517,7 @@ class CanvasClient:
                 materials,
                 warnings,
             )
-            self._discover_syllabus_in_pages(
+            pages_complete = self._discover_syllabus_in_pages(
                 context.resource,
                 course,
                 course_directory,
@@ -514,6 +526,40 @@ class CanvasClient:
                 materials,
                 warnings,
             )
+
+            # Previously indexed file IDs are safe direct-retrieval hints. This
+            # recovers a known syllabus when Canvas hides or errors the Files tab.
+            for source_id in known_file_ids_by_course.get(course.id, set()):
+                if any(
+                    material.course_id == course.id and material.source_id == source_id
+                    for material in materials
+                ):
+                    continue
+                try:
+                    file_resource = file_resources.get(source_id) or context.resource.get_file(
+                        source_id
+                    )
+                    material = self._syllabus_file_material(
+                        file_resource,
+                        course,
+                        course_directory,
+                        max_file_bytes,
+                        warnings,
+                        explicitly_linked=True,
+                    )
+                    if material:
+                        materials.append(material)
+                    else:
+                        discovery_failed = True
+                except (CanvasException, RequestException, OSError, ValueError):
+                    discovery_failed = True
+                    warnings.append(
+                        f"Previously indexed syllabus file is unavailable in {course.name}."
+                    )
+
+            discovery_failed = discovery_failed or not modules_complete or not pages_complete
+            if len(materials) == material_count_before and discovery_failed:
+                incomplete_course_ids.add(course.id)
 
         unique = {material.uid: material for material in materials}
         return MaterialDownloadReport(
@@ -644,7 +690,7 @@ class CanvasClient:
         max_file_bytes: int,
         materials: list[SyllabusMaterial],
         warnings: list[str],
-    ) -> None:
+    ) -> bool:
         try:
             modules = resource.get_modules(include=["items", "content_details"])
             for module in modules:
@@ -700,6 +746,8 @@ class CanvasClient:
                         )
         except (CanvasException, RequestException) as error:
             warnings.append(self._course_warning("syllabus modules", course, error))
+            return False
+        return True
 
     def _discover_syllabus_in_pages(
         self,
@@ -710,7 +758,7 @@ class CanvasClient:
         max_file_bytes: int,
         materials: list[SyllabusMaterial],
         warnings: list[str],
-    ) -> None:
+    ) -> bool:
         try:
             pages = resource.get_pages(sort="title")
             for summary in pages:
@@ -749,6 +797,8 @@ class CanvasClient:
                     )
         except (CanvasException, RequestException) as error:
             warnings.append(self._course_warning("syllabus pages", course, error))
+            return False
+        return True
 
     def _download_page_linked_syllabus_files(
         self,

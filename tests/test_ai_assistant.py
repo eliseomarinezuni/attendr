@@ -47,7 +47,10 @@ class FakeModels:
 
     def generate_content(self, **kwargs):
         self.calls.append(kwargs)
-        return SimpleNamespace(text=self.responses.pop(0))
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return SimpleNamespace(text=response)
 
 
 class FakeInteractions:
@@ -57,7 +60,10 @@ class FakeInteractions:
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        return SimpleNamespace(output_text=self.responses.pop(0))
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return SimpleNamespace(output_text=response)
 
 
 class FakeClient:
@@ -77,7 +83,81 @@ class FakeNotifier:
         return True
 
 
+class ProviderFailure(Exception):
+    def __init__(self, status_code, retry_after=None):
+        super().__init__(f"provider failure {status_code}")
+        self.status_code = status_code
+        self.response = SimpleNamespace(
+            status_code=status_code,
+            headers={} if retry_after is None else {"Retry-After": retry_after},
+        )
+
+
 class AIAssistantTests(unittest.TestCase):
+    def test_rate_limit_retries_then_succeeds_without_real_sleep(self):
+        response = json.dumps([question(1), question(2), question(3)])
+        fake = FakeClient([ProviderFailure(429, "3"), response])
+        sleeps = []
+        assistant = AIAssistant(
+            "test-key",
+            client=fake,
+            sleeper=sleeps.append,
+            random_provider=lambda: 0.0,
+        )
+
+        result = assistant.generate_quiz("Trees", 3)
+
+        self.assertEqual(len(result), 3)
+        self.assertEqual(sleeps, [3.0])
+        self.assertEqual(len(fake.models.calls), 2)
+
+    def test_repeated_rate_limit_stops_at_bound_and_opens_run_circuit(self):
+        fake = FakeClient([ProviderFailure(429)] * 4)
+        sleeps = []
+        assistant = AIAssistant(
+            "test-key",
+            client=fake,
+            sleeper=sleeps.append,
+            random_provider=lambda: 0.0,
+        )
+
+        with self.assertRaises(AIProviderError) as raised:
+            assistant.generate_quiz("Trees", 3)
+        self.assertTrue(raised.exception.transient)
+        self.assertEqual(sleeps, [1.0, 2.0, 4.0])
+        self.assertEqual(len(fake.models.calls), 4)
+
+        with self.assertRaises(AIProviderError):
+            assistant.generate_quiz("Another source", 3)
+        self.assertEqual(len(fake.models.calls), 4)
+
+    def test_permanent_client_error_is_not_retried(self):
+        fake = FakeClient([ProviderFailure(400)])
+        sleeps = []
+        assistant = AIAssistant("test-key", client=fake, sleeper=sleeps.append)
+
+        with self.assertRaises(AIProviderError) as raised:
+            assistant.generate_quiz("Trees", 3)
+
+        self.assertFalse(raised.exception.transient)
+        self.assertEqual(len(fake.models.calls), 1)
+        self.assertEqual(sleeps, [])
+
+    def test_transient_server_error_retries_then_succeeds(self):
+        response = json.dumps([question(1), question(2), question(3)])
+        fake = FakeClient([ProviderFailure(500), response])
+        sleeps = []
+        assistant = AIAssistant(
+            "test-key",
+            client=fake,
+            sleeper=sleeps.append,
+            random_provider=lambda: 0.0,
+        )
+
+        self.assertEqual(len(assistant.generate_quiz("Trees", 3)), 3)
+        self.assertEqual(sleeps, [1.0])
+        self.assertEqual(len(fake.models.calls), 2)
+
     def test_hybrid_quiz_contains_two_mcq_and_one_short_answer(self):
         response = [
             {**question(1), "question_type": "multiple_choice"},

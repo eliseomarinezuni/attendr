@@ -481,12 +481,14 @@ class PlannerSafetyTests(unittest.TestCase):
                         main.CourseMaterialsSync,
                         "from_env",
                         return_value=Mock(
-                            sync=lambda: SimpleNamespace(
+                            sync=lambda **kwargs: SimpleNamespace(
                                 items=(),
                                 materials_found=0,
                                 materials_analyzed=0,
                                 cached_materials_reused=0,
                                 warnings=("failed",) if source == "materials" else (),
+                                complete=source != "materials",
+                                blocking_warnings=("failed",) if source == "materials" else (),
                             )
                         ),
                     )
@@ -503,6 +505,8 @@ class PlannerSafetyTests(unittest.TestCase):
                             analyzed=0,
                             cached=0,
                             warnings=("failed",) if source == "announcements" else (),
+                            complete=source != "announcements",
+                            blocking_warnings=("failed",) if source == "announcements" else (),
                         ),
                     )
                 )
@@ -523,6 +527,65 @@ class PlannerSafetyTests(unittest.TestCase):
                     ),
                     "failed",
                 )
+
+    def test_nonblocking_source_warnings_allow_calendar_reconciliation(self):
+        snapshot = CanvasSnapshot("1", "Test", (), (), (), (), NOW, complete=True)
+        canvas = Mock()
+        canvas.fetch_snapshot.return_value = snapshot
+        canvas.get_recent_announcements.return_value = ()
+        schedule = Mock(excluded_course_patterns=())
+        schedule.timezone = ZoneInfo("America/Toronto")
+        schedule.academic_calendar_items.return_value = ()
+        schedule.merge_with_class_schedule.side_effect = lambda items: (items, frozenset())
+        materials = SimpleNamespace(
+            items=(),
+            materials_found=1,
+            materials_analyzed=1,
+            cached_materials_reused=0,
+            warnings=("safely rejected AI candidate",),
+            complete=True,
+            blocking_warnings=(),
+        )
+        announcements = SimpleNamespace(
+            items=(),
+            analyzed=1,
+            cached=0,
+            warnings=("safely rejected AI candidate",),
+            complete=True,
+            blocking_warnings=(),
+        )
+        calendar_report = SimpleNamespace(created=(), updated=(), skipped=(), deleted=())
+
+        with (
+            patch.object(main.CourseSchedule, "load", return_value=schedule),
+            patch.object(main.CanvasClient, "from_env", return_value=canvas),
+            patch.object(
+                main.CourseMaterialsSync,
+                "from_env",
+                return_value=Mock(sync=Mock(return_value=materials)),
+            ),
+            patch.object(main.AIAssistant, "from_env", return_value=Mock()),
+            patch.object(main.AnnouncementDatesSync, "sync", return_value=announcements),
+            patch.object(main.GoogleCalendarSync, "from_env") as calendar,
+        ):
+            calendar.return_value.sync_items.return_value = calendar_report
+            results = main.run_pipeline(
+                main.build_parser().parse_args(["--sync-only", "--no-study-plan"])
+            )
+
+        self.assertEqual(
+            next(result.status for result in results if result.name == "Materials"),
+            "degraded",
+        )
+        self.assertEqual(
+            next(result.status for result in results if result.name == "Announcement dates"),
+            "degraded",
+        )
+        self.assertEqual(
+            next(result.status for result in results if result.name == "Calendar"),
+            "ok",
+        )
+        calendar.return_value.sync_items.assert_called_once()
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import asdict, dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -20,6 +21,17 @@ from .state_store import StateStore
 
 UTC = timezone.utc
 EXTRACTION_VERSION = 3
+_DATE_SIGNAL = re.compile(
+    r"\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)\s+\d{1,2}\b|\b\d{4}-\d{1,2}-\d{1,2}\b|"
+    r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b",
+    re.IGNORECASE,
+)
+_DEADLINE_SIGNAL = re.compile(
+    r"\b(?:due|deadline|exam|midterm|quiz|assignment|project|presentation|submit|test)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +40,8 @@ class AnnouncementDatesReport:
     analyzed: int
     cached: int
     warnings: tuple[str, ...]
+    complete: bool = True
+    blocking_warnings: tuple[str, ...] = ()
 
 
 class AnnouncementDatesSync:
@@ -54,6 +68,7 @@ class AnnouncementDatesSync:
         cached = 0
         changed = False
         warnings: list[str] = []
+        blocking_warnings: list[str] = []
         items: list[AcademicItem] = []
         current = {item.uid: item for item in announcements}
         # Retain dated corrections beyond the Canvas announcement lookback window.
@@ -74,6 +89,7 @@ class AnnouncementDatesSync:
             record = index.get(announcement.uid)
             raw_deadlines: list[dict[str, object]]
             newly_analyzed = False
+            provider_failed = False
             if isinstance(record, dict) and record.get("sha256") == digest:
                 raw_deadlines = list(record.get("deadlines", []))
                 cached += 1
@@ -90,16 +106,16 @@ class AnnouncementDatesSync:
                         ),
                     )
                 except (AIInputError, AIProviderError):
-                    warnings.append(
+                    provider_failed = True
+                    provider_warning = (
                         f"Could not inspect announcement dates: {announcement.course_name} — {announcement.title}."
                     )
+                    warnings.append(provider_warning)
                     raw_deadlines = (
                         list(record.get("deadlines", []))
                         if isinstance(record, dict)
                         else []
                     )
-                    if not raw_deadlines:
-                        continue
                 else:
                     newly_analyzed = True
                     analyzed += 1
@@ -118,14 +134,24 @@ class AnnouncementDatesSync:
                     reference_date=announcement.posted_at_local.date(),
                 )
                 if not result.accepted:
+                    locator = f", {result.locator}" if result.locator else ""
                     warnings.append(
                         f"Rejected ungrounded AI deadline in announcement "
                         f"{announcement.course_name} — {announcement.title}: "
-                        f"{deadline.title} ({result.reason})."
+                        f"{deadline.title}, expected {deadline.due_date}{locator} "
+                        f"({result.reason})."
                     )
                     continue
                 grounded_raw.append(deadline.model_dump(mode="json"))
                 items.append(self._to_item(announcement, deadline))
+            if (
+                provider_failed
+                and self._may_contain_deadline(announcement.message_text)
+            ):
+                blocking_warnings.append(
+                    f"Potential dated requirement could not be verified in "
+                    f"{announcement.course_name} — {announcement.title}."
+                )
             if newly_analyzed:
                 index[announcement.uid] = {
                     "sha256": digest,
@@ -142,7 +168,13 @@ class AnnouncementDatesSync:
             analyzed=analyzed,
             cached=cached,
             warnings=tuple(warnings),
+            complete=not blocking_warnings,
+            blocking_warnings=tuple(blocking_warnings),
         )
+
+    @staticmethod
+    def _may_contain_deadline(text: str) -> bool:
+        return bool(_DATE_SIGNAL.search(text) and _DEADLINE_SIGNAL.search(text))
 
     def _to_item(self, announcement: Announcement, deadline: MajorDeadline) -> AcademicItem:
         actual_date = date.fromisoformat(deadline.due_date)

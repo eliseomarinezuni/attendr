@@ -73,6 +73,7 @@ class MaterialsSyncReport:
     items: tuple[AcademicItem, ...]
     warnings: tuple[str, ...]
     complete: bool = True
+    blocking_warnings: tuple[str, ...] = ()
 
 
 class _HTMLTextExtractor(HTMLParser):
@@ -85,20 +86,23 @@ class _HTMLTextExtractor(HTMLParser):
         if tag in {"script", "style"}:
             self.ignored_depth += 1
         elif tag in {"br", "p", "div", "li", "tr", "h1", "h2", "h3"}:
-            self.parts.append(" ")
+            self.parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
         if tag in {"script", "style"} and self.ignored_depth:
             self.ignored_depth -= 1
         elif tag in {"p", "div", "li", "tr", "h1", "h2", "h3"}:
-            self.parts.append(" ")
+            self.parts.append("\n")
 
     def handle_data(self, data: str) -> None:
         if not self.ignored_depth:
             self.parts.append(data)
 
     def text(self) -> str:
-        return " ".join("".join(self.parts).split())
+        return "\n".join(
+            line for raw in "".join(self.parts).splitlines()
+            if (line := " ".join(raw.split()))
+        )
 
 
 class CourseMaterialsSync:
@@ -175,18 +179,27 @@ class CourseMaterialsSync:
         )
 
     def sync(self, *, active_course_ids: set[int] | None = None) -> MaterialsSyncReport:
-        downloads = self.canvas.download_syllabus_materials(
-            self.materials_directory, max_file_bytes=self.max_file_bytes
-        )
         index = self._load_index()
+        known_file_ids: dict[int, set[str]] = {}
+        for uid, cached_source in index.sources.items():
+            match = re.fullmatch(r"canvas:syllabus-file:(\d+):(\d+)", uid)
+            if match:
+                known_file_ids.setdefault(cached_source.course_id, set()).add(match.group(2))
+        downloads = self.canvas.download_syllabus_materials(
+            self.materials_directory,
+            max_file_bytes=self.max_file_bytes,
+            known_file_ids_by_course=known_file_ids,
+        )
         analyzed = 0
         reused = 0
         changed = False
         warnings = list(downloads.warnings)
+        blocking_warnings: list[str] = []
         incomplete_downloads = set(downloads.incomplete_course_ids)
         blocking_courses: set[int] = set()
         extracted: list[tuple[SyllabusMaterial, MajorDeadline]] = []
         local_today = self._now_local().date()
+        provider_unavailable = False
 
         for material in downloads.materials:
             context_hash = sha256(str((getattr(self.ai, "model", "injected"),
@@ -194,6 +207,7 @@ class CourseMaterialsSync:
                 self.timezone.key, EXTRACTION_VERSION)).encode()).hexdigest()
             cached = index.sources.get(material.uid)
             source_text: str | None = None
+            deadlines: list[MajorDeadline] | None = None
             if (
                 cached
                 and cached.content_sha256 == material.content_sha256
@@ -209,12 +223,57 @@ class CourseMaterialsSync:
                 else:
                     deadlines = self._ground_deadlines(
                         source_text, cached.deadlines, material, local_today,
-                        warnings, blocking_courses,
+                        warnings,
                     )
                 reused += 1
             else:
+                # A grounding-version bump does not require another Gemini call when
+                # the exact source bytes are unchanged and every cached claim passes
+                # the current deterministic verifier.
+                if (
+                    cached
+                    and cached.content_sha256 == material.content_sha256
+                    and cached.extraction_version < EXTRACTION_VERSION
+                    and cached.deadlines
+                ):
+                    try:
+                        source_text = self._material_text(material)
+                    except (AIInputError, PDFExtractionError):
+                        source_text = None
+                    if source_text is not None:
+                        migration_warnings: list[str] = []
+                        migrated = self._ground_deadlines(
+                            source_text,
+                            cached.deadlines,
+                            material,
+                            local_today,
+                            migration_warnings,
+                        )
+                        if len(migrated) == len(cached.deadlines):
+                            deadlines = migrated
+                            index.sources[material.uid] = CachedMaterial(
+                                content_sha256=material.content_sha256,
+                                course_id=material.course_id,
+                                course_name=material.course_name,
+                                title=material.title,
+                                deadlines=deadlines,
+                                extraction_version=EXTRACTION_VERSION,
+                                context_hash=context_hash,
+                            )
+                            reused += 1
+                            changed = True
+                        else:
+                            warnings.extend(migration_warnings)
+
+            if deadlines is None:
                 try:
-                    source_text = self._material_text(material)
+                    if provider_unavailable:
+                        raise AIProviderError(
+                            "Gemini is temporarily unavailable for this run.",
+                            transient=True,
+                        )
+                    if source_text is None:
+                        source_text = self._material_text(material)
                     raw_deadlines = self.ai.extract_major_deadlines(
                         source_text,
                         course_name=material.course_name,
@@ -233,27 +292,23 @@ class CourseMaterialsSync:
                     ]
                     deadlines = self._ground_deadlines(
                         source_text, validated, material, local_today,
-                        warnings, blocking_courses,
+                        warnings,
                     )
                 except (
                     AIInputError,
                     AIProviderError,
                     PDFExtractionError,
                     ValidationError,
-                ):
+                ) as error:
+                    if isinstance(error, AIProviderError) and error.transient:
+                        provider_unavailable = True
                     blocking_courses.add(material.course_id)
-                    warnings.append(
+                    blocking_warning = (
                         f"Could not extract deadlines from {material.course_name}: "
                         f"{material.title}."
                     )
-                    if cached and source_text is not None:
-                        grounded_cached = self._ground_deadlines(
-                            source_text, cached.deadlines, material, local_today,
-                            warnings, blocking_courses,
-                        )
-                        extracted.extend((material, deadline) for deadline in grounded_cached)
-                    elif cached and cached.extraction_version == EXTRACTION_VERSION:
-                        extracted.extend((material, deadline) for deadline in cached.deadlines)
+                    warnings.append(blocking_warning)
+                    blocking_warnings.append(blocking_warning)
                     continue
                 index.sources[material.uid] = CachedMaterial(
                     content_sha256=material.content_sha256,
@@ -301,29 +356,46 @@ class CourseMaterialsSync:
                     extracted.extend((fallback, deadline) for deadline in previous.deadlines)
                 else:
                     blocking_courses.add(previous.course_id)
-                    warnings.append(
+                    blocking_warning = (
                         f"Unverified cached deadlines were not retained for "
                         f"{previous.course_name} — {previous.title}."
                     )
+                    warnings.append(blocking_warning)
+                    blocking_warnings.append(blocking_warning)
         if changed:
             self._save_index(index)
 
-        warning_count = len(warnings)
-        items = self._normalize_deadlines(extracted, local_today, warnings)
-        normalization_complete = len(warnings) == warning_count
+        items = self._normalize_deadlines(
+            extracted, local_today, warnings, blocking_warnings
+        )
+        uncovered_courses = {
+            course_id
+            for course_id in incomplete_downloads
+            if course_id in active_courses and course_id not in material_courses
+        }
+        for course_id in sorted(uncovered_courses):
+            warning = (
+                f"No verified syllabus source or cache is available for active course "
+                f"{course_id}."
+            )
+            warnings.append(warning)
+            blocking_warnings.append(warning)
+        # Completeness answers one narrow safety question: could reconciliation
+        # remove or replace a valid event because trusted source data is missing
+        # or contradictory? Ordinary warnings do not affect this decision.
+        complete = not (
+            (blocking_courses & active_courses)
+            or uncovered_courses
+            or blocking_warnings
+        )
         return MaterialsSyncReport(
             materials_found=len(downloads.materials),
             materials_analyzed=analyzed,
             cached_materials_reused=reused,
             items=items,
             warnings=tuple(warnings),
-            complete=normalization_complete and not (
-                (blocking_courses & active_courses)
-                or {
-                    course_id for course_id in incomplete_downloads
-                    if course_id in active_courses and course_id not in material_courses
-                }
-            ),
+            complete=complete,
+            blocking_warnings=tuple(blocking_warnings),
         )
 
     @staticmethod
@@ -333,7 +405,6 @@ class CourseMaterialsSync:
         material: SyllabusMaterial,
         reference_date: date,
         warnings: list[str],
-        blocking_courses: set[int],
     ) -> list[MajorDeadline]:
         grounded: list[MajorDeadline] = []
         for deadline in deadlines:
@@ -343,10 +414,11 @@ class CourseMaterialsSync:
             if result.accepted:
                 grounded.append(deadline)
             else:
-                blocking_courses.add(material.course_id)
+                locator = f", {result.locator}" if result.locator else ""
                 warnings.append(
                     f"Rejected ungrounded AI deadline in {material.course_name} — "
-                    f"{material.title}: {deadline.title} ({result.reason})."
+                    f"{material.title}: {deadline.title}, expected {deadline.due_date}"
+                    f"{locator} ({result.reason})."
                 )
         return grounded
 
@@ -412,7 +484,9 @@ class CourseMaterialsSync:
         extracted: list[tuple[SyllabusMaterial, MajorDeadline]],
         local_today: date,
         warnings: list[str],
+        blocking_warnings: list[str] | None = None,
     ) -> tuple[AcademicItem, ...]:
+        blocking_warnings = blocking_warnings if blocking_warnings is not None else []
         grouped: dict[str, list[tuple[SyllabusMaterial, MajorDeadline]]] = {}
         last_date = local_today + timedelta(days=self.future_days)
         earliest_date = local_today - timedelta(days=1)
@@ -429,10 +503,12 @@ class CourseMaterialsSync:
             unique_dates = {deadline.due_date for _, deadline in candidates}
             if len(unique_dates) > 1:
                 material, deadline = candidates[0]
-                warnings.append(
+                warning = (
                     f"Conflicting syllabus dates for {material.course_name}: "
                     f"{deadline.title}; calendar event skipped."
                 )
+                warnings.append(warning)
+                blocking_warnings.append(warning)
                 continue
             material, deadline = max(
                 candidates, key=lambda candidate: candidate[1].due_time is not None

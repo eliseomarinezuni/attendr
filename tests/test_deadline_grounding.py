@@ -134,3 +134,90 @@ def test_conflicting_nearby_dates_are_rejected():
     )
     assert not result.accepted
     assert "conflicting" in result.reason
+
+
+def test_adjacent_table_row_dates_do_not_conflict():
+    source = (
+        "Assignment 1 | September 25, 2026\n"
+        "Quiz 1 | October 2, 2026\n"
+        "Assignment 2 | October 9, 2026"
+    )
+    deadline = MajorDeadline(
+        title="Quiz 1",
+        due_date="2026-10-02",
+        due_time=None,
+        kind="quiz",
+        source_evidence="Quiz 1 | October 2, 2026",
+    )
+
+    result = ground_deadline(source, deadline, reference_date=date(2026, 9, 5))
+
+    assert result.accepted
+    assert result.locator == "line 2"
+
+
+def test_exam_row_ignores_unrelated_dates_immediately_before_and_after():
+    source = "Reading | Sep 24\nMidterm Exam | Sep 25\nProject | Sep 26"
+    deadline = item("2026-09-25", evidence="Midterm Exam | Sep 25")
+
+    assert ground_deadline(
+        source, deadline, reference_date=date(2026, 9, 5)
+    ).accepted
+
+
+def test_multiple_dates_in_same_logical_row_are_rejected():
+    source = "Quiz 1 | October 2 or October 9, 2026"
+    deadline = MajorDeadline(
+        title="Quiz 1",
+        due_date="2026-10-02",
+        due_time=None,
+        kind="quiz",
+        source_evidence="Quiz 1",
+    )
+
+    result = ground_deadline(source, deadline, reference_date=date(2026, 9, 5))
+
+    assert not result.accepted
+    assert "conflicting" in result.reason
+
+
+@pytest.mark.parametrize(
+    ("source_date", "due_date"),
+    [
+        ("September 25", "2026-09-25"),
+        ("Sep 25", "2026-09-25"),
+        ("2026-09-25", "2026-09-25"),
+        ("9/25/2026", "2026-09-25"),
+        ("25/9/2026", "2026-09-25"),
+        ("9/25", "2026-09-25"),
+    ],
+)
+def test_assignment_table_date_formats(source_date, due_date):
+    deadline = MajorDeadline(
+        title="Assignment 1",
+        due_date=due_date,
+        due_time=None,
+        kind="assignment",
+        source_evidence=f"Assignment 1 | {source_date}",
+    )
+    assert ground_deadline(
+        f"Assignment 1 | {source_date}",
+        deadline,
+        reference_date=date(2026, 9, 5),
+    ).accepted
+
+
+def test_evidence_copied_from_different_table_row_is_rejected():
+    source = "Assignment 1 | September 25\nQuiz 1 | October 2"
+    deadline = MajorDeadline(
+        title="Quiz 1",
+        due_date="2026-09-25",
+        due_time=None,
+        kind="quiz",
+        source_evidence="Quiz 1",
+    )
+
+    result = ground_deadline(source, deadline, reference_date=date(2026, 9, 5))
+
+    assert not result.accepted
+    assert "date" in result.reason

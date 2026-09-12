@@ -32,7 +32,9 @@ class FakeCanvas:
         self.warnings = warnings
         self.incomplete_course_ids = incomplete_course_ids
 
-    def download_syllabus_materials(self, directory, *, max_file_bytes):
+    def download_syllabus_materials(
+        self, directory, *, max_file_bytes, known_file_ids_by_course=None
+    ):
         return MaterialDownloadReport(
             tuple(self.materials), tuple(self.warnings), tuple(self.incomplete_course_ids)
         )
@@ -136,7 +138,8 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             ).sync()
 
         self.assertEqual(report.items, ())
-        self.assertFalse(report.complete)
+        self.assertTrue(report.complete)
+        self.assertEqual(report.blocking_warnings, ())
         self.assertTrue(any("Rejected ungrounded AI deadline" in warning for warning in report.warnings))
 
     def test_legacy_unverified_cache_is_revalidated_on_provider_failure(self):
@@ -176,7 +179,86 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             ).sync()
 
         self.assertEqual(report.items, ())
+        self.assertFalse(report.complete)
+        self.assertTrue(report.blocking_warnings)
         self.assertTrue(any("Rejected ungrounded AI deadline" in warning for warning in report.warnings))
+
+    def test_unchanged_legacy_cache_is_grounded_and_upgraded_without_gemini(self):
+        class ForbiddenAI:
+            model = "test-model"
+
+            def extract_major_deadlines(self, *args, **kwargs):
+                raise AssertionError("Gemini must not be called")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            html_path = root / "syllabus.html"
+            html_path.write_text("<p>Midterm Exam: October 20, 2026</p>")
+            material = self.make_material(html_path)
+            index_path = root / "index.json"
+            index_path.write_text(json.dumps({
+                "version": 1,
+                "sources": {
+                    material.uid: {
+                        "content_sha256": material.content_sha256,
+                        "course_id": material.course_id,
+                        "course_name": material.course_name,
+                        "title": material.title,
+                        "deadlines": [deadline("2026-10-20", None)],
+                        "extraction_version": 3,
+                        "context_hash": "legacy",
+                    }
+                },
+            }))
+
+            report = CourseMaterialsSync(
+                FakeCanvas([material]),
+                ForbiddenAI(),
+                index_path=index_path,
+                now_provider=lambda: NOW,
+            ).sync(active_course_ids={1})
+            upgraded = json.loads(index_path.read_text())["sources"][material.uid]
+
+        self.assertTrue(report.complete)
+        self.assertEqual(report.cached_materials_reused, 1)
+        self.assertEqual(len(report.items), 1)
+        self.assertEqual(upgraded["extraction_version"], 4)
+        self.assertNotEqual(upgraded["context_hash"], "legacy")
+
+    def test_changed_source_provider_outage_is_blocking_and_preserves_old_cache(self):
+        class FailingAI:
+            def extract_major_deadlines(self, *args, **kwargs):
+                raise AIProviderError("provider unavailable", transient=True)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_path = root / "old.html"
+            old_path.write_text("<p>Midterm Exam: October 20, 2026</p>")
+            old = self.make_material(old_path)
+            index_path = root / "index.json"
+            CourseMaterialsSync(
+                FakeCanvas([old]),
+                FakeAI([deadline("2026-10-20", None)]),
+                index_path=index_path,
+                now_provider=lambda: NOW,
+            ).sync(active_course_ids={1})
+            original_index = index_path.read_text()
+
+            changed_path = root / "changed.html"
+            changed_path.write_text("<p>Midterm Exam: October 27, 2026</p>")
+            changed = self.make_material(changed_path)
+            report = CourseMaterialsSync(
+                FakeCanvas([changed]),
+                FailingAI(),
+                index_path=index_path,
+                now_provider=lambda: NOW,
+            ).sync(active_course_ids={1})
+            preserved_index = index_path.read_text()
+
+        self.assertFalse(report.complete)
+        self.assertTrue(report.blocking_warnings)
+        self.assertEqual(report.items, ())
+        self.assertEqual(preserved_index, original_index)
 
     def test_untimed_midterm_uses_matching_lecture_slot(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -189,7 +271,15 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             )
             report = CourseMaterialsSync(
                 FakeCanvas([material]),
-                FakeAI([deadline("2026-10-27", None)]),
+                FakeAI(
+                    [
+                        deadline(
+                            "2026-10-27",
+                            None,
+                            evidence="Midterm Exam October 27, 2026",
+                        )
+                    ]
+                ),
                 index_path=root / "index.json",
                 course_schedule=CourseSchedule.load(
                     PROJECT_ROOT / "data/course_schedule.json"
@@ -218,9 +308,14 @@ class CourseMaterialsSyncTests(unittest.TestCase):
 
             class ConflictingAI:
                 def extract_major_deadlines(self, text, **kwargs):
-                    return [deadline(
-                        "2026-10-21" if "21" in text else "2026-10-20", None
-                    )]
+                    day = "21" if "21" in text else "20"
+                    return [
+                        deadline(
+                            f"2026-10-{day}",
+                            None,
+                            evidence=f"Midterm Exam October {day}",
+                        )
+                    ]
 
             report = CourseMaterialsSync(
                 FakeCanvas([first, second]),
@@ -233,6 +328,8 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             self.assertTrue(
                 any("Conflicting syllabus dates" in item for item in report.warnings)
             )
+            self.assertFalse(report.complete)
+            self.assertTrue(report.blocking_warnings)
 
     def test_word_syllabus_extracts_paragraphs_and_tables(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -15,6 +15,32 @@ from academic_assistant.logging_config import RedactedJSONFormatter
 
 
 class MainRunnerTests(unittest.TestCase):
+    def test_recorded_exit_codes_distinguish_degraded_from_failed(self):
+        cases = (
+            ([attendr_main.StepResult("A", "ok", "done")], 0, "ok"),
+            (
+                [
+                    attendr_main.StepResult("A", "ok", "done"),
+                    attendr_main.StepResult("B", "degraded", "safe warning"),
+                ],
+                0,
+                "degraded",
+            ),
+            ([attendr_main.StepResult("A", "failed", "blocked")], 1, "failed"),
+        )
+        for results, expected_exit, expected_status in cases:
+            with self.subTest(expected_status=expected_status), tempfile.TemporaryDirectory() as directory:
+                store = attendr_main.StateStore(Path(directory) / "state.db")
+                arguments = attendr_main.build_parser().parse_args([])
+                with patch.object(attendr_main, "configure_logging"), patch.object(
+                    attendr_main, "run_pipeline", return_value=results
+                ):
+                    status = attendr_main.run_recorded(arguments, store)
+                with store.connect() as db:
+                    recorded = db.execute("SELECT status FROM runs").fetchone()[0]
+                self.assertEqual(status, expected_exit)
+                self.assertEqual(recorded, expected_status)
+
     def test_default_plan_runs_daily_pipeline_without_quiz(self):
         arguments = attendr_main.build_parser().parse_args([])
 

@@ -5,11 +5,12 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import Mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from academic_assistant import Announcement, AnnouncementDatesSync
+from academic_assistant import Announcement, AnnouncementDatesSync, AIProviderError
 
 
 class FakeAI:
@@ -66,7 +67,58 @@ class AnnouncementDatesTests(unittest.TestCase):
             ).sync((announcement,))
 
         self.assertEqual(report.items, ())
+        self.assertTrue(report.complete)
+        self.assertEqual(report.blocking_warnings, ())
         self.assertTrue(any("Rejected ungrounded AI deadline" in warning for warning in report.warnings))
+
+    def test_irrelevant_announcement_provider_failure_is_nonblocking(self):
+        ai = Mock()
+        ai.extract_major_deadlines.side_effect = AIProviderError(
+            "temporarily unavailable", transient=True
+        )
+        announcement = self.announcement("Welcome to the course. Read the overview.")
+        with tempfile.TemporaryDirectory() as directory:
+            report = AnnouncementDatesSync(
+                ai, index_path=Path(directory) / "dates.json"
+            ).sync((announcement,))
+
+        self.assertTrue(report.complete)
+        self.assertTrue(report.warnings)
+        self.assertEqual(report.blocking_warnings, ())
+
+    def test_unavailable_potential_deadline_is_blocking_without_cache(self):
+        ai = Mock()
+        ai.extract_major_deadlines.side_effect = AIProviderError(
+            "temporarily unavailable", transient=True
+        )
+        announcement = self.announcement("Assignment 1 is due September 25.")
+        with tempfile.TemporaryDirectory() as directory:
+            report = AnnouncementDatesSync(
+                ai, index_path=Path(directory) / "dates.json"
+            ).sync((announcement,))
+
+        self.assertFalse(report.complete)
+        self.assertTrue(report.blocking_warnings)
+
+    def test_changed_dated_announcement_blocks_when_provider_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dates.json"
+            AnnouncementDatesSync(FakeAI(), index_path=path).sync(
+                (self.announcement(),)
+            )
+            failing_ai = Mock()
+            failing_ai.extract_major_deadlines.side_effect = AIProviderError(
+                "temporarily unavailable", transient=True
+            )
+            changed = self.announcement(
+                "Reflection due September 20. Quiz due September 27."
+            )
+            report = AnnouncementDatesSync(
+                failing_ai, index_path=path
+            ).sync((changed,))
+
+        self.assertFalse(report.complete)
+        self.assertTrue(report.blocking_warnings)
 
 
 if __name__ == "__main__":

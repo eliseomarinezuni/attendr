@@ -374,8 +374,10 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 )
             )
         except KNOWN_ERRORS as error:
+            inputs_complete = False
             results.append(StepResult("Canvas", "failed", str(error)))
         except Exception as error:  # noqa: BLE001 - isolate independent pipeline steps.
+            inputs_complete = False
             results.append(unexpected_step_result("Canvas", error))
 
     if plan.materials and os.getenv("ATTENDR_ASK_SYNC", "").lower() == "true" and canvas_client is not None:
@@ -445,9 +447,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 materials_report = CourseMaterialsSync.from_env(
                     canvas_client, PROJECT_ROOT / ".env"
                 ).sync(active_course_ids={course.id for course in snapshot.courses})
-                inputs_complete = inputs_complete and getattr(
-                    materials_report, "complete", not materials_report.warnings
-                )
+                inputs_complete = inputs_complete and materials_report.complete
                 for warning in materials_report.warnings:
                     logging.getLogger("attendr.materials_report").warning("%s", warning)
                 allowed_course_ids = {course.id for course in snapshot.courses}
@@ -463,7 +463,13 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 results.append(
                     StepResult(
                         "Materials",
-                        "ok" if materials_report.complete else "failed",
+                        (
+                            "failed"
+                            if not materials_report.complete
+                            else "degraded"
+                            if materials_report.warnings
+                            else "ok"
+                        ),
                         f"{materials_report.materials_found} syllabus source(s), "
                         f"{materials_report.materials_analyzed} analyzed, "
                         f"{materials_report.cached_materials_reused} cached, "
@@ -481,8 +487,10 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
 
     if (plan.calendar or plan.study_plan) and canvas_client is not None and snapshot is not None:
         try:
-            recent_announcements = canvas_client.get_recent_announcements()
             allowed_course_ids = {course.id for course in snapshot.courses}
+            recent_announcements = canvas_client.get_recent_announcements(
+                course_ids=allowed_course_ids
+            )
             recent_announcements = tuple(
                 item
                 for item in recent_announcements
@@ -499,14 +507,20 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 app_timezone=os.getenv("APP_TIMEZONE", "America/Toronto"),
                 course_schedule=schedule,
             ).sync(recent_announcements)
-            inputs_complete = inputs_complete and not date_report.warnings
+            inputs_complete = inputs_complete and date_report.complete
             for warning in date_report.warnings:
                 logging.getLogger("attendr.date_report").warning("%s", warning)
             announcement_date_items = tuple(item for item in date_report.items if snapshot is not None and item.course_id in {course.id for course in snapshot.courses})
             results.append(
                 StepResult(
                     "Announcement dates",
-                    "ok" if not date_report.warnings else "failed",
+                    (
+                        "failed"
+                        if not date_report.complete
+                        else "degraded"
+                        if date_report.warnings
+                        else "ok"
+                    ),
                     f"{date_report.analyzed} analyzed, {date_report.cached} cached, "
                     f"{len(date_report.items)} dated item(s), {len(date_report.warnings)} warnings",
                 )
