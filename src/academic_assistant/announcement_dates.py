@@ -122,6 +122,16 @@ class AnnouncementDatesSync:
                 raw_deadlines = list(record.get("deadlines", []))
                 cached += 1
                 AI_USAGE.record("deadline_extraction", cache_hits=1)
+            elif self._legacy_cache_is_verifiable(
+                record, announcement, normalized_text
+            ):
+                # Pre-versioned entries represented the old combined AI/grounding
+                # version. Upgrade only when every stored claim passes today.
+                assert isinstance(record, dict)
+                raw_deadlines = list(record.get("deadlines", []))
+                cached += 1
+                newly_analyzed = True
+                AI_USAGE.record("deadline_extraction", cache_hits=1)
             else:
                 AI_USAGE.record("deadline_extraction", cache_misses=1)
                 try:
@@ -221,6 +231,35 @@ class AnnouncementDatesSync:
         method = getattr(self.ai, "model_for_task", None)
         value = method("deadline_extraction") if callable(method) else getattr(self.ai, "model", "injected")
         return value if isinstance(value, str) else "injected"
+
+    @staticmethod
+    def _legacy_cache_is_verifiable(
+        record: object,
+        announcement: Announcement,
+        normalized_text: str,
+    ) -> bool:
+        if (
+            not isinstance(record, dict)
+            or "extraction_version" in record
+            or not isinstance(record.get("source"), dict)
+            or not isinstance(record.get("deadlines"), list)
+            or not record["deadlines"]
+            or normalize_source_text(str(record["source"].get("message_text", "")))
+            != normalized_text
+        ):
+            return False
+        try:
+            deadlines = [MajorDeadline.model_validate(item) for item in record["deadlines"]]
+        except (ValueError, TypeError):
+            return False
+        return all(
+            ground_deadline(
+                announcement.message_text,
+                deadline,
+                reference_date=announcement.posted_at_local.date(),
+            ).accepted
+            for deadline in deadlines
+        )
 
     def _to_item(self, announcement: Announcement, deadline: MajorDeadline) -> AcademicItem:
         actual_date = date.fromisoformat(deadline.due_date)

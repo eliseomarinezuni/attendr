@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import sys
+import json
 import tempfile
 import unittest
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock
@@ -134,6 +135,36 @@ class AnnouncementDatesTests(unittest.TestCase):
 
         self.assertEqual(ai.calls, 1)
         self.assertEqual(report.cached, 1)
+
+    def test_verified_legacy_announcement_cache_upgrades_without_gemini(self):
+        announcement = self.announcement()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "dates.json"
+            path.write_text(json.dumps({
+                announcement.uid: {
+                    "sha256": "legacy",
+                    "deadlines": [{
+                        "title": "Reflection",
+                        "due_date": "2026-09-20",
+                        "due_time": None,
+                        "kind": "assignment",
+                        "source_evidence": "Reflection due September 20",
+                    }],
+                    "source": {
+                        key: value.isoformat() if isinstance(value, datetime) else value
+                        for key, value in asdict(announcement).items()
+                    },
+                }
+            }))
+            ai = Mock()
+            ai.extract_major_deadlines.side_effect = AssertionError(
+                "Gemini must not be called"
+            )
+            report = AnnouncementDatesSync(ai, index_path=path).sync((announcement,))
+
+        self.assertEqual(report.cached, 1)
+        self.assertEqual(len(report.items), 1)
+        ai.extract_major_deadlines.assert_not_called()
 
 
 if __name__ == "__main__":
