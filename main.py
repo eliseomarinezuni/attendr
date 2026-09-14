@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
@@ -44,6 +45,7 @@ from academic_assistant import (
     DiscordNotificationError,
     DiscordNotifier,
     GoogleCalendarSync,
+    GoogleCalendarAuthenticator,
     MaterialsConfigurationError,
     MaterialsStateError,
     LectureQuizRunner,
@@ -311,6 +313,22 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
     notifier: DiscordNotifier | None = None
     schedule: CourseSchedule | None = None
     inputs_complete = True
+    google_service: Any | None = None
+    google_auth_error: CalendarAuthenticationError | CalendarConfigurationError | None = None
+
+    if plan.calendar or plan.study_plan:
+        credentials_path = PROJECT_ROOT / Path(
+            os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
+        ).expanduser()
+        token_path = PROJECT_ROOT / Path(
+            os.getenv("GOOGLE_TOKEN_FILE", "token.json")
+        ).expanduser()
+        try:
+            authenticator = GoogleCalendarAuthenticator(credentials_path, token_path)
+            google_service = authenticator.build_service()
+            authenticator.verify_service(google_service)
+        except (CalendarAuthenticationError, CalendarConfigurationError) as error:
+            google_auth_error = error
 
     schedule_path = PROJECT_ROOT / os.getenv(
         "COURSE_SCHEDULE_FILE", "data/course_schedule.json"
@@ -536,6 +554,8 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
     if plan.calendar:
         if snapshot is None:
             results.append(StepResult("Calendar", "skipped", "Canvas data unavailable"))
+        elif google_auth_error is not None:
+            results.append(StepResult("Calendar", "failed", str(google_auth_error)))
         elif not inputs_complete:
             results.append(StepResult("Calendar", "failed", "Incomplete source data; existing calendar preserved"))
         else:
@@ -557,7 +577,9 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                     )
                 else:
                     calendar_items = academic_items
-                report = GoogleCalendarSync.from_env(PROJECT_ROOT / ".env").sync_items(
+                report = GoogleCalendarSync.from_env(
+                    PROJECT_ROOT / ".env", service=google_service
+                ).sync_items(
                     calendar_items, delete_uids=replaced_exam_uids | frozenset(snapshot.removed_uids)
                 )
                 return (
@@ -570,6 +592,11 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
     if plan.study_plan:
         if snapshot is None:
             results.append(StepResult("Study plan", "skipped", "Canvas data unavailable"))
+        elif google_auth_error is not None:
+            results.append(StepResult(
+                "Study plan", "failed",
+                f"Google Calendar dependency unavailable; existing study plan preserved. {google_auth_error}",
+            ))
         elif not inputs_complete or not plan.materials:
             results.append(StepResult(
                 "Study plan", "failed" if not inputs_complete else "skipped",
@@ -581,7 +608,9 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                     material_items, announcement_date_items
                 )
                 derived = filter_material_duplicates(snapshot.items, derived)
-                report = StudyPlanner.from_env(PROJECT_ROOT / ".env").sync(
+                report = StudyPlanner.from_env(
+                    PROJECT_ROOT / ".env", service=google_service
+                ).sync(
                     snapshot.items + derived, inputs_complete=inputs_complete
                 )
                 return (

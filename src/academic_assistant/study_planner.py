@@ -198,12 +198,15 @@ class StudyPlanner:
         self.now_provider = now_provider or (lambda: datetime.now(UTC))
 
     @classmethod
-    def from_env(cls, env_file: str | os.PathLike[str] | None = None) -> StudyPlanner:
+    def from_env(
+        cls, env_file: str | os.PathLike[str] | None = None, *, service: Any | None = None
+    ) -> StudyPlanner:
         load_dotenv(dotenv_path=env_file, override=False)
         root = Path(env_file).resolve().parent if env_file else Path.cwd()
         credentials = root / os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
         token = root / os.getenv("GOOGLE_TOKEN_FILE", "token.json")
-        service = GoogleCalendarAuthenticator(credentials, token).build_service()
+        if service is None:
+            service = GoogleCalendarAuthenticator(credentials, token).build_service()
         return cls(
             service,
             state_store=StateStore(root / os.getenv("ATTENDR_DB", "data/attendr.db")),

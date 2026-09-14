@@ -34,7 +34,7 @@ class FakeCanvas:
         self.incomplete_course_ids = incomplete_course_ids
 
     def download_syllabus_materials(
-        self, directory, *, max_file_bytes, known_file_ids_by_course=None
+        self, directory, *, max_file_bytes, known_file_ids_by_course=None, course_ids=None
     ):
         return MaterialDownloadReport(
             tuple(self.materials), tuple(self.warnings), tuple(self.incomplete_course_ids)

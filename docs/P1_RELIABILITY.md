@@ -79,7 +79,7 @@ If rotation fails, leave the workflows disabled. The remote checkpoint remains o
 last atomic revision, and the private old-key backup is never overwritten. Do not
 initialize a new checkpoint to work around a decryption failure.
 
-The OAuth refresh token remains in the encrypted `GOOGLE_TOKEN_B64` repository secret. Access-token refresh does not require a browser. A revoked refresh token fails the run and requires explicit reauthorization with `scripts/setup_google.py`, followed by updating the GitHub secret.
+The OAuth refresh token remains in the encrypted `GOOGLE_TOKEN_B64` repository secret. Access-token refresh does not require a browser. A revoked refresh token fails the run and requires explicit local reauthorization with `scripts/setup_google.py`, a noninteractive `scripts/setup_google.py --check`, and replacement of the GitHub secret. Generate the replacement value locally with `base64 < token.json | tr -d '\n'`; never paste it into chat or logs. Repeated expiry can be caused by an OAuth consent screen left in Testing status. Inspect Google Cloud Console → Google Auth Platform / OAuth consent screen → Publishing status and evaluate the appropriate production status; publication does not bypass any applicable Google verification requirements.
 
 ## State and delivery semantics
 

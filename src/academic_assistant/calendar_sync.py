@@ -104,6 +104,7 @@ class GoogleCalendarAuthenticator:
     def authenticate(self) -> Credentials:
         """Return valid credentials and securely persist refreshed credentials."""
         credentials: Credentials | None = None
+        token_error: str | None = None
 
         if self.token_path.exists():
             try:
@@ -111,8 +112,23 @@ class GoogleCalendarAuthenticator:
                     str(self.token_path), self.scopes
                 )
             except (GoogleAuthError, ValueError, OSError):
-                # A corrupt, revoked, or scope-incompatible cache is replaced below.
-                credentials = None
+                token_error = "malformed"
+
+        if token_error and not self.interactive:
+            raise CalendarAuthenticationError(
+                "Google Calendar authorization file is malformed. Run "
+                "scripts/setup_google.py locally to reauthorize, then replace the "
+                "GOOGLE_TOKEN_B64 GitHub Actions secret."
+            )
+
+        if credentials and not credentials.has_scopes(self.scopes):
+            if not self.interactive:
+                raise CalendarAuthenticationError(
+                    "Google Calendar authorization does not include the required scope. "
+                    "Run scripts/setup_google.py locally to reauthorize, then replace "
+                    "the GOOGLE_TOKEN_B64 GitHub Actions secret."
+                )
+            credentials = None
 
         if credentials and credentials.valid:
             return credentials
@@ -129,8 +145,9 @@ class GoogleCalendarAuthenticator:
                     ) from None
                 if not self.interactive:
                     raise CalendarAuthenticationError(
-                        "Google token refresh failed. Run scripts/setup_google.py locally "
-                        "to reauthorize, then update the scheduled OAuth secret."
+                        "Google Calendar authorization is no longer usable. Run "
+                        "scripts/setup_google.py locally to reauthorize, then replace "
+                        "the GOOGLE_TOKEN_B64 GitHub Actions secret."
                     ) from None
                 credentials = None
 
@@ -142,8 +159,9 @@ class GoogleCalendarAuthenticator:
 
         if not self.interactive:
             raise CalendarAuthenticationError(
-                "No usable Google token is available. Run scripts/setup_google.py locally "
-                "to authorize, then update the scheduled OAuth secret."
+                "Google Calendar authorization is missing or unusable. Run "
+                "scripts/setup_google.py locally to authorize, then replace the "
+                "GOOGLE_TOKEN_B64 GitHub Actions secret."
             )
 
         try:
@@ -165,6 +183,37 @@ class GoogleCalendarAuthenticator:
         self._save_token(credentials)
         return credentials
 
+    @staticmethod
+    def verify_service(service: Any) -> None:
+        """Perform one read-only Calendar request to validate API authorization."""
+        try:
+            service.calendarList().list(maxResults=1).execute()
+        except HttpError as error:
+            status = int(getattr(error.resp, "status", 0) or 0)
+            if status in {401, 403}:
+                raise CalendarAuthenticationError(
+                    "Google Calendar authorization is rejected or lacks the required "
+                    "scope. Run scripts/setup_google.py locally to reauthorize, then "
+                    "replace the GOOGLE_TOKEN_B64 GitHub Actions secret."
+                ) from None
+            if status == 429 or status >= 500:
+                raise CalendarAuthenticationError(
+                    "Google Calendar authentication check is temporarily unavailable; "
+                    "retry later."
+                ) from None
+            raise CalendarAuthenticationError(
+                "Google Calendar authentication check failed safely."
+            ) from None
+        except (GoogleAuthError, httplib2.HttpLib2Error, OSError) as error:
+            if isinstance(error, (TransportError, httplib2.HttpLib2Error, OSError)):
+                raise CalendarAuthenticationError(
+                    "Google Calendar authentication check is temporarily unavailable; "
+                    "retry later."
+                ) from None
+            raise CalendarAuthenticationError(
+                "Google Calendar authentication check failed safely."
+            ) from None
+
     def build_service(self) -> Any:
         """Create an authenticated Calendar API v3 service."""
         try:
@@ -180,6 +229,11 @@ class GoogleCalendarAuthenticator:
             ) from error
 
     def _save_token(self, credentials: Credentials) -> None:
+        if getattr(credentials, "refresh_token", "test-double") is None:
+            raise CalendarAuthenticationError(
+                "Google did not return an offline refresh token; the existing token was "
+                "not replaced. Run setup again and grant consent."
+            )
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_path: Path | None = None
         try:
@@ -251,7 +305,7 @@ class GoogleCalendarSync:
 
     @classmethod
     def from_env(
-        cls, env_file: str | os.PathLike[str] | None = None
+        cls, env_file: str | os.PathLike[str] | None = None, *, service: Any | None = None
     ) -> GoogleCalendarSync:
         """Load configuration, authenticate, and construct a calendar sync client."""
         load_dotenv(dotenv_path=env_file, override=False)
@@ -262,9 +316,10 @@ class GoogleCalendarSync:
         token_path = cls._resolve_path(
             os.getenv("GOOGLE_TOKEN_FILE", "token.json"), base_directory
         )
-        service = GoogleCalendarAuthenticator(
-            credentials_path, token_path
-        ).build_service()
+        if service is None:
+            service = GoogleCalendarAuthenticator(
+                credentials_path, token_path
+            ).build_service()
         return cls(
             service,
             state_store=StateStore(cls._resolve_path(os.getenv("ATTENDR_DB", "data/attendr.db"), base_directory)),

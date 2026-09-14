@@ -349,6 +349,24 @@ def test_unexpected_summary_never_exposes_exception_text():
     assert 'UNEXPECTED_ERROR' in failure_summary(RuntimeError('secret'))
 
 
+def test_source_failures_receive_safe_actionable_categories():
+    from academic_assistant.knowledge_sync import source_failure
+    import requests
+
+    assert source_failure(requests.Timeout("private URL"), "source_retrieval") == (
+        "SOURCE_NETWORK_TIMEOUT", None
+    )
+    response = requests.Response()
+    response.status_code = 403
+    error = requests.HTTPError("signed URL", response=response)
+    assert source_failure(error, "source_retrieval") == (
+        "SOURCE_PERMISSION_DENIED", 403
+    )
+    assert source_failure(ValueError("private content"), "source_retrieval") == (
+        "MALFORMED_SOURCE", None
+    )
+
+
 def test_oversized_source_is_explicitly_excluded_without_blocking_course(tmp_path, caplog):
     sync, context, *_ = build(tmp_path)
     context.resource.get_files = lambda: [NS(

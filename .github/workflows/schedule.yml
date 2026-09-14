@@ -42,6 +42,7 @@ jobs:
           GOOGLE_STUDY_CALENDAR_NAME: ${{ secrets.GOOGLE_STUDY_CALENDAR_NAME }}
           STUDY_WORKER_URL: ${{ secrets.STUDY_WORKER_URL }}
           STUDY_SYNC_SECRET: ${{ secrets.STUDY_SYNC_SECRET }}
+          REQUIRE_GOOGLE_CALENDAR_AUTH: "true"
         run: bash scripts/restore_ci_config.sh
       - name: Run with durable cloud state
         env:

@@ -100,6 +100,33 @@ class OAuthSafetyTests(unittest.TestCase):
                     self.auth.authenticate()
                 flow.from_client_secrets_file.assert_not_called()
 
+    def test_malformed_token_has_distinct_safe_diagnostic(self):
+        with (
+            patch(
+                "academic_assistant.calendar_sync.Credentials.from_authorized_user_file",
+                side_effect=ValueError("provider body with fake-secret-value"),
+            ),
+            patch("academic_assistant.calendar_sync.InstalledAppFlow") as flow,
+        ):
+            with self.assertRaisesRegex(CalendarAuthenticationError, "malformed") as raised:
+                self.auth.authenticate()
+        self.assertNotIn("fake-secret-value", str(raised.exception))
+        flow.from_client_secrets_file.assert_not_called()
+
+    def test_scope_incompatible_token_has_distinct_safe_diagnostic(self):
+        credentials = Mock(valid=True)
+        credentials.has_scopes.return_value = False
+        with (
+            patch(
+                "academic_assistant.calendar_sync.Credentials.from_authorized_user_file",
+                return_value=credentials,
+            ),
+            patch("academic_assistant.calendar_sync.InstalledAppFlow") as flow,
+        ):
+            with self.assertRaisesRegex(CalendarAuthenticationError, "required scope"):
+                self.auth.authenticate()
+        flow.from_client_secrets_file.assert_not_called()
+
     def test_missing_token_never_opens_browser(self):
         self.auth.token_path.unlink()
         with patch("academic_assistant.calendar_sync.InstalledAppFlow") as flow:
@@ -141,6 +168,23 @@ class OAuthSafetyTests(unittest.TestCase):
                 120,
             )
 
+    def test_interactive_setup_does_not_replace_token_without_refresh_token(self):
+        original = '{"refresh_token":"still-valid-backup"}'
+        self.auth.token_path.write_text(original)
+        self.auth.interactive = True
+        incomplete = Mock(refresh_token=None)
+        with (
+            patch(
+                "academic_assistant.calendar_sync.Credentials.from_authorized_user_file",
+                side_effect=ValueError("malformed old token"),
+            ),
+            patch("academic_assistant.calendar_sync.InstalledAppFlow") as flow,
+        ):
+            flow.from_client_secrets_file.return_value.run_local_server.return_value = incomplete
+            with self.assertRaisesRegex(CalendarAuthenticationError, "not replaced"):
+                self.auth.authenticate()
+        self.assertEqual(self.auth.token_path.read_text(), original)
+
     def test_refresh_network_error_is_transient(self):
         credentials = Mock(valid=False, expired=True, refresh_token="fake")
         credentials.refresh.side_effect = TransportError("network unavailable")
@@ -154,6 +198,13 @@ class OAuthSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(CalendarAuthenticationError, "temporarily"):
                 self.auth.authenticate()
             flow.from_client_secrets_file.assert_not_called()
+
+    def test_read_only_api_preflight_does_not_mutate_calendar(self):
+        service = Mock()
+        authenticator = self.auth
+        authenticator.verify_service(service)
+        service.calendarList.return_value.list.assert_called_once_with(maxResults=1)
+        service.events.assert_not_called()
 
 
 class CanvasTransportTests(unittest.TestCase):
@@ -457,6 +508,55 @@ class PlannerSafetyTests(unittest.TestCase):
             with self.assertRaises(CalendarAPIError):
                 StudyRemoteState.from_env()
 
+    def test_failed_google_preflight_blocks_calendar_and_study_writes_once(self):
+        snapshot = CanvasSnapshot("1", "Test", (), (), (), (), NOW, complete=True)
+        canvas = Mock()
+        canvas.fetch_snapshot.return_value = snapshot
+        canvas.get_recent_announcements.return_value = ()
+        schedule = Mock(excluded_course_patterns=())
+        schedule.timezone = ZoneInfo("America/Toronto")
+        materials = SimpleNamespace(
+            items=(), materials_found=0, materials_analyzed=0,
+            cached_materials_reused=0, warnings=("prior state retained",),
+            complete=True, blocking_warnings=(),
+        )
+        dates = SimpleNamespace(
+            items=(), analyzed=0, cached=0, warnings=(), complete=True,
+            blocking_warnings=(),
+        )
+        auth_error = CalendarAuthenticationError(
+            "Google Calendar authorization is no longer usable. Run "
+            "scripts/setup_google.py locally to reauthorize, then replace the "
+            "GOOGLE_TOKEN_B64 GitHub Actions secret."
+        )
+        with (
+            patch.object(main.CourseSchedule, "load", return_value=schedule),
+            patch.object(main.CanvasClient, "from_env", return_value=canvas),
+            patch.object(
+                main.CourseMaterialsSync, "from_env",
+                return_value=Mock(sync=Mock(return_value=materials)),
+            ),
+            patch.object(main.AIAssistant, "from_env", return_value=Mock()),
+            patch.object(main.AnnouncementDatesSync, "sync", return_value=dates),
+            patch.object(main, "GoogleCalendarAuthenticator") as authenticator,
+            patch.object(main.GoogleCalendarSync, "from_env") as calendar,
+            patch.object(main.StudyPlanner, "from_env") as planner,
+        ):
+            authenticator.return_value.build_service.side_effect = auth_error
+            results = main.run_pipeline(main.build_parser().parse_args(["--sync-only"]))
+
+        self.assertEqual(authenticator.return_value.build_service.call_count, 1)
+        calendar.assert_not_called()
+        planner.assert_not_called()
+        by_name = {result.name: result for result in results}
+        self.assertEqual(by_name["Canvas"].status, "ok")
+        self.assertEqual(by_name["Materials"].status, "degraded")
+        self.assertEqual(by_name["Announcement dates"].status, "ok")
+        self.assertEqual(by_name["Calendar"].status, "failed")
+        self.assertEqual(by_name["Study plan"].status, "failed")
+        self.assertIn("GOOGLE_TOKEN_B64", by_name["Calendar"].detail)
+        self.assertIn("existing study plan preserved", by_name["Study plan"].detail)
+
     def test_pipeline_preserves_calendar_on_each_incomplete_source(self):
         for source in ("canvas", "materials", "announcements"):
             with self.subTest(source=source), ExitStack() as stack:
@@ -566,8 +666,10 @@ class PlannerSafetyTests(unittest.TestCase):
             ),
             patch.object(main.AIAssistant, "from_env", return_value=Mock()),
             patch.object(main.AnnouncementDatesSync, "sync", return_value=announcements),
+            patch.object(main, "GoogleCalendarAuthenticator") as authenticator,
             patch.object(main.GoogleCalendarSync, "from_env") as calendar,
         ):
+            authenticator.return_value.build_service.return_value = Mock()
             calendar.return_value.sync_items.return_value = calendar_report
             results = main.run_pipeline(
                 main.build_parser().parse_args(["--sync-only", "--no-study-plan"])
@@ -586,6 +688,10 @@ class PlannerSafetyTests(unittest.TestCase):
             "ok",
         )
         calendar.return_value.sync_items.assert_called_once()
+        self.assertIs(
+            calendar.call_args.kwargs["service"],
+            authenticator.return_value.build_service.return_value,
+        )
 
 
 if __name__ == "__main__":

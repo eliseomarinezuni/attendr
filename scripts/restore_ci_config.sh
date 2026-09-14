@@ -1,16 +1,55 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -n "${GOOGLE_CREDENTIALS_B64:-}" ]]; then
-  printf '%s' "$GOOGLE_CREDENTIALS_B64" | base64 --decode > credentials.json
-  printf '%s' "$GOOGLE_TOKEN_B64" | base64 --decode > token.json
-  chmod 600 credentials.json token.json
-fi
+python - <<'PY'
+import base64
+import binascii
+import json
+import os
+import tempfile
+from pathlib import Path
 
-if [[ -n "${GOOGLE_SLIDES_TOKEN_B64:-}" ]]; then
-  printf '%s' "$GOOGLE_SLIDES_TOKEN_B64" | base64 --decode > google_slides_token.json
-  chmod 600 google_slides_token.json
-fi
+
+def restore(name: str, destination: str, *, required: bool, kind: str) -> None:
+    encoded = os.environ.get(name, "")
+    if not encoded:
+        if required:
+            raise SystemExit(f"{name} is required for this scheduled job.")
+        return
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError
+        if kind == "credentials":
+            client = value.get("installed") or value.get("web")
+            if not isinstance(client, dict) or not all(
+                client.get(key) for key in ("client_id", "client_secret", "auth_uri", "token_uri")
+            ):
+                raise ValueError
+        elif not all(value.get(key) for key in ("refresh_token", "client_id", "client_secret", "token_uri")):
+            raise ValueError
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        raise SystemExit(f"{name} does not contain valid Google OAuth JSON.") from None
+
+    target = Path(destination)
+    descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as output:
+            output.write(raw)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, target)
+        os.chmod(target, 0o600)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+calendar_required = os.environ.get("REQUIRE_GOOGLE_CALENDAR_AUTH", "").lower() == "true"
+restore("GOOGLE_CREDENTIALS_B64", "credentials.json", required=calendar_required, kind="credentials")
+restore("GOOGLE_TOKEN_B64", "token.json", required=calendar_required, kind="token")
+restore("GOOGLE_SLIDES_TOKEN_B64", "google_slides_token.json", required=False, kind="token")
+PY
 
 cat > .env <<EOF
 CANVAS_BASE_URL=${CANVAS_BASE_URL}

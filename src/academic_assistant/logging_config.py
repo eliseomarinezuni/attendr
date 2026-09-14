@@ -10,6 +10,17 @@ import traceback
 _SENSITIVE_QUERY = re.compile(
     r"(?i)([?&](?:access_token|auth|key|signature|token|verifier)=)[^&\s\"']+"
 )
+_HARMLESS_PYPDF_REPAIR = re.compile(r"^Ignoring wrong pointing object \d+ \d+ \(offset 0\)$")
+
+
+class HarmlessPypdfRepairFilter(logging.Filter):
+    """Drop only pypdf's known successful cross-reference repair notice."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not (
+            record.name.startswith("pypdf")
+            and _HARMLESS_PYPDF_REPAIR.fullmatch(record.getMessage())
+        )
 
 
 class RedactedJSONFormatter(logging.Formatter):
@@ -51,6 +62,7 @@ def configure_logging(run_id: str | None = None) -> None:
         return True
 
     handler.addFilter(add_context)
+    handler.addFilter(HarmlessPypdfRepairFilter())
     logging.basicConfig(level=logging.INFO, handlers=[handler], force=True)
     # canvasapi logs signed download URLs at INFO. Application-level summaries
     # retain failures without exposing temporary access parameters.

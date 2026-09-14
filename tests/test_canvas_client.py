@@ -661,6 +661,23 @@ class CanvasClientTests(unittest.TestCase):
         self.assertTrue(all("Restricted" in warning for warning in snapshot.warnings))
         self.assertEqual(snapshot.incomplete_course_ids, (2,))
 
+    def test_syllabus_discovery_skips_excluded_course_shells_before_api_calls(self):
+        included = course(1, "Algorithms", syllabus_body="<p>Course outline</p>")
+        excluded = course(
+            2,
+            "Academic Advising",
+            file_error=CanvasException("hidden files"),
+            module_error=CanvasException("hidden modules"),
+            page_error=CanvasException("hidden pages"),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            report = self.make_client(FakeCanvas([included, excluded])).download_syllabus_materials(
+                directory, course_ids={1}
+            )
+
+        self.assertEqual([material.course_id for material in report.materials], [1])
+        self.assertEqual(report.warnings, ())
+
     def test_invalid_token_becomes_actionable_authentication_error(self):
         fake = FakeCanvas([], user_error=InvalidAccessToken("bad token"))
         with self.assertRaisesRegex(

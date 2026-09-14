@@ -393,6 +393,7 @@ class CanvasClient:
         *,
         max_file_bytes: int = 25 * 1024 * 1024,
         known_file_ids_by_course: dict[int, set[str]] | None = None,
+        course_ids: set[int] | None = None,
     ) -> MaterialDownloadReport:
         """Download accessible syllabus pages, PDFs, and Word documents read-only."""
         if max_file_bytes < 1:
@@ -401,6 +402,10 @@ class CanvasClient:
             )
         destination = Path(directory).expanduser().resolve()
         contexts = self._get_active_course_contexts()
+        if course_ids is not None:
+            contexts = tuple(
+                context for context in contexts if context.summary.id in course_ids
+            )
         materials: list[SyllabusMaterial] = []
         warnings: list[str] = []
         incomplete_course_ids: set[int] = set()

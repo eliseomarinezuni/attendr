@@ -18,7 +18,7 @@ import requests
 from canvasapi.exceptions import CanvasException
 from requests import RequestException
 
-from .ai_assistant import extract_pdf_text_chunks, extract_powerpoint_text_chunks
+from .ai_assistant import PDFExtractionError, extract_pdf_text_chunks, extract_powerpoint_text_chunks
 from .canvas_client import CANVAS_FILE_ID_PATTERN
 from .lecture_files import lecture_file_limit
 from .google_slides import SlidesAccessError
@@ -44,6 +44,35 @@ def failure_summary(error: Exception) -> str:
         detail = str(error) if error.code == "SYNC_FAILED" else error.diagnostic()
         return f"{detail}; prior snapshots retained"
     return "Snapshot sync failed (UNEXPECTED_ERROR); prior snapshots retained"
+
+
+def source_failure(error: Exception, stage: str) -> tuple[str, int | None]:
+    """Return a fixed, non-sensitive diagnostic category for source failures."""
+    response = getattr(error, "response", None)
+    status_value = getattr(response, "status_code", None) or getattr(error, "status_code", None)
+    try:
+        status = int(status_value) if status_value is not None else None
+    except (TypeError, ValueError):
+        status = None
+    if status in {401, 403}:
+        return "SOURCE_PERMISSION_DENIED", status
+    if status == 404:
+        return "SOURCE_NOT_FOUND", status
+    if status is not None:
+        return "CANVAS_HTTP_ERROR", status
+    if isinstance(error, requests.Timeout):
+        return "SOURCE_NETWORK_TIMEOUT", None
+    if isinstance(error, requests.ConnectionError):
+        return "SOURCE_NETWORK_ERROR", None
+    if isinstance(error, PDFExtractionError):
+        return "PDF_EXTRACTION_FAILED", None
+    if isinstance(error, CanvasException):
+        return "CANVAS_API_ERROR", None
+    if isinstance(error, OSError):
+        return "SOURCE_FILE_ERROR", None
+    if isinstance(error, (TypeError, ValueError, KeyError)):
+        return "MALFORMED_SOURCE", None
+    return "UNEXPECTED_ERROR", None
 
 
 def normalize(value: str) -> str:
@@ -349,14 +378,25 @@ class KnowledgeSync:
             except Exception as error:
                 if type(error) is KnowledgeSyncError:
                     detail = error.diagnostic()
+                    unexpected = False
                 else:
-                    code = "SOURCE_UNREADABLE" if isinstance(error, (CanvasException, RequestException)) else "UNEXPECTED_ERROR"
-                    detail = f"{stage}: {code}"
+                    code, status = source_failure(error, stage)
+                    status_text = f", HTTP {status}" if status is not None else ""
+                    detail = f"{stage}: {code}{status_text}"
+                    unexpected = code == "UNEXPECTED_ERROR"
                 # Only configured keys and fixed diagnostics enter logs; no source data.
                 key = re.sub(r"[^a-zA-Z0-9_-]", "_", str(course["key"]))[:80]
                 detail = f"{key} — {detail}"
                 failures.append(detail)
-                logging.getLogger("attendr.knowledge_sync").error("Course snapshot failed: %s", detail)
+                logger = logging.getLogger("attendr.knowledge_sync")
+                if unexpected:
+                    logger.error(
+                        "Course snapshot failed unexpectedly: %s, exception_type=%s",
+                        detail,
+                        type(error).__name__,
+                    )
+                else:
+                    logger.error("Course snapshot failed: %s", detail)
         if failures:
             raise KnowledgeSyncError(f"{len(failures)} course snapshot(s) failed; previous complete snapshots preserved: " + "; ".join(failures))
         if not count:

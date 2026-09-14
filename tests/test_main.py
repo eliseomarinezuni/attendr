@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 import tempfile
 import unittest
@@ -11,10 +12,22 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 import main as attendr_main
-from academic_assistant.logging_config import RedactedJSONFormatter
+from academic_assistant.logging_config import HarmlessPypdfRepairFilter, RedactedJSONFormatter
 
 
 class MainRunnerTests(unittest.TestCase):
+    def test_only_known_harmless_pypdf_repair_warning_is_filtered(self):
+        warning_filter = HarmlessPypdfRepairFilter()
+        harmless = logging.LogRecord(
+            "pypdf._reader", 30, "", 0,
+            "Ignoring wrong pointing object 12 0 (offset 0)", (), None,
+        )
+        other = logging.LogRecord(
+            "pypdf._reader", 30, "", 0, "PDF stream is damaged", (), None,
+        )
+        self.assertFalse(warning_filter.filter(harmless))
+        self.assertTrue(warning_filter.filter(other))
+
     def test_recorded_exit_codes_distinguish_degraded_from_failed(self):
         cases = (
             ([attendr_main.StepResult("A", "ok", "done")], 0, "ok"),

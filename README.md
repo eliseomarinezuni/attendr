@@ -10,6 +10,7 @@ python3.11 -m venv .venv
 cp .env.example .env
 # Fill in .env and download Desktop OAuth credentials first.
 .venv/bin/python scripts/setup_google.py
+.venv/bin/python scripts/setup_google.py --check
 .venv/bin/python main.py
 ```
 
@@ -101,6 +102,8 @@ Scheduled sync and lecture-quiz workflows run on GitHub-hosted Linux runners, so
 The main cron runs at minute 17 to avoid top-of-hour GitHub congestion. Each hosted run records an authenticated heartbeat in D1. The Worker's five-minute cron dispatches a recovery run when the academic heartbeat is more than 150 minutes old during the 8:00 AM–10:00 PM Toronto window. Configure a fine-grained GitHub token with Actions write access as the Worker secret `GITHUB_ACTIONS_TOKEN`; repository, workflow, and ref are non-secret Wrangler variables.
 
 The workflows reconstruct `.env`, Google OAuth files, and the database from repository secrets. Required secrets are documented by `scripts/configure_github_secrets.py`; deployment also requires `STUDY_WORKER_URL`, `STUDY_SYNC_SECRET`, and an independent `ATTENDR_STATE_KEY`. Missing or revoked credentials fail promptly, and scheduled runs never launch interactive OAuth.
+
+Calendar authorization is intentionally repaired only on a trusted local machine. Run `.venv/bin/python scripts/setup_google.py`, verify it with `.venv/bin/python scripts/setup_google.py --check`, then replace the `GOOGLE_TOKEN_B64` repository secret with `base64 < token.json | tr -d '\n'`. Never paste that value into an issue or chat. If refresh tokens repeatedly expire, inspect **Google Cloud Console → Google Auth Platform / OAuth consent screen → Publishing status**. OAuth applications left in Testing can receive short-lived refresh tokens; evaluate the appropriate production publishing status for this private app. Publishing does not automatically remove Google's verification requirements.
 
 ## Tests
 

@@ -207,6 +207,7 @@ class CourseMaterialsSync:
             self.materials_directory,
             max_file_bytes=self.max_file_bytes,
             known_file_ids_by_course=known_file_ids,
+            course_ids=active_course_ids,
         )
         analyzed = 0
         reused = 0
