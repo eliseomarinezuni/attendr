@@ -113,7 +113,7 @@ Calendar authorization is intentionally repaired only on a trusted local machine
 ## Tests
 
 ```bash
-.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pip install -r requirements.lock -r requirements-dev.txt
 .venv/bin/python -B -m pytest
 (cd worker && npm test && npm run check)
 ```

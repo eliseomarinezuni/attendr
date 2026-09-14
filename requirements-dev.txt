@@ -1,4 +1,4 @@
--r requirements.lock
+# Development-only dependencies. Install together with requirements.lock.
 iniconfig==2.3.0
 packaging==26.3
 pluggy==1.6.0

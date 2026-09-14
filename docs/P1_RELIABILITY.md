@@ -7,7 +7,7 @@ The default local repository is `ATTENDR_DB` (`data/attendr.db`). Scheduled GitH
 Stop existing schedulers and wait for active runs to finish. Back up legacy JSON and SQLite files. From the repository root:
 
 ```bash
-.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pip install -r requirements.lock -r requirements-dev.txt
 .venv/bin/python scripts/state_admin.py --db data/attendr.db migrate --legacy-directory data
 ```
 
@@ -135,7 +135,7 @@ A shared D1 planner lease excludes button operations while Python reads availabi
 ## Verification
 
 ```bash
-.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pip install -r requirements.lock -r requirements-dev.txt
 .venv/bin/python -B -m pytest
 (cd worker && npm ci && npm test && npm run check)
 ```
