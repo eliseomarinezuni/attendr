@@ -31,7 +31,7 @@ def set_secret(repository: str, name: str, value: str) -> None:
         )
     except subprocess.CalledProcessError as error:
         raise RuntimeError(f"Could not set GitHub secret {name}.") from error
-    print(f"Set {name}")
+    print("Configured one GitHub secret.")
 
 
 def main(argv: list[str] | None = None) -> int:

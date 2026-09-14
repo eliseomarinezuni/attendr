@@ -593,6 +593,10 @@ class PlannerSafetyTests(unittest.TestCase):
                         ),
                     )
                 )
+                authenticator = stack.enter_context(
+                    patch.object(main, "GoogleCalendarAuthenticator")
+                )
+                authenticator.return_value.build_service.return_value = Mock()
                 calendar = stack.enter_context(patch.object(main.GoogleCalendarSync, "from_env"))
                 planner = stack.enter_context(patch.object(main.StudyPlanner, "from_env"))
                 results = main.run_pipeline(main.build_parser().parse_args(["--sync-only"]))

@@ -145,7 +145,7 @@ test('SDK request is bounded and only exact cited model excerpts are rendered', 
   const DB = database(); await sync(DB, [sourceRecord({ title: 'HTTP', chunks: ['HTTP is a stateless request-response protocol.'] })]);
   let calls = 0;
   globalThis.fetch = async (url, init) => {
-    calls++; assert.match(String(url), /generativelanguage.googleapis.com/);
+    calls++; assert.ok(String(url).includes('generativelanguage.googleapis.com/'));
     const body = JSON.parse(init.body);
     assert.match(body.systemInstruction.parts[0].text, /untrusted data/);
     assert.equal(body.generationConfig.maxOutputTokens, 600);

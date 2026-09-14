@@ -3,7 +3,7 @@ iniconfig==2.3.0
 packaging==26.3
 pluggy==1.6.0
 Pygments==2.21.0
-pytest==8.4.2
+pytest==9.0.3
 pytest-socket==0.7.0
 coverage==7.16.0
 pip-audit==2.10.1
