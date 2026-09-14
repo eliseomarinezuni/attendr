@@ -127,7 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
         description="Synchronize Canvas, Discord, Google Calendar, and daily quizzes."
     )
     modes = parser.add_mutually_exclusive_group()
-    modes.add_argument("--review-only", action="store_true", help="Send due spaced-repetition questions without Canvas or Gemini.")
+    modes.add_argument(
+        "--review-only",
+        action="store_true",
+        help="Send due spaced-repetition questions without Canvas or Gemini.",
+    )
     modes.add_argument(
         "--sync-only",
         action="store_true",
@@ -175,9 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     quiz_source = parser.add_mutually_exclusive_group()
     quiz_source.add_argument("--topic", help="Lecture topic or text used for the quiz.")
-    quiz_source.add_argument(
-        "--quiz-pdf", type=Path, help="Lecture PDF used for the quiz."
-    )
+    quiz_source.add_argument("--quiz-pdf", type=Path, help="Lecture PDF used for the quiz.")
     parser.add_argument(
         "--force",
         action="store_true",
@@ -190,7 +192,15 @@ def resolve_plan(arguments: argparse.Namespace) -> RunPlan:
     if arguments.review_only:
         return RunPlan(False, False, False, False, False, False, False, True)
     if arguments.sync_only:
-        return RunPlan(False, not arguments.no_materials, True, False, False, False, not arguments.no_study_plan)
+        return RunPlan(
+            False,
+            not arguments.no_materials,
+            True,
+            False,
+            False,
+            False,
+            not arguments.no_study_plan,
+        )
     if arguments.announcements_only:
         return RunPlan(True, False, False, False, False, False, False)
     if arguments.digest_only:
@@ -212,9 +222,7 @@ def resolve_plan(arguments: argparse.Namespace) -> RunPlan:
     )
 
 
-def upcoming_items(
-    items: tuple[AcademicItem, ...], hours: int = 72
-) -> tuple[AcademicItem, ...]:
+def upcoming_items(items: tuple[AcademicItem, ...], hours: int = 72) -> tuple[AcademicItem, ...]:
     now = datetime.now(UTC)
     cutoff = now + timedelta(hours=hours)
     return tuple(item for item in items if item.falls_in_window(now, cutoff))
@@ -225,6 +233,7 @@ def filter_material_duplicates(
     material_items: tuple[AcademicItem, ...],
 ) -> tuple[AcademicItem, ...]:
     """Prefer live Canvas dates when a syllabus describes the same deadline."""
+
     def identity(item: AcademicItem) -> tuple[int, str]:
         return item.course_id, re.sub(r"[^a-z0-9]+", " ", item.title.casefold()).strip()
 
@@ -265,9 +274,7 @@ def resolve_quiz_source(arguments: argparse.Namespace) -> tuple[str, str]:
     if configured_topic:
         return configured_topic, configured_topic
 
-    raw_path = Path(
-        os.getenv("DAILY_TOPICS_FILE", "data/daily_topics.json")
-    ).expanduser()
+    raw_path = Path(os.getenv("DAILY_TOPICS_FILE", "data/daily_topics.json")).expanduser()
     topics_path = raw_path if raw_path.is_absolute() else PROJECT_ROOT / raw_path
     if topics_path.is_file():
         try:
@@ -275,9 +282,7 @@ def resolve_quiz_source(arguments: argparse.Namespace) -> tuple[str, str]:
         except (OSError, json.JSONDecodeError) as error:
             raise ValueError(f"Daily topics file is invalid: {topics_path}") from error
         if not isinstance(topics, dict):
-            raise ValueError(
-                f"Daily topics file must contain a JSON object: {topics_path}"
-            )
+            raise ValueError(f"Daily topics file must contain a JSON object: {topics_path}")
         timezone_name = os.getenv("APP_TIMEZONE", "America/Toronto")
         try:
             local_date = datetime.now(ZoneInfo(timezone_name)).date().isoformat()
@@ -317,12 +322,11 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
     google_auth_error: CalendarAuthenticationError | CalendarConfigurationError | None = None
 
     if plan.calendar or plan.study_plan:
-        credentials_path = PROJECT_ROOT / Path(
-            os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")
-        ).expanduser()
-        token_path = PROJECT_ROOT / Path(
-            os.getenv("GOOGLE_TOKEN_FILE", "token.json")
-        ).expanduser()
+        credentials_path = (
+            PROJECT_ROOT
+            / Path(os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")).expanduser()
+        )
+        token_path = PROJECT_ROOT / Path(os.getenv("GOOGLE_TOKEN_FILE", "token.json")).expanduser()
         try:
             authenticator = GoogleCalendarAuthenticator(credentials_path, token_path)
             google_service = authenticator.build_service()
@@ -330,9 +334,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
         except (CalendarAuthenticationError, CalendarConfigurationError) as error:
             google_auth_error = error
 
-    schedule_path = PROJECT_ROOT / os.getenv(
-        "COURSE_SCHEDULE_FILE", "data/course_schedule.json"
-    )
+    schedule_path = PROJECT_ROOT / os.getenv("COURSE_SCHEDULE_FILE", "data/course_schedule.json")
     if plan.needs_canvas:
         try:
             schedule = CourseSchedule.load(schedule_path)
@@ -399,15 +401,31 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
             inputs_complete = False
             results.append(unexpected_step_result("Canvas", error))
 
-    if plan.materials and os.getenv("ATTENDR_ASK_SYNC", "").lower() == "true" and canvas_client is not None:
+    if (
+        plan.materials
+        and os.getenv("ATTENDR_ASK_SYNC", "").lower() == "true"
+        and canvas_client is not None
+    ):
         try:
             from academic_assistant.knowledge_sync import KnowledgeSync, failure_summary
+
             knowledge_store = StateStore(os.environ["ATTENDR_DB"])
-            knowledge_schedule = json.loads((PROJECT_ROOT / os.getenv("COURSE_SCHEDULE_FILE", "data/course_schedule.json")).read_text())
-            count = KnowledgeSync(canvas_client, knowledge_store, knowledge_schedule,
-                PROJECT_ROOT / "data/materials/ask", os.getenv("STUDY_WORKER_URL", ""),
-                os.getenv("STUDY_SYNC_SECRET", "")).sync()
-            results.append(StepResult("Course search", "ok", f"{count} course snapshots synchronized"))
+            knowledge_schedule = json.loads(
+                (
+                    PROJECT_ROOT / os.getenv("COURSE_SCHEDULE_FILE", "data/course_schedule.json")
+                ).read_text()
+            )
+            count = KnowledgeSync(
+                canvas_client,
+                knowledge_store,
+                knowledge_schedule,
+                PROJECT_ROOT / "data/materials/ask",
+                os.getenv("STUDY_WORKER_URL", ""),
+                os.getenv("STUDY_SYNC_SECRET", ""),
+            ).sync()
+            results.append(
+                StepResult("Course search", "ok", f"{count} course snapshots synchronized")
+            )
         except Exception as error:
             # Search snapshots are independently atomic and retain their previous
             # published version. Their outage must not invalidate calendar inputs.
@@ -415,9 +433,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
 
     if plan.announcements:
         if snapshot is None:
-            results.append(
-                StepResult("Announcements", "skipped", "Canvas data unavailable")
-            )
+            results.append(StepResult("Announcements", "skipped", "Canvas data unavailable"))
         else:
 
             def send_announcements() -> str:
@@ -425,7 +441,10 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 skipped = 0
                 failures = 0
                 muted = 0
-                triage = AnnouncementTriage(preferences, StateStore(PROJECT_ROOT / os.getenv("ATTENDR_DB", "data/attendr.db")))
+                triage = AnnouncementTriage(
+                    preferences,
+                    StateStore(PROJECT_ROOT / os.getenv("ATTENDR_DB", "data/attendr.db")),
+                )
                 for announcement in snapshot.announcements:
                     try:
                         decision = triage.classify(announcement)
@@ -448,19 +467,23 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
 
             results.append(run_step("Announcements", send_announcements))
             if not arguments.announcements_only:
+
                 def send_assignment_alerts() -> str:
                     sent = 0
-                    for item in upcoming_items(snapshot.items, int(os.getenv("DISCORD_ALERT_HOURS", "72"))):
+                    for item in upcoming_items(
+                        snapshot.items, int(os.getenv("DISCORD_ALERT_HOURS", "72"))
+                    ):
                         if item.submitted is not True:
-                            sent += get_notifier().send_assignment_alert(item, force=arguments.force)
+                            sent += get_notifier().send_assignment_alert(
+                                item, force=arguments.force
+                            )
                     return f"{sent} deadline alert(s) sent"
+
                 results.append(run_step("Assignment alerts", send_assignment_alerts))
 
     if plan.materials:
         if canvas_client is None or snapshot is None:
-            results.append(
-                StepResult("Materials", "skipped", "Canvas data unavailable")
-            )
+            results.append(StepResult("Materials", "skipped", "Canvas data unavailable"))
         else:
             try:
                 materials_report = CourseMaterialsSync.from_env(
@@ -471,13 +494,9 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                     logging.getLogger("attendr.materials_report").warning("%s", warning)
                 allowed_course_ids = {course.id for course in snapshot.courses}
                 allowed_material_items = tuple(
-                    item
-                    for item in materials_report.items
-                    if item.course_id in allowed_course_ids
+                    item for item in materials_report.items if item.course_id in allowed_course_ids
                 )
-                material_items = filter_material_duplicates(
-                    snapshot.items, allowed_material_items
-                )
+                material_items = filter_material_duplicates(snapshot.items, allowed_material_items)
                 duplicate_count = len(allowed_material_items) - len(material_items)
                 results.append(
                     StepResult(
@@ -511,9 +530,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 course_ids=allowed_course_ids
             )
             recent_announcements = tuple(
-                item
-                for item in recent_announcements
-                if item.course_id in allowed_course_ids
+                item for item in recent_announcements if item.course_id in allowed_course_ids
             )
             date_report = AnnouncementDatesSync(
                 AIAssistant.from_env(PROJECT_ROOT / ".env"),
@@ -529,7 +546,12 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
             inputs_complete = inputs_complete and date_report.complete
             for warning in date_report.warnings:
                 logging.getLogger("attendr.date_report").warning("%s", warning)
-            announcement_date_items = tuple(item for item in date_report.items if snapshot is not None and item.course_id in {course.id for course in snapshot.courses})
+            announcement_date_items = tuple(
+                item
+                for item in date_report.items
+                if snapshot is not None
+                and item.course_id in {course.id for course in snapshot.courses}
+            )
             results.append(
                 StepResult(
                     "Announcement dates",
@@ -557,14 +579,16 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
         elif google_auth_error is not None:
             results.append(StepResult("Calendar", "failed", str(google_auth_error)))
         elif not inputs_complete:
-            results.append(StepResult("Calendar", "failed", "Incomplete source data; existing calendar preserved"))
+            results.append(
+                StepResult(
+                    "Calendar", "failed", "Incomplete source data; existing calendar preserved"
+                )
+            )
         else:
 
             def sync_calendar() -> str:
                 canvas_items = snapshot.items
-                derived = prefer_announcement_dates(
-                    material_items, announcement_date_items
-                )
+                derived = prefer_announcement_dates(material_items, announcement_date_items)
                 derived = filter_material_duplicates(canvas_items, derived)
                 university_dates = (
                     schedule.academic_calendar_items() if schedule is not None else ()
@@ -572,15 +596,16 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 academic_items = canvas_items + derived + university_dates
                 replaced_exam_uids: frozenset[str] = frozenset()
                 if schedule is not None and plan.materials:
-                    calendar_items, replaced_exam_uids = (
-                        schedule.merge_with_class_schedule(academic_items)
+                    calendar_items, replaced_exam_uids = schedule.merge_with_class_schedule(
+                        academic_items
                     )
                 else:
                     calendar_items = academic_items
                 report = GoogleCalendarSync.from_env(
                     PROJECT_ROOT / ".env", service=google_service
                 ).sync_items(
-                    calendar_items, delete_uids=replaced_exam_uids | frozenset(snapshot.removed_uids)
+                    calendar_items,
+                    delete_uids=replaced_exam_uids | frozenset(snapshot.removed_uids),
                 )
                 return (
                     f"{len(report.created)} created, {len(report.updated)} updated, "
@@ -593,24 +618,27 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
         if snapshot is None:
             results.append(StepResult("Study plan", "skipped", "Canvas data unavailable"))
         elif google_auth_error is not None:
-            results.append(StepResult(
-                "Study plan", "failed",
-                f"Google Calendar dependency unavailable; existing study plan preserved. {google_auth_error}",
-            ))
-        elif not inputs_complete or not plan.materials:
-            results.append(StepResult(
-                "Study plan", "failed" if not inputs_complete else "skipped",
-                "Complete Canvas, material, and announcement inputs required; existing study plan preserved",
-            ))
-        else:
-            def sync_study_plan() -> str:
-                derived = prefer_announcement_dates(
-                    material_items, announcement_date_items
+            results.append(
+                StepResult(
+                    "Study plan",
+                    "failed",
+                    f"Google Calendar dependency unavailable; existing study plan preserved. {google_auth_error}",
                 )
+            )
+        elif not inputs_complete or not plan.materials:
+            results.append(
+                StepResult(
+                    "Study plan",
+                    "failed" if not inputs_complete else "skipped",
+                    "Complete Canvas, material, and announcement inputs required; existing study plan preserved",
+                )
+            )
+        else:
+
+            def sync_study_plan() -> str:
+                derived = prefer_announcement_dates(material_items, announcement_date_items)
                 derived = filter_material_duplicates(snapshot.items, derived)
-                report = StudyPlanner.from_env(
-                    PROJECT_ROOT / ".env", service=google_service
-                ).sync(
+                report = StudyPlanner.from_env(PROJECT_ROOT / ".env", service=google_service).sync(
                     snapshot.items + derived, inputs_complete=inputs_complete
                 )
                 return (
@@ -625,15 +653,18 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
             results.append(run_step("Study plan", sync_study_plan))
 
     if plan.calendar or plan.announcements or plan.quiz or plan.lecture_quizzes or plan.review:
-        results.append(run_step("Delivery outbox", lambda: f"{get_notifier().flush_pending()} recovered delivery(s)"))
+        results.append(
+            run_step(
+                "Delivery outbox", lambda: f"{get_notifier().flush_pending()} recovered delivery(s)"
+            )
+        )
 
     if plan.digest:
         if snapshot is None:
             results.append(StepResult("Digest", "skipped", "Canvas data unavailable"))
         else:
             deadlines = upcoming_items(
-                snapshot.items
-                + prefer_announcement_dates(material_items, announcement_date_items),
+                snapshot.items + prefer_announcement_dates(material_items, announcement_date_items),
                 int(os.getenv("DISCORD_DIGEST_HOURS", "72")),
             )
             if not deadlines:
@@ -644,7 +675,9 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
 
                 def send_digest() -> str:
                     sent = get_notifier().send_daily_digest(
-                        deadlines, hours=int(os.getenv("DISCORD_DIGEST_HOURS", "72")), force=arguments.force
+                        deadlines,
+                        hours=int(os.getenv("DISCORD_DIGEST_HOURS", "72")),
+                        force=arguments.force,
                     )
                     return "sent" if sent else "already sent today"
 
@@ -653,9 +686,17 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
     if plan.quiz:
         try:
             quiz_store = StateStore(PROJECT_ROOT / os.getenv("ATTENDR_DB", "data/attendr.db"))
-            quiz_day = datetime.now(ZoneInfo(os.getenv("APP_TIMEZONE", "America/Toronto"))).date().isoformat()
-            previous_quiz = quiz_store.quiz(f"daily-quiz:{quiz_day}") if not arguments.force else None
-            quiz_title, quiz_source = ("Cached quiz", "") if previous_quiz else resolve_quiz_source(arguments)
+            quiz_day = (
+                datetime.now(ZoneInfo(os.getenv("APP_TIMEZONE", "America/Toronto")))
+                .date()
+                .isoformat()
+            )
+            previous_quiz = (
+                quiz_store.quiz(f"daily-quiz:{quiz_day}") if not arguments.force else None
+            )
+            quiz_title, quiz_source = (
+                ("Cached quiz", "") if previous_quiz else resolve_quiz_source(arguments)
+            )
         except AIInputError as error:
             status = "failed" if arguments.quiz_only else "skipped"
             results.append(StepResult("Quiz", status, str(error)))
@@ -663,7 +704,9 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
 
             def generate_quiz() -> str:
                 store = StateStore(PROJECT_ROOT / os.getenv("ATTENDR_DB", "data/attendr.db"))
-                local_date = datetime.now(ZoneInfo(os.getenv("APP_TIMEZONE", "America/Toronto"))).date()
+                local_date = datetime.now(
+                    ZoneInfo(os.getenv("APP_TIMEZONE", "America/Toronto"))
+                ).date()
                 key = f"daily-quiz:{local_date.isoformat()}"
                 cached = store.quiz(key) if not arguments.force else None
                 if cached and cached["sent_at"]:
@@ -671,12 +714,18 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 if cached:
                     payload = cached["payload"]
                 else:
-                    questions = AIAssistant.from_env(PROJECT_ROOT / ".env").generate_quiz(quiz_source, num_questions=3)
+                    questions = AIAssistant.from_env(PROJECT_ROOT / ".env").generate_quiz(
+                        quiz_source, num_questions=3
+                    )
                     payload = quiz_discord_payload(quiz_title, questions)
                     if not arguments.force:
                         payload = store.save_quiz(key, payload)
                 sent = get_notifier().send_custom_notification(
-                    key, payload, force=arguments.force, destination="lecture_quizzes", fixed_fingerprint="daily"
+                    key,
+                    payload,
+                    force=arguments.force,
+                    destination="lecture_quizzes",
+                    fixed_fingerprint="daily",
                 )
                 if not arguments.force:
                     store.complete_quiz(key)
@@ -690,6 +739,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 StepResult("Lecture quizzes", "skipped", "Canvas or schedule unavailable")
             )
         else:
+
             def send_lecture_quizzes() -> str:
                 runner = LectureQuizRunner(
                     canvas_client,
@@ -698,10 +748,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                     schedule,
                     materials_directory=PROJECT_ROOT
                     / os.getenv("CANVAS_MATERIALS_DIR", "data/materials"),
-                    state_path=PROJECT_ROOT
-                    / os.getenv(
-                        "ATTENDR_DB", "data/attendr.db"
-                    ),
+                    state_path=PROJECT_ROOT / os.getenv("ATTENDR_DB", "data/attendr.db"),
                     retry_hours=int(os.getenv("LECTURE_QUIZ_RETRY_HOURS", "336")),
                 )
                 report = runner.run(force=arguments.force)
@@ -720,13 +767,19 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
 
             results.append(run_step("Lecture quizzes", send_lecture_quizzes))
 
-    if preferences.review_enabled and (plan.review or (plan.announcements and not arguments.announcements_only)):
+    if preferences.review_enabled and (
+        plan.review or (plan.announcements and not arguments.announcements_only)
+    ):
+
         def send_reviews() -> str:
             store = StateStore(PROJECT_ROOT / os.getenv("ATTENDR_DB", "data/attendr.db"))
             queue = ReviewQueue(store, os.getenv("APP_TIMEZONE", "America/Toronto"))
             today = datetime.now(queue.timezone).date()
-            sent = queue.send_due(get_notifier(), today, preferences.review_daily_limit, force=arguments.force)
+            sent = queue.send_due(
+                get_notifier(), today, preferences.review_daily_limit, force=arguments.force
+            )
             return f"{sent} review question(s) sent"
+
         results.append(run_step("Spaced review", send_reviews))
     return results
 
@@ -754,20 +807,28 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def run_recorded(arguments: argparse.Namespace, store: StateStore) -> int:
-    store.migrate_quizzes(PROJECT_ROOT / os.getenv("LECTURE_QUIZ_STATE_FILE", "data/lecture_quiz_state.json"))
+    store.migrate_quizzes(
+        PROJECT_ROOT / os.getenv("LECTURE_QUIZ_STATE_FILE", "data/lecture_quiz_state.json")
+    )
     run_id = uuid.uuid4().hex
     configure_logging(run_id)
     AI_USAGE.reset()
     logging.getLogger("attendr").info("Run started")
     with store.connect() as db:
-        db.execute("INSERT INTO runs(run_id,started_at,status) VALUES(?,?,'running')", (run_id, time.time()))
+        db.execute(
+            "INSERT INTO runs(run_id,started_at,status) VALUES(?,?,'running')",
+            (run_id, time.time()),
+        )
     try:
         results = run_pipeline(arguments)
     except Exception:
         logging.getLogger("attendr").exception("Run failed: %s", run_id)
         AI_USAGE.log_summary()
         with store.connect() as db:
-            db.execute("UPDATE runs SET finished_at=?,status='failed' WHERE run_id=?", (time.time(), run_id))
+            db.execute(
+                "UPDATE runs SET finished_at=?,status='failed' WHERE run_id=?",
+                (time.time(), run_id),
+            )
         return 1
     run_status = (
         "failed"
@@ -777,9 +838,15 @@ def run_recorded(arguments: argparse.Namespace, store: StateStore) -> int:
         else "ok"
     )
     with store.connect() as db:
-        db.execute("UPDATE runs SET finished_at=?,status=?,detail=? WHERE run_id=?",
-                   (time.time(), run_status,
-                    json.dumps([{ "step": result.name, "status": result.status} for result in results]), run_id))
+        db.execute(
+            "UPDATE runs SET finished_at=?,status=?,detail=? WHERE run_id=?",
+            (
+                time.time(),
+                run_status,
+                json.dumps([{"step": result.name, "status": result.status} for result in results]),
+                run_id,
+            ),
+        )
     for result in results:
         print(f"[{result.status.upper():8}] {result.name}: {result.detail}")
     AI_USAGE.log_summary()
@@ -793,7 +860,9 @@ def run_recorded(arguments: argparse.Namespace, store: StateStore) -> int:
                 summary.write(f"| {result.name} | {result.status} | {detail} |\n")
             usage = AI_USAGE.snapshot()
             summary.write("\n### AI efficiency\n\n")
-            summary.write("| Task | Requests | Cache hits | Deterministic | Input chars | Retries | Rate limits |\n")
+            summary.write(
+                "| Task | Requests | Cache hits | Deterministic | Input chars | Retries | Rate limits |\n"
+            )
             summary.write("|---|---:|---:|---:|---:|---:|---:|\n")
             for task, metrics in sorted(usage.items()):
                 summary.write(

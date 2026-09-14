@@ -183,17 +183,11 @@ class DiscordNotifier:
             if str(value).strip()
         }
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
-            raise DiscordConfigurationError(
-                "Discord timeout must be greater than zero."
-            )
+            raise DiscordConfigurationError("Discord timeout must be greater than zero.")
         if max_attempts < 1:
-            raise DiscordConfigurationError(
-                "Discord max attempts must be at least one."
-            )
+            raise DiscordConfigurationError("Discord max attempts must be at least one.")
         if not math.isfinite(max_rate_limit_wait_seconds) or max_rate_limit_wait_seconds < 0:
-            raise DiscordConfigurationError(
-                "Discord maximum rate-limit wait cannot be negative."
-            )
+            raise DiscordConfigurationError("Discord maximum rate-limit wait cannot be negative.")
         try:
             self.timezone = ZoneInfo(app_timezone)
         except ZoneInfoNotFoundError as error:
@@ -214,28 +208,26 @@ class DiscordNotifier:
         self._now_provider = now_provider or (lambda: datetime.now(UTC))
 
     @classmethod
-    def from_env(
-        cls, env_file: str | os.PathLike[str] | None = None
-    ) -> DiscordNotifier:
+    def from_env(cls, env_file: str | os.PathLike[str] | None = None) -> DiscordNotifier:
         """Create a notifier from environment variables."""
         load_dotenv(dotenv_path=env_file, override=False)
         webhook_url = os.getenv("DISCORD_WEBHOOK_URL", "")
         base_directory = Path(env_file).resolve().parent if env_file else Path.cwd()
-        configured_state = (
-            os.getenv("ATTENDR_DB")
-            or "data/attendr.db"
-        )
+        configured_state = os.getenv("ATTENDR_DB") or "data/attendr.db"
         raw_state_path = Path(configured_state).expanduser()
         state_path = (
-            raw_state_path
-            if raw_state_path.is_absolute()
-            else base_directory / raw_state_path
+            raw_state_path if raw_state_path.is_absolute() else base_directory / raw_state_path
         )
         if state_path.suffix.casefold() == ".json":
-            raise DiscordConfigurationError("ATTENDR_DB must name a SQLite database, not a JSON state file.")
+            raise DiscordConfigurationError(
+                "ATTENDR_DB must name a SQLite database, not a JSON state file."
+            )
         if state_path.suffix != ".json":
             store = StateStore(state_path)
-            for legacy in (base_directory / os.getenv("NOTIFICATION_STATE_FILE", "data/seen_ids.json"), base_directory / os.getenv("NOTIFICATION_STATE_DB", "data/notification_state.db")):
+            for legacy in (
+                base_directory / os.getenv("NOTIFICATION_STATE_FILE", "data/seen_ids.json"),
+                base_directory / os.getenv("NOTIFICATION_STATE_DB", "data/notification_state.db"),
+            ):
                 if legacy.resolve() != state_path.resolve():
                     store.migrate_notifications(legacy)
         return cls(
@@ -259,23 +251,34 @@ class DiscordNotifier:
         """Send one assignment/exam/quiz alert; return False when already sent."""
         payload = self.assignment_payload(item)
         return self._send_once(
-            f"assignment:{item.uid}", payload, force=force,
+            f"assignment:{item.uid}",
+            payload,
+            force=force,
             destination="announcements",
         )
 
     def send_announcement_alert(
-        self, announcement: Announcement, *, force: bool = False, triage: TriageDecision | None = None
+        self,
+        announcement: Announcement,
+        *,
+        force: bool = False,
+        triage: TriageDecision | None = None,
     ) -> bool:
         """Send one announcement alert; return False when already sent."""
         payload = self.announcement_payload(announcement)
         fingerprint = self._fingerprint(payload)
         if triage:
-            payload["embeds"][0]["fields"].append({"name": triage.category, "value": triage.reason[:1024]})
+            payload["embeds"][0]["fields"].append(
+                {"name": triage.category, "value": triage.reason[:1024]}
+            )
             if triage.category == "Action required":
                 payload["embeds"][0]["color"] = EXAM_RED
         return self._send_once(
-            f"announcement:{announcement.uid}", payload, force=force,
-            destination="announcements", fixed_fingerprint=fingerprint,
+            f"announcement:{announcement.uid}",
+            payload,
+            force=force,
+            destination="announcements",
+            fixed_fingerprint=fingerprint,
         )
 
     def send_custom_notification(
@@ -292,8 +295,11 @@ class DiscordNotifier:
         if not event_key:
             raise ValueError("Custom notification event_key cannot be empty.")
         return self._send_once(
-            f"custom:{event_key}", payload, force=force, destination=destination,
-            fixed_fingerprint=fixed_fingerprint
+            f"custom:{event_key}",
+            payload,
+            force=force,
+            destination=destination,
+            fixed_fingerprint=fixed_fingerprint,
         )
 
     def send_daily_digest(
@@ -331,9 +337,7 @@ class DiscordNotifier:
             raise ValueError("Alert hours must be at least one.")
         now = self._now_utc()
         deadline = now + timedelta(hours=alert_hours)
-        eligible_items = [
-            item for item in snapshot.items if item.falls_in_window(now, deadline)
-        ]
+        eligible_items = [item for item in snapshot.items if item.falls_in_window(now, deadline)]
 
         assignments_sent = 0
         assignments_skipped = 0
@@ -352,9 +356,7 @@ class DiscordNotifier:
                 announcements_skipped += 1
 
         digest_sent = (
-            self.send_daily_digest(snapshot.items, hours=digest_hours)
-            if send_digest
-            else False
+            self.send_daily_digest(snapshot.items, hours=digest_hours) if send_digest else False
         )
         return NotificationReport(
             assignments_sent=assignments_sent,
@@ -373,7 +375,8 @@ class DiscordNotifier:
         }.get(item.kind, "Assignment")
         due = (
             item.due_at_local.strftime("%A, %B %d, %Y (time not specified)")
-            if item.all_day else item.due_at_local.strftime("%A, %B %d at %I:%M %p %Z")
+            if item.all_day
+            else item.due_at_local.strftime("%A, %B %d at %I:%M %p %Z")
         )
         points = (
             self._format_points(item.points_possible)
@@ -486,7 +489,9 @@ class DiscordNotifier:
                     continue
                 row = self.state.claim(key, fingerprint)
                 if row is None:
-                    raise DiscordNotificationError("Delivery is claimed, failed, or uncertain; inspect the outbox before retrying.")
+                    raise DiscordNotificationError(
+                        "Delivery is claimed, failed, or uncertain; inspect the outbox before retrying."
+                    )
                 self._deliver_claim(row)
             self.state.mark_sent(routed_key, fingerprint)
         else:
@@ -503,10 +508,14 @@ class DiscordNotifier:
             self.state.finish(row, "pending", error="Rate limited")
             raise
         except DiscordUncertainDeliveryError:
-            self.state.finish(row, "uncertain", error="Discord result unknown; inspect destination before retry")
+            self.state.finish(
+                row, "uncertain", error="Discord result unknown; inspect destination before retry"
+            )
             raise
         except DiscordNotificationError:
-            self.state.finish(row, "failed", error="Discord rejected delivery; repair configuration before retry")
+            self.state.finish(
+                row, "failed", error="Discord rejected delivery; repair configuration before retry"
+            )
             raise
         self.state.finish(row, "sent", remote_id=remote_id)
 
@@ -521,10 +530,14 @@ class DiscordNotifier:
                 sent += 1
         blocked = self.state.blocked_deliveries()
         if blocked:
-            raise DiscordNotificationError(f"{blocked} outbox delivery(s) need review; run scripts/state_admin.py list.")
+            raise DiscordNotificationError(
+                f"{blocked} outbox delivery(s) need review; run scripts/state_admin.py list."
+            )
         return sent
 
-    def _post(self, payload: Mapping[str, Any], destination: str, *, durable: bool = False) -> str | None:
+    def _post(
+        self, payload: Mapping[str, Any], destination: str, *, durable: bool = False
+    ) -> str | None:
         channel_id = self._channel_ids.get(destination)
         use_bot = bool(self._bot_token and channel_id)
         url = (
@@ -540,17 +553,15 @@ class DiscordNotifier:
                 response = self._session.post(
                     url,
                     params=None if use_bot else {"wait": "true"},
-                    headers=(
-                        {"Authorization": f"Bot {self._bot_token}"}
-                        if use_bot
-                        else None
-                    ),
+                    headers=({"Authorization": f"Bot {self._bot_token}"} if use_bot else None),
                     json=outgoing,
                     timeout=self.timeout_seconds,
                 )
             except requests.RequestException:
                 if durable:
-                    raise DiscordUncertainDeliveryError("Discord connection ended without a confirmed delivery result.") from None
+                    raise DiscordUncertainDeliveryError(
+                        "Discord connection ended without a confirmed delivery result."
+                    ) from None
                 if attempt == self.max_attempts:
                     raise DiscordNotificationError(
                         "Discord could not be reached after repeated attempts."
@@ -561,17 +572,18 @@ class DiscordNotifier:
             if 200 <= response.status_code < 300:
                 try:
                     result = response.json()
-                    return str(result["id"]) if isinstance(result, dict) and result.get("id") else None
+                    return (
+                        str(result["id"]) if isinstance(result, dict) and result.get("id") else None
+                    )
                 except (ValueError, TypeError):
                     return None
             if durable and response.status_code >= 500:
-                raise DiscordUncertainDeliveryError("Discord returned a server error; delivery may have succeeded.")
+                raise DiscordUncertainDeliveryError(
+                    "Discord returned a server error; delivery may have succeeded."
+                )
             if response.status_code == 429:
                 retry_after = self._retry_after_seconds(response)
-                if (
-                    attempt == self.max_attempts
-                    or retry_after > self.max_rate_limit_wait_seconds
-                ):
+                if attempt == self.max_attempts or retry_after > self.max_rate_limit_wait_seconds:
                     raise DiscordRateLimitError(
                         "Discord rate-limited the webhook; the notification remains unsent "
                         "and will be retried on the next run."
@@ -632,9 +644,7 @@ class DiscordNotifier:
     def _validate_channel_id(value: str) -> str:
         channel_id = str(value).strip()
         if not channel_id.isdigit():
-            raise DiscordConfigurationError(
-                "Discord channel IDs must contain digits only."
-            )
+            raise DiscordConfigurationError("Discord channel IDs must contain digits only.")
         return channel_id
 
     @staticmethod
@@ -668,9 +678,7 @@ class DiscordNotifier:
     def _now_utc(self) -> datetime:
         current = self._now_provider()
         if current.tzinfo is None:
-            raise DiscordConfigurationError(
-                "now_provider must return a timezone-aware datetime."
-            )
+            raise DiscordConfigurationError("now_provider must return a timezone-aware datetime.")
         return current.astimezone(UTC)
 
     @staticmethod
@@ -684,11 +692,7 @@ class DiscordNotifier:
     @staticmethod
     def _format_points(value: float) -> str:
         numeric_value = float(value)
-        return (
-            str(int(numeric_value))
-            if numeric_value.is_integer()
-            else f"{numeric_value:g}"
-        )
+        return str(int(numeric_value)) if numeric_value.is_integer() else f"{numeric_value:g}"
 
     @staticmethod
     def _truncate(value: str, limit: int) -> str:
@@ -733,9 +737,7 @@ class DiscordNotifier:
         try:
             value = int(raw)
         except ValueError as error:
-            raise DiscordConfigurationError(
-                f"{name} must be a positive integer."
-            ) from error
+            raise DiscordConfigurationError(f"{name} must be a positive integer.") from error
         if value < 1:
             raise DiscordConfigurationError(f"{name} must be a positive integer.")
         return value
@@ -748,9 +750,7 @@ class DiscordNotifier:
         try:
             value = float(raw)
         except ValueError as error:
-            raise DiscordConfigurationError(
-                f"{name} must be greater than zero."
-            ) from error
+            raise DiscordConfigurationError(f"{name} must be greater than zero.") from error
         if value <= 0:
             raise DiscordConfigurationError(f"{name} must be greater than zero.")
         return value

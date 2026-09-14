@@ -1,4 +1,4 @@
-"""Verified Fall 2026 timetable and Example University academic-calendar rules."""
+"""Validated private timetable and academic-calendar rules."""
 
 from __future__ import annotations
 
@@ -40,6 +40,9 @@ class AcademicDate:
 class CourseSchedule:
     def __init__(self, data: dict[str, Any]) -> None:
         self.timezone = ZoneInfo(str(data["timezone"]))
+        self.institution_name = str(data.get("institution_name") or "Academic calendar")
+        self.academic_uid_namespace = str(data.get("academic_uid_namespace") or "academic-calendar")
+        self.academic_calendar_url = str(data.get("academic_calendar_url") or "") or None
         term = data["term"]
         self.term_start = date.fromisoformat(term["start_date"])
         self.term_end = date.fromisoformat(term["end_date"])
@@ -57,14 +60,22 @@ class CourseSchedule:
                 raise ValueError(f"lecture_materials for {course['key']} must be an object")
             sessions = rules.get("sessions", {})
             if not isinstance(sessions, dict):
-                raise ValueError(f"lecture_materials.sessions for {course['key']} must be an object")
+                raise ValueError(
+                    f"lecture_materials.sessions for {course['key']} must be an object"
+                )
             for field in ("include_modules", "exclude_modules"):
                 values = rules.get(field, [])
-                if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
-                    raise ValueError(f"lecture_materials.{field} for {course['key']} must be a string list")
+                if not isinstance(values, list) or not all(
+                    isinstance(value, str) for value in values
+                ):
+                    raise ValueError(
+                        f"lecture_materials.{field} for {course['key']} must be a string list"
+                    )
             for session_key, override in sessions.items():
                 if not isinstance(session_key, str) or not isinstance(override, dict):
-                    raise ValueError(f"lecture material overrides for {course['key']} must be objects")
+                    raise ValueError(
+                        f"lecture material overrides for {course['key']} must be objects"
+                    )
                 for field in ("module", "module_id"):
                     if field in override and not isinstance(override[field], str):
                         raise ValueError(f"lecture material override {field} must be a string")
@@ -78,10 +89,7 @@ class CourseSchedule:
         self.sessions = tuple(
             ClassSession(
                 course_key=str(course["key"]),
-                course_name=str(
-                    course.get("name")
-                    or str(course["key"]).replace("-", " ").title()
-                ),
+                course_name=str(course.get("name") or str(course["key"]).replace("-", " ").title()),
                 course_match=tuple(str(value).casefold() for value in course["match"]),
                 weekday=int(session["weekday"]),
                 start=time.fromisoformat(session["start"]),
@@ -96,11 +104,7 @@ class CourseSchedule:
                 uid=str(item["uid"]),
                 title=str(item["title"]),
                 start_date=date.fromisoformat(item["start_date"]),
-                end_date=(
-                    date.fromisoformat(item["end_date"])
-                    if item.get("end_date")
-                    else None
-                ),
+                end_date=(date.fromisoformat(item["end_date"]) if item.get("end_date") else None),
                 kind=str(item.get("kind", "administrative")),
             )
             for item in data.get("academic_dates", [])
@@ -134,15 +138,15 @@ class CourseSchedule:
         name = canvas_name.casefold()
         return any(value in name for value in session.course_match)
 
-    def lecture_material_override(
-        self, session: ClassSession, day: date
-    ) -> dict[str, Any] | None:
+    def lecture_material_override(self, session: ClassSession, day: date) -> dict[str, Any] | None:
         sessions = self.lecture_material_rules.get(session.course_key, {}).get("sessions", {})
         value = sessions.get(session.session_id(day), sessions.get(day.isoformat()))
         if value is None:
             return None
         if not isinstance(value, dict):
-            raise ValueError(f"Lecture material override for {session.session_id(day)} must be an object")
+            raise ValueError(
+                f"Lecture material override for {session.session_id(day)} must be an object"
+            )
         return value
 
     def lecture_module_policy(self, canvas_name: str, module_name: str) -> bool | None:
@@ -163,9 +167,7 @@ class CourseSchedule:
                 return False
         return None
 
-    def lecture_for_course_on(
-        self, canvas_name: str, day: date
-    ) -> ClassSession | None:
+    def lecture_for_course_on(self, canvas_name: str, day: date) -> ClassSession | None:
         """Return the single scheduled lecture matching a course and date."""
         if not self.term_start <= day <= self.term_end or self.is_no_class_day(day):
             return None
@@ -180,9 +182,7 @@ class CourseSchedule:
 
     def context_for_course(self, canvas_name: str) -> str | None:
         matching = [
-            session
-            for session in self.sessions
-            if self.matches_course(session, canvas_name)
+            session for session in self.sessions if self.matches_course(session, canvas_name)
         ]
         if not matching:
             return None
@@ -199,7 +199,13 @@ class CourseSchedule:
             )
             lines.append(f"No-class dates: {ranges}.")
         weekday_names = (
-            "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
+            "Sunday",
         )
         for session in matching:
             lines.append(
@@ -240,25 +246,26 @@ class CourseSchedule:
             due_local = datetime.combine(entry.start_date, time.min, tzinfo=self.timezone)
             end_local = datetime.combine(
                 (entry.end_date or entry.start_date) + timedelta(days=1),
-                time.min, tzinfo=self.timezone,
+                time.min,
+                tzinfo=self.timezone,
             )
             description = f"Academic date: {entry.start_date.isoformat()}"
             if entry.end_date and entry.end_date != entry.start_date:
                 description += f" through {entry.end_date.isoformat()}"
             items.append(
                 AcademicItem(
-                    uid=f"example-university:academic-date:{entry.uid}",
+                    uid=f"{self.academic_uid_namespace}:academic-date:{entry.uid}",
                     source="university_schedule",
                     source_id=entry.uid,
                     course_id=0,
-                    course_name="Example University",
+                    course_name=self.institution_name,
                     title=entry.title,
                     kind=entry.kind,
                     due_at=due_local.astimezone(UTC),
                     due_at_local=due_local,
                     end_at=end_local.astimezone(UTC),
                     all_day=True,
-                    html_url="https://example.edu/academic-calendar",
+                    html_url=self.academic_calendar_url,
                     updated_at=None,
                     points_possible=None,
                     submission_types=(),
@@ -299,9 +306,7 @@ class CourseSchedule:
                             updated_at=None,
                             points_possible=None,
                             submission_types=(),
-                            description_html=(
-                                "Scheduled from the verified Fall 2026 timetable."
-                            ),
+                            description_html=("Scheduled from the verified Fall 2026 timetable."),
                         )
                     )
             day += timedelta(days=1)
@@ -346,9 +351,7 @@ class CourseSchedule:
                     ),
                 )
             )
-        remaining = tuple(
-            item for item in academic_items if item.uid not in consumed_exam_uids
-        )
+        remaining = tuple(item for item in academic_items if item.uid not in consumed_exam_uids)
         merged = remaining + tuple(class_items)
         return (
             tuple(sorted(merged, key=lambda item: (item.due_at, item.uid))),
@@ -357,7 +360,6 @@ class CourseSchedule:
 
     def _course_names_match(self, scheduled_name: str, canvas_name: str) -> bool:
         return any(
-            session.course_name == scheduled_name
-            and self.matches_course(session, canvas_name)
+            session.course_name == scheduled_name and self.matches_course(session, canvas_name)
             for session in self.sessions
         )

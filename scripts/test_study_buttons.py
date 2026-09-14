@@ -41,22 +41,26 @@ def main() -> int:
     start = datetime.now(UTC) + timedelta(minutes=1)
     end = start + timedelta(minutes=30)
     session_id = f"attendr:study:{secrets.token_hex(10)}:999"
-    event = service.events().insert(
-        calendarId=calendar_id,
-        body={
-            "summary": "Attendr button test",
-            "description": "Temporary end-to-end test. Press Session complete.",
-            "start": {"dateTime": start.isoformat(), "timeZone": "America/Toronto"},
-            "end": {"dateTime": end.isoformat(), "timeZone": "America/Toronto"},
-            "transparency": "opaque",
-            "extendedProperties": {
-                "private": {
-                    "canvas_uid": session_id,
-                    "attendr_source": "study_plan",
-                }
+    event = (
+        service.events()
+        .insert(
+            calendarId=calendar_id,
+            body={
+                "summary": "Attendr button test",
+                "description": "Temporary end-to-end test. Press Session complete.",
+                "start": {"dateTime": start.isoformat(), "timeZone": "America/Toronto"},
+                "end": {"dateTime": end.isoformat(), "timeZone": "America/Toronto"},
+                "transparency": "opaque",
+                "extendedProperties": {
+                    "private": {
+                        "canvas_uid": session_id,
+                        "attendr_source": "study_plan",
+                    }
+                },
             },
-        },
-    ).execute()
+        )
+        .execute()
+    )
     event_id = str(event["id"])
     headers = {"Authorization": f"Bearer {secret}"}
     try:
@@ -65,24 +69,24 @@ def main() -> int:
             headers=headers,
             json={
                 "replace": False,
-                "sessions": [{
-                    "session_id": session_id,
-                    "task_uid": "attendr:test:button-controls",
-                    "title": "Verify Attendr's Discord buttons",
-                    "course_name": "Attendr setup",
-                    "start": start.isoformat(),
-                    "end": end.isoformat(),
-                    "task_due_at": (start + timedelta(days=1)).isoformat(),
-                    "calendar_id": calendar_id,
-                    "event_id": event_id,
-                }],
+                "sessions": [
+                    {
+                        "session_id": session_id,
+                        "task_uid": "attendr:test:button-controls",
+                        "title": "Verify Attendr's Discord buttons",
+                        "course_name": "Attendr setup",
+                        "start": start.isoformat(),
+                        "end": end.isoformat(),
+                        "task_due_at": (start + timedelta(days=1)).isoformat(),
+                        "calendar_id": calendar_id,
+                        "event_id": event_id,
+                    }
+                ],
             },
             timeout=30,
         )
         sync.raise_for_status()
-        reminder = requests.post(
-            f"{worker}/api/reminders/run", headers=headers, timeout=30
-        )
+        reminder = requests.post(f"{worker}/api/reminders/run", headers=headers, timeout=30)
         reminder.raise_for_status()
     except requests.RequestException:
         service.events().delete(calendarId=calendar_id, eventId=event_id).execute()

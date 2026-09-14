@@ -83,26 +83,20 @@ def main() -> int:
     args = parse_args()
     try:
         if args.list_models:
-            assistant = AIAssistant.from_env(
-                PROJECT_ROOT / ".env", model_override=args.model
-            )
+            assistant = AIAssistant.from_env(PROJECT_ROOT / ".env", model_override=args.model)
             models = assistant.list_available_flash_models()
             print("Available Flash models:")
             for model in models:
                 print(f"  - {model}")
             return 0 if models else 1
         if args.check_connection:
-            assistant = AIAssistant.from_env(
-                PROJECT_ROOT / ".env", model_override=args.model
-            )
+            assistant = AIAssistant.from_env(PROJECT_ROOT / ".env", model_override=args.model)
             assistant.check_connection()
             print(f"Gemini connection succeeded with {assistant.model}.")
             return 0
 
         label, source_kind, chunks = resolve_source(args)
-        assistant = AIAssistant.from_env(
-            PROJECT_ROOT / ".env", model_override=args.model
-        )
+        assistant = AIAssistant.from_env(PROJECT_ROOT / ".env", model_override=args.model)
         notifier = DiscordNotifier.from_env(PROJECT_ROOT / ".env")
 
         if source_kind == "pdf":

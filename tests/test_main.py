@@ -19,11 +19,22 @@ class MainRunnerTests(unittest.TestCase):
     def test_only_known_harmless_pypdf_repair_warning_is_filtered(self):
         warning_filter = HarmlessPypdfRepairFilter()
         harmless = logging.LogRecord(
-            "pypdf._reader", 30, "", 0,
-            "Ignoring wrong pointing object 12 0 (offset 0)", (), None,
+            "pypdf._reader",
+            30,
+            "",
+            0,
+            "Ignoring wrong pointing object 12 0 (offset 0)",
+            (),
+            None,
         )
         other = logging.LogRecord(
-            "pypdf._reader", 30, "", 0, "PDF stream is damaged", (), None,
+            "pypdf._reader",
+            30,
+            "",
+            0,
+            "PDF stream is damaged",
+            (),
+            None,
         )
         self.assertFalse(warning_filter.filter(harmless))
         self.assertTrue(warning_filter.filter(other))
@@ -42,11 +53,15 @@ class MainRunnerTests(unittest.TestCase):
             ([attendr_main.StepResult("A", "failed", "blocked")], 1, "failed"),
         )
         for results, expected_exit, expected_status in cases:
-            with self.subTest(expected_status=expected_status), tempfile.TemporaryDirectory() as directory:
+            with (
+                self.subTest(expected_status=expected_status),
+                tempfile.TemporaryDirectory() as directory,
+            ):
                 store = attendr_main.StateStore(Path(directory) / "state.db")
                 arguments = attendr_main.build_parser().parse_args([])
-                with patch.object(attendr_main, "configure_logging"), patch.object(
-                    attendr_main, "run_pipeline", return_value=results
+                with (
+                    patch.object(attendr_main, "configure_logging"),
+                    patch.object(attendr_main, "run_pipeline", return_value=results),
                 ):
                     status = attendr_main.run_recorded(arguments, store)
                 with store.connect() as db:
@@ -99,9 +114,10 @@ class MainRunnerTests(unittest.TestCase):
         def fail() -> str:
             raise RuntimeError(f"provider rejected {secret}")
 
-        with patch.dict("os.environ", {"ATTENDR_TEST_SECRET": secret}), self.assertLogs(
-            "attendr.pipeline", level="ERROR"
-        ) as captured:
+        with (
+            patch.dict("os.environ", {"ATTENDR_TEST_SECRET": secret}),
+            self.assertLogs("attendr.pipeline", level="ERROR") as captured,
+        ):
             result = attendr_main.run_step("Example", fail)
 
         self.assertEqual(
@@ -143,9 +159,11 @@ class MainRunnerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = attendr_main.StateStore(Path(directory) / "state.db")
             arguments = attendr_main.build_parser().parse_args([])
-            with patch.object(attendr_main, "configure_logging"), patch.object(
-                attendr_main, "run_pipeline", side_effect=RuntimeError("escaped")
-            ), self.assertLogs("attendr", level="ERROR") as captured:
+            with (
+                patch.object(attendr_main, "configure_logging"),
+                patch.object(attendr_main, "run_pipeline", side_effect=RuntimeError("escaped")),
+                self.assertLogs("attendr", level="ERROR") as captured,
+            ):
                 status = attendr_main.run_recorded(arguments, store)
 
             self.assertEqual(status, 1)
@@ -184,9 +202,7 @@ class MainRunnerTests(unittest.TestCase):
             **common,
         )
 
-        filtered = attendr_main.filter_material_duplicates(
-            (canvas_item,), (material_item,)
-        )
+        filtered = attendr_main.filter_material_duplicates((canvas_item,), (material_item,))
 
         self.assertEqual(filtered, ())
 

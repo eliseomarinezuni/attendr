@@ -16,21 +16,19 @@ UTC = timezone.utc
 class CourseScheduleTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.schedule = CourseSchedule.load(ROOT / "data/course_schedule.json")
+        cls.schedule = CourseSchedule.load(ROOT / "data/course_schedule.example.json")
 
-    def test_thursday_ethics_ends_at_two(self):
-        ethics = next(
+    def test_thursday_example_course_ends_at_two(self):
+        example_course = next(
             item
             for item in self.schedule.sessions
-            if item.course_key == "ethics" and item.weekday == 3
+            if item.course_key == "example-ethics" and item.weekday == 3
         )
-        self.assertEqual(ethics.start.isoformat(timespec="minutes"), "11:10")
-        self.assertEqual(ethics.end.isoformat(timespec="minutes"), "14:00")
+        self.assertEqual(example_course.start.isoformat(timespec="minutes"), "11:10")
+        self.assertEqual(example_course.end.isoformat(timespec="minutes"), "14:00")
 
     def test_course_context_contains_only_matching_verified_sessions(self):
-        context = self.schedule.context_for_course(
-            "EXMP 2020 XLIST Analys. & Design of Algorithms"
-        )
+        context = self.schedule.context_for_course("EXMP 2020 Example Algorithms")
 
         self.assertIsNotNone(context)
         self.assertIn("Lecture: Wednesday 15:40-17:00", context)
@@ -66,7 +64,8 @@ class CourseScheduleTests(unittest.TestCase):
         self.assertEqual({item.kind for item in items}, {"lecture", "lab", "tutorial"})
         self.assertFalse(
             any(
-                item.due_at_local.date().isoformat() in {
+                item.due_at_local.date().isoformat()
+                in {
                     "2026-10-12",
                     "2026-10-13",
                     "2026-10-14",
@@ -76,14 +75,16 @@ class CourseScheduleTests(unittest.TestCase):
                 for item in items
             )
         )
-        ethics = next(
+        example_course = next(
             item
             for item in items
-            if item.course_name.startswith("Ethics")
+            if item.course_name.startswith("Example Computing")
             and item.due_at_local.date().isoformat() == "2026-09-10"
         )
-        self.assertEqual(ethics.due_at_local.strftime("%H:%M"), "11:10")
-        self.assertEqual(ethics.end_at.astimezone(self.schedule.timezone).strftime("%H:%M"), "14:00")
+        self.assertEqual(example_course.due_at_local.strftime("%H:%M"), "11:10")
+        self.assertEqual(
+            example_course.end_at.astimezone(self.schedule.timezone).strftime("%H:%M"), "14:00"
+        )
 
     def test_midterm_replaces_overlapping_course_lecture(self):
         start = datetime(2026, 11, 19, 11, 10, tzinfo=self.schedule.timezone)
@@ -92,7 +93,7 @@ class CourseScheduleTests(unittest.TestCase):
             source="syllabus_deadline",
             source_id="outline",
             course_id=12345,
-            course_name="202699 - Eth., Law & Soc. Imp of Comp.",
+            course_name="Example Computing and Society",
             title="Midterm",
             kind="exam",
             due_at=start.astimezone(UTC),
@@ -112,7 +113,7 @@ class CourseScheduleTests(unittest.TestCase):
             item
             for item in merged
             if item.due_at_local.date().isoformat() == "2026-11-19"
-            and item.course_name.startswith("Ethics")
+            and item.course_name.startswith("Example Computing")
         )
         self.assertEqual(replacement.title, "Midterm")
         self.assertEqual(replacement.uid.split(":")[1], "class-session")

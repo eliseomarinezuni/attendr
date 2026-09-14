@@ -110,9 +110,7 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             self.assertEqual(first.materials_analyzed, 1)
             self.assertEqual(len(first.items), 1)
             self.assertEqual(first.items[0].kind, "exam")
-            self.assertEqual(
-                first.items[0].due_at_local.isoformat(), "2026-10-20T13:30:00-04:00"
-            )
+            self.assertEqual(first.items[0].due_at_local.isoformat(), "2026-10-20T13:30:00-04:00")
             self.assertEqual(second.cached_materials_reused, 1)
             self.assertEqual(cached_ai.calls, [])
             self.assertEqual(second.items[0].uid, first.items[0].uid)
@@ -141,7 +139,9 @@ class CourseMaterialsSyncTests(unittest.TestCase):
         self.assertEqual(report.items, ())
         self.assertTrue(report.complete)
         self.assertEqual(report.blocking_warnings, ())
-        self.assertTrue(any("Rejected ungrounded AI deadline" in warning for warning in report.warnings))
+        self.assertTrue(
+            any("Rejected ungrounded AI deadline" in warning for warning in report.warnings)
+        )
 
     def test_legacy_unverified_cache_is_revalidated_on_provider_failure(self):
         class FailingAI:
@@ -154,23 +154,30 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             html_path.write_text("<p>Midterm Exam: October 20, 2026</p>")
             material = self.make_material(html_path)
             index_path = root / "index.json"
-            index_path.write_text(json.dumps({
-                "version": 1,
-                "sources": {
-                    material.uid: {
-                        "content_sha256": material.content_sha256,
-                        "course_id": material.course_id,
-                        "course_name": material.course_name,
-                        "title": material.title,
-                        "deadlines": [deadline(
-                            "2026-10-21", None,
-                            evidence="Midterm Exam: October 20, 2026",
-                        )],
-                        "extraction_version": 3,
-                        "context_hash": "legacy",
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "sources": {
+                            material.uid: {
+                                "content_sha256": material.content_sha256,
+                                "course_id": material.course_id,
+                                "course_name": material.course_name,
+                                "title": material.title,
+                                "deadlines": [
+                                    deadline(
+                                        "2026-10-21",
+                                        None,
+                                        evidence="Midterm Exam: October 20, 2026",
+                                    )
+                                ],
+                                "extraction_version": 3,
+                                "context_hash": "legacy",
+                            }
+                        },
                     }
-                },
-            }))
+                )
+            )
 
             report = CourseMaterialsSync(
                 FakeCanvas([material]),
@@ -182,7 +189,9 @@ class CourseMaterialsSyncTests(unittest.TestCase):
         self.assertEqual(report.items, ())
         self.assertFalse(report.complete)
         self.assertTrue(report.blocking_warnings)
-        self.assertTrue(any("Rejected ungrounded AI deadline" in warning for warning in report.warnings))
+        self.assertTrue(
+            any("Rejected ungrounded AI deadline" in warning for warning in report.warnings)
+        )
 
     def test_unchanged_legacy_cache_is_grounded_and_upgraded_without_gemini(self):
         class ForbiddenAI:
@@ -197,20 +206,24 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             html_path.write_text("<p>Midterm Exam: October 20, 2026</p>")
             material = self.make_material(html_path)
             index_path = root / "index.json"
-            index_path.write_text(json.dumps({
-                "version": 1,
-                "sources": {
-                    material.uid: {
-                        "content_sha256": material.content_sha256,
-                        "course_id": material.course_id,
-                        "course_name": material.course_name,
-                        "title": material.title,
-                        "deadlines": [deadline("2026-10-20", None)],
-                        "extraction_version": 3,
-                        "context_hash": "legacy",
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "sources": {
+                            material.uid: {
+                                "content_sha256": material.content_sha256,
+                                "course_id": material.course_id,
+                                "course_name": material.course_name,
+                                "title": material.title,
+                                "deadlines": [deadline("2026-10-20", None)],
+                                "extraction_version": 3,
+                                "context_hash": "legacy",
+                            }
+                        },
                     }
-                },
-            }))
+                )
+            )
 
             report = CourseMaterialsSync(
                 FakeCanvas([material]),
@@ -342,7 +355,7 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             html_path.write_text("<p>Midterm Exam October 27, 2026</p>")
             material = replace(
                 self.make_material(html_path),
-                course_name="202699 - Web Dev - EXMP-3030",
+                course_name="Example Web Systems - EXMP 3030",
             )
             report = CourseMaterialsSync(
                 FakeCanvas([material]),
@@ -357,7 +370,7 @@ class CourseMaterialsSyncTests(unittest.TestCase):
                 ),
                 index_path=root / "index.json",
                 course_schedule=CourseSchedule.load(
-                    PROJECT_ROOT / "data/course_schedule.json"
+                    PROJECT_ROOT / "data/course_schedule.example.json"
                 ),
                 now_provider=lambda: NOW,
             ).sync()
@@ -367,7 +380,9 @@ class CourseMaterialsSyncTests(unittest.TestCase):
                 "2026-10-27T12:40:00-04:00",
             )
             self.assertEqual(
-                report.items[0].end_at.astimezone(report.items[0].due_at_local.tzinfo).strftime("%H:%M"),
+                report.items[0]
+                .end_at.astimezone(report.items[0].due_at_local.tzinfo)
+                .strftime("%H:%M"),
                 "14:00",
             )
 
@@ -400,9 +415,7 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             ).sync()
 
             self.assertEqual(report.items, ())
-            self.assertTrue(
-                any("Conflicting syllabus dates" in item for item in report.warnings)
-            )
+            self.assertTrue(any("Conflicting syllabus dates" in item for item in report.warnings))
             self.assertFalse(report.complete)
             self.assertTrue(report.blocking_warnings)
 
@@ -428,12 +441,16 @@ class CourseMaterialsSyncTests(unittest.TestCase):
                 updated_at=None,
                 html_url=None,
             )
-            ai = FakeAI([deadline(
-                "2026-10-16",
-                None,
-                title="Assignment 1",
-                evidence="Assignment 1 | October 16, 2026",
-            )])
+            ai = FakeAI(
+                [
+                    deadline(
+                        "2026-10-16",
+                        None,
+                        title="Assignment 1",
+                        evidence="Assignment 1 | October 16, 2026",
+                    )
+                ]
+            )
             report = CourseMaterialsSync(
                 FakeCanvas([material]),
                 ai,
@@ -467,9 +484,7 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             root = Path(directory)
             old_path = root / "old.html"
             old_path.write_text("<p>Midterm Exam: October 20, 2026 at 1:30 PM</p>")
-            old = self.make_material(
-                old_path, uid="canvas:syllabus-file:1:old"
-            )
+            old = self.make_material(old_path, uid="canvas:syllabus-file:1:old")
             first = CourseMaterialsSync(
                 FakeCanvas([old]),
                 FakeAI([deadline()]),
@@ -480,9 +495,7 @@ class CourseMaterialsSyncTests(unittest.TestCase):
 
             current_path = root / "current.html"
             current_path.write_text("<p>Current course outline</p>")
-            current = self.make_material(
-                current_path, uid="canvas:syllabus-page:1"
-            )
+            current = self.make_material(current_path, uid="canvas:syllabus-page:1")
             second = CourseMaterialsSync(
                 FakeCanvas(
                     [current],
@@ -503,9 +516,7 @@ class CourseMaterialsSyncTests(unittest.TestCase):
             root = Path(directory)
             old_path = root / "old.html"
             old_path.write_text("<p>Midterm Exam: October 20, 2026 at 1:30 PM</p>")
-            old = self.make_material(
-                old_path, uid="canvas:syllabus-file:1:old"
-            )
+            old = self.make_material(old_path, uid="canvas:syllabus-file:1:old")
             CourseMaterialsSync(
                 FakeCanvas([old]),
                 FakeAI([deadline()]),
@@ -515,9 +526,7 @@ class CourseMaterialsSyncTests(unittest.TestCase):
 
             current_path = root / "current.html"
             current_path.write_text("<p>Current course outline</p>")
-            current = self.make_material(
-                current_path, uid="canvas:syllabus-page:1"
-            )
+            current = self.make_material(current_path, uid="canvas:syllabus-page:1")
             report = CourseMaterialsSync(
                 FakeCanvas([current]),
                 FakeAI([]),

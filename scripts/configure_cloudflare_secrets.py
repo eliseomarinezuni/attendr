@@ -82,18 +82,23 @@ def main(argv: list[str] | None = None) -> int:
     configuration = dict(dotenv_values(env_path))
     try:
         parsed = urlparse(arguments.worker_url)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
             raise RuntimeError("--worker-url must be an HTTPS deployment URL.")
         if not arguments.guild_id.isdigit() or not arguments.channel_id.isdigit():
             raise RuntimeError("Discord IDs must be numeric.")
         bot_token = required(configuration, "DISCORD_BOT_TOKEN")
         owner_id = discord_owner(bot_token, arguments.guild_id)
-        oauth_client = json_file(
-            configuration, "GOOGLE_CREDENTIALS_FILE", "credentials.json"
-        ).get("installed", {})
-        oauth_token = json_file(
-            configuration, "GOOGLE_TOKEN_FILE", "token.json"
+        oauth_client = json_file(configuration, "GOOGLE_CREDENTIALS_FILE", "credentials.json").get(
+            "installed", {}
         )
+        oauth_token = json_file(configuration, "GOOGLE_TOKEN_FILE", "token.json")
         if not isinstance(oauth_client, dict):
             raise RuntimeError("credentials.json is not a Desktop app credential.")
 

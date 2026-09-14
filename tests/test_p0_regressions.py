@@ -48,9 +48,7 @@ class OAuthSafetyTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
-        self.auth = GoogleCalendarAuthenticator(
-            root / "credentials.json", root / "token.json"
-        )
+        self.auth = GoogleCalendarAuthenticator(root / "credentials.json", root / "token.json")
         self.auth.credentials_path.write_text("{}")
         self.auth.token_path.write_text("{}")
 
@@ -137,9 +135,7 @@ class OAuthSafetyTests(unittest.TestCase):
     def test_refresh_failures_do_not_start_interactive_flow(self):
         for retryable in (False, True):
             credentials = Mock(valid=False, expired=True, refresh_token="fake")
-            credentials.refresh.side_effect = RefreshError(
-                "fake failure", retryable=retryable
-            )
+            credentials.refresh.side_effect = RefreshError("fake failure", retryable=retryable)
             with (
                 self.subTest(retryable=retryable),
                 patch(
@@ -225,9 +221,7 @@ class CanvasTransportTests(unittest.TestCase):
                 ) as request,
                 patch("academic_assistant.http_client.time.sleep") as sleep,
             ):
-                self.assertEqual(
-                    CanvasSession().get("https://canvas.example").status_code, 200
-                )
+                self.assertEqual(CanvasSession().get("https://canvas.example").status_code, 200)
                 self.assertEqual(request.call_count, 2)
                 self.assertEqual(request.call_args.kwargs["timeout"], (5, 15))
                 sleep.assert_called_once_with(2)
@@ -242,9 +236,7 @@ class CanvasTransportTests(unittest.TestCase):
                 ) as request,
                 patch("academic_assistant.http_client.time.sleep") as sleep,
             ):
-                self.assertEqual(
-                    CanvasSession().get("https://canvas.example").status_code, status
-                )
+                self.assertEqual(CanvasSession().get("https://canvas.example").status_code, status)
                 request.assert_called_once()
                 sleep.assert_not_called()
 
@@ -274,9 +266,7 @@ class CanvasTransportTests(unittest.TestCase):
 
 class SourceSafetyTests(unittest.TestCase):
     def client(self, fake):
-        return CanvasClient(
-            "https://canvas.example", "fake", canvas=fake, now_provider=lambda: NOW
-        )
+        return CanvasClient("https://canvas.example", "fake", canvas=fake, now_provider=lambda: NOW)
 
     def test_missing_due_date_is_nonfatal_and_not_a_fetch_failure(self):
         snapshot = self.client(
@@ -347,9 +337,7 @@ class SourceSafetyTests(unittest.TestCase):
     def test_date_only_deadline_remains_visible_in_today_digest(self):
         zone = ZoneInfo("America/Toronto")
         local = datetime(2026, 9, 4, tzinfo=zone)
-        item = academic_item(
-            due_at=local.astimezone(UTC), due_at_local=local, all_day=True
-        )
+        item = academic_item(due_at=local.astimezone(UTC), due_at_local=local, all_day=True)
         notifier = DiscordNotifier(
             "https://discord.com/api/webhooks/1/fake", now_provider=lambda: NOW
         )
@@ -369,9 +357,7 @@ class SourceSafetyTests(unittest.TestCase):
             ("2026-11-01T06:30:00+00:00", "2026-11-01T01:30:00-05:00"),
         ):
             with self.subTest(utc=utc):
-                body = calendar._event_body(
-                    academic_item(due_at=datetime.fromisoformat(utc))
-                )
+                body = calendar._event_body(academic_item(due_at=datetime.fromisoformat(utc)))
                 self.assertEqual(body["start"]["dateTime"], expected)
                 self.assertGreater(
                     datetime.fromisoformat(body["end"]["dateTime"]).astimezone(UTC),
@@ -379,7 +365,7 @@ class SourceSafetyTests(unittest.TestCase):
                 )
 
     def test_explicit_extracted_exam_after_lecture_end_has_valid_duration(self):
-        schedule = CourseSchedule.load(ROOT / "data/course_schedule.json")
+        schedule = CourseSchedule.load(ROOT / "data/course_schedule.example.json")
         deadline = MajorDeadline(
             title="Exam",
             due_date="2026-10-27",
@@ -405,13 +391,11 @@ class SourceSafetyTests(unittest.TestCase):
             )
             items = CourseMaterialsSync(
                 Mock(), Mock(), course_schedule=schedule
-            )._normalize_deadlines(
-                [(material, deadline)], datetime(2026, 9, 1).date(), []
-            )
+            )._normalize_deadlines([(material, deadline)], datetime(2026, 9, 1).date(), [])
             self.assertEqual(items[0].end_at - items[0].due_at, timedelta(hours=2))
 
     def test_academic_range_keeps_last_day_with_exclusive_end(self):
-        schedule = CourseSchedule.load(ROOT / "data/course_schedule.json")
+        schedule = CourseSchedule.load(ROOT / "data/course_schedule.example.json")
         item = next(
             item
             for item in schedule.academic_calendar_items()
@@ -423,26 +407,18 @@ class SourceSafetyTests(unittest.TestCase):
 
     def test_distinct_same_day_assignments_survive_filter(self):
         canvas = academic_item(title="Essay")
-        material = replace(
-            canvas, uid="material", title="Problem set", source="syllabus_deadline"
-        )
-        self.assertEqual(
-            main.filter_material_duplicates((canvas,), (material,)), (material,)
-        )
+        material = replace(canvas, uid="material", title="Problem set", source="syllabus_deadline")
+        self.assertEqual(main.filter_material_duplicates((canvas,), (material,)), (material,))
 
     def test_ambiguous_title_match_is_not_removed(self):
         first = academic_item()
         second = replace(first, uid="other")
         material = replace(first, uid="material", source="syllabus_deadline")
-        self.assertEqual(
-            main.filter_material_duplicates((first, second), (material,)), (material,)
-        )
+        self.assertEqual(main.filter_material_duplicates((first, second), (material,)), (material,))
 
     def test_explicit_exam_times_survive_lecture_replacement(self):
-        schedule = CourseSchedule.load(ROOT / "data/course_schedule.json")
-        lecture = next(
-            item for item in schedule.scheduled_class_items() if item.kind == "lecture"
-        )
+        schedule = CourseSchedule.load(ROOT / "data/course_schedule.example.json")
+        lecture = next(item for item in schedule.scheduled_class_items() if item.kind == "lecture")
         exam = replace(
             lecture,
             uid="exam",
@@ -516,12 +492,20 @@ class PlannerSafetyTests(unittest.TestCase):
         schedule = Mock(excluded_course_patterns=())
         schedule.timezone = ZoneInfo("America/Toronto")
         materials = SimpleNamespace(
-            items=(), materials_found=0, materials_analyzed=0,
-            cached_materials_reused=0, warnings=("prior state retained",),
-            complete=True, blocking_warnings=(),
+            items=(),
+            materials_found=0,
+            materials_analyzed=0,
+            cached_materials_reused=0,
+            warnings=("prior state retained",),
+            complete=True,
+            blocking_warnings=(),
         )
         dates = SimpleNamespace(
-            items=(), analyzed=0, cached=0, warnings=(), complete=True,
+            items=(),
+            analyzed=0,
+            cached=0,
+            warnings=(),
+            complete=True,
             blocking_warnings=(),
         )
         auth_error = CalendarAuthenticationError(
@@ -533,7 +517,8 @@ class PlannerSafetyTests(unittest.TestCase):
             patch.object(main.CourseSchedule, "load", return_value=schedule),
             patch.object(main.CanvasClient, "from_env", return_value=canvas),
             patch.object(
-                main.CourseMaterialsSync, "from_env",
+                main.CourseMaterialsSync,
+                "from_env",
                 return_value=Mock(sync=Mock(return_value=materials)),
             ),
             patch.object(main.AIAssistant, "from_env", return_value=Mock()),
@@ -593,9 +578,7 @@ class PlannerSafetyTests(unittest.TestCase):
                         ),
                     )
                 )
-                stack.enter_context(
-                    patch.object(main.AIAssistant, "from_env", return_value=Mock())
-                )
+                stack.enter_context(patch.object(main.AIAssistant, "from_env", return_value=Mock()))
                 stack.enter_context(
                     patch.object(
                         main.AnnouncementDatesSync,
@@ -610,21 +593,13 @@ class PlannerSafetyTests(unittest.TestCase):
                         ),
                     )
                 )
-                calendar = stack.enter_context(
-                    patch.object(main.GoogleCalendarSync, "from_env")
-                )
-                planner = stack.enter_context(
-                    patch.object(main.StudyPlanner, "from_env")
-                )
-                results = main.run_pipeline(
-                    main.build_parser().parse_args(["--sync-only"])
-                )
+                calendar = stack.enter_context(patch.object(main.GoogleCalendarSync, "from_env"))
+                planner = stack.enter_context(patch.object(main.StudyPlanner, "from_env"))
+                results = main.run_pipeline(main.build_parser().parse_args(["--sync-only"]))
                 calendar.assert_not_called()
                 planner.assert_not_called()
                 self.assertEqual(
-                    next(
-                        result.status for result in results if result.name == "Calendar"
-                    ),
+                    next(result.status for result in results if result.name == "Calendar"),
                     "failed",
                 )
 

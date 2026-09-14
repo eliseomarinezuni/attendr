@@ -21,13 +21,15 @@ class FakeAI:
 
     def extract_major_deadlines(self, *args, **kwargs):
         self.calls += 1
-        return [{
-            "title": "Reflection",
-            "due_date": "2026-09-20",
-            "due_time": None,
-            "kind": "assignment",
-            "source_evidence": "Reflection due September 20",
-        }]
+        return [
+            {
+                "title": "Reflection",
+                "due_date": "2026-09-20",
+                "due_time": None,
+                "kind": "assignment",
+                "source_evidence": "Reflection due September 20",
+            }
+        ]
 
 
 class AnnouncementDatesTests(unittest.TestCase):
@@ -71,7 +73,9 @@ class AnnouncementDatesTests(unittest.TestCase):
         self.assertEqual(report.items, ())
         self.assertTrue(report.complete)
         self.assertEqual(report.blocking_warnings, ())
-        self.assertTrue(any("Rejected ungrounded AI deadline" in warning for warning in report.warnings))
+        self.assertTrue(
+            any("Rejected ungrounded AI deadline" in warning for warning in report.warnings)
+        )
 
     def test_irrelevant_announcement_provider_failure_is_nonblocking(self):
         ai = Mock()
@@ -80,9 +84,9 @@ class AnnouncementDatesTests(unittest.TestCase):
         )
         announcement = self.announcement("Welcome to the course. Read the overview.")
         with tempfile.TemporaryDirectory() as directory:
-            report = AnnouncementDatesSync(
-                ai, index_path=Path(directory) / "dates.json"
-            ).sync((announcement,))
+            report = AnnouncementDatesSync(ai, index_path=Path(directory) / "dates.json").sync(
+                (announcement,)
+            )
 
         self.assertTrue(report.complete)
         self.assertTrue(report.warnings)
@@ -95,9 +99,9 @@ class AnnouncementDatesTests(unittest.TestCase):
         )
         announcement = self.announcement("Assignment 1 is due September 25.")
         with tempfile.TemporaryDirectory() as directory:
-            report = AnnouncementDatesSync(
-                ai, index_path=Path(directory) / "dates.json"
-            ).sync((announcement,))
+            report = AnnouncementDatesSync(ai, index_path=Path(directory) / "dates.json").sync(
+                (announcement,)
+            )
 
         self.assertFalse(report.complete)
         self.assertTrue(report.blocking_warnings)
@@ -105,33 +109,25 @@ class AnnouncementDatesTests(unittest.TestCase):
     def test_changed_dated_announcement_blocks_when_provider_is_unavailable(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "dates.json"
-            AnnouncementDatesSync(FakeAI(), index_path=path).sync(
-                (self.announcement(),)
-            )
+            AnnouncementDatesSync(FakeAI(), index_path=path).sync((self.announcement(),))
             failing_ai = Mock()
             failing_ai.extract_major_deadlines.side_effect = AIProviderError(
                 "temporarily unavailable", transient=True
             )
-            changed = self.announcement(
-                "Reflection due September 20. Quiz due September 27."
-            )
-            report = AnnouncementDatesSync(
-                failing_ai, index_path=path
-            ).sync((changed,))
+            changed = self.announcement("Reflection due September 20. Quiz due September 27.")
+            report = AnnouncementDatesSync(failing_ai, index_path=path).sync((changed,))
 
         self.assertFalse(report.complete)
         self.assertTrue(report.blocking_warnings)
 
     def test_identical_announcement_content_reuses_content_cache(self):
         first = self.announcement()
-        second = replace(
-            self.announcement(), uid="canvas:announcement:1:3", source_id="3"
-        )
+        second = replace(self.announcement(), uid="canvas:announcement:1:3", source_id="3")
         with tempfile.TemporaryDirectory() as directory:
             ai = FakeAI()
-            report = AnnouncementDatesSync(
-                ai, index_path=Path(directory) / "dates.json"
-            ).sync((first, second))
+            report = AnnouncementDatesSync(ai, index_path=Path(directory) / "dates.json").sync(
+                (first, second)
+            )
 
         self.assertEqual(ai.calls, 1)
         self.assertEqual(report.cached, 1)
@@ -140,26 +136,30 @@ class AnnouncementDatesTests(unittest.TestCase):
         announcement = self.announcement()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "dates.json"
-            path.write_text(json.dumps({
-                announcement.uid: {
-                    "sha256": "legacy",
-                    "deadlines": [{
-                        "title": "Reflection",
-                        "due_date": "2026-09-20",
-                        "due_time": None,
-                        "kind": "assignment",
-                        "source_evidence": "Reflection due September 20",
-                    }],
-                    "source": {
-                        key: value.isoformat() if isinstance(value, datetime) else value
-                        for key, value in asdict(announcement).items()
-                    },
-                }
-            }))
-            ai = Mock()
-            ai.extract_major_deadlines.side_effect = AssertionError(
-                "Gemini must not be called"
+            path.write_text(
+                json.dumps(
+                    {
+                        announcement.uid: {
+                            "sha256": "legacy",
+                            "deadlines": [
+                                {
+                                    "title": "Reflection",
+                                    "due_date": "2026-09-20",
+                                    "due_time": None,
+                                    "kind": "assignment",
+                                    "source_evidence": "Reflection due September 20",
+                                }
+                            ],
+                            "source": {
+                                key: value.isoformat() if isinstance(value, datetime) else value
+                                for key, value in asdict(announcement).items()
+                            },
+                        }
+                    }
+                )
             )
+            ai = Mock()
+            ai.extract_major_deadlines.side_effect = AssertionError("Gemini must not be called")
             report = AnnouncementDatesSync(ai, index_path=path).sync((announcement,))
 
         self.assertEqual(report.cached, 1)

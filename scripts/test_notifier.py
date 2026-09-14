@@ -32,9 +32,7 @@ def main() -> int:
         print(f"Notifier test setup failed: {error}", file=sys.stderr)
         return 1
 
-    assignment = next(
-        (item for item in snapshot.items if item.source == "assignment"), None
-    )
+    assignment = next((item for item in snapshot.items if item.source == "assignment"), None)
     announcement = snapshot.announcements[0] if snapshot.announcements else None
 
     if assignment is None:
@@ -56,9 +54,7 @@ def main() -> int:
         notifier.send_assignment_alert(assignment, force=True)
         print(f"Sent assignment test: {assignment.course_name} — {assignment.title}")
         notifier.send_announcement_alert(announcement, force=True)
-        print(
-            f"Sent announcement test: {announcement.course_name} — {announcement.title}"
-        )
+        print(f"Sent announcement test: {announcement.course_name} — {announcement.title}")
     except DiscordNotificationError as error:
         print(f"Discord test failed: {error}", file=sys.stderr)
         return 1

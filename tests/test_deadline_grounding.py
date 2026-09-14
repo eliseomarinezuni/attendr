@@ -40,9 +40,7 @@ def item(
     ],
 )
 def test_grounded_supported_formats_are_accepted(source, deadline):
-    assert ground_deadline(
-        source, deadline, reference_date=date(2026, 9, 5)
-    ).accepted
+    assert ground_deadline(source, deadline, reference_date=date(2026, 9, 5)).accepted
 
 
 def test_fabricated_evidence_is_rejected():
@@ -160,9 +158,7 @@ def test_exam_row_ignores_unrelated_dates_immediately_before_and_after():
     source = "Reading | Sep 24\nMidterm Exam | Sep 25\nProject | Sep 26"
     deadline = item("2026-09-25", evidence="Midterm Exam | Sep 25")
 
-    assert ground_deadline(
-        source, deadline, reference_date=date(2026, 9, 5)
-    ).accepted
+    assert ground_deadline(source, deadline, reference_date=date(2026, 9, 5)).accepted
 
 
 def test_multiple_dates_in_same_logical_row_are_rejected():

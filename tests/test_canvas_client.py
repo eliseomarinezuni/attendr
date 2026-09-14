@@ -213,7 +213,7 @@ class CanvasClientTests(unittest.TestCase):
             files=[
                 FakeFile(
                     id=11,
-                    display_name="CSCI_3101U_F26_Syllabus.pdf",
+                    display_name="EXMP_5050_F26_Syllabus.pdf",
                     content_type="application/pdf",
                     size=len(pdf),
                     content=pdf,
@@ -246,7 +246,7 @@ class CanvasClientTests(unittest.TestCase):
             self.assertTrue(all(item.local_path.is_file() for item in report.materials))
             titles = {item.title for item in report.materials}
             self.assertIn("Canvas syllabus page", titles)
-            self.assertIn("CSCI_3101U_F26_Syllabus.pdf", titles)
+            self.assertIn("EXMP_5050_F26_Syllabus.pdf", titles)
             self.assertIn("CSC 3000.pdf", titles)
             self.assertNotIn("Lecture 1.pdf", titles)
             self.assertEqual(
@@ -274,7 +274,9 @@ class CanvasClientTests(unittest.TestCase):
             direct_files={"44": linked},
         )
         with tempfile.TemporaryDirectory() as directory:
-            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(directory)
+            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(
+                directory
+            )
         self.assertEqual(len(report.materials), 2)
         self.assertTrue(any(item.source_id == "44" for item in report.materials))
 
@@ -305,7 +307,9 @@ class CanvasClientTests(unittest.TestCase):
             ],
         )
         with tempfile.TemporaryDirectory() as directory:
-            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(directory)
+            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(
+                directory
+            )
         self.assertEqual(len(report.materials), 1)
         self.assertEqual(report.materials[0].title, "document.pdf")
 
@@ -321,7 +325,9 @@ class CanvasClientTests(unittest.TestCase):
             page_summaries=[SimpleNamespace(url="home", title="Home")],
         )
         with tempfile.TemporaryDirectory() as directory:
-            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(directory)
+            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(
+                directory
+            )
         self.assertEqual(len(report.materials), 1)
         self.assertEqual(report.materials[0].content_type, "text/html")
 
@@ -331,7 +337,9 @@ class CanvasClientTests(unittest.TestCase):
             page_error=CanvasException("blocked"),
         )
         with tempfile.TemporaryDirectory() as directory:
-            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(directory)
+            report = self.make_client(FakeCanvas([active_course])).download_syllabus_materials(
+                directory
+            )
         self.assertEqual(report.materials, ())
         self.assertEqual(len(report.warnings), 2)
         self.assertEqual(report.incomplete_course_ids, (1,))
@@ -412,9 +420,9 @@ class CanvasClientTests(unittest.TestCase):
             announcement_error=CanvasException("announcements disabled"),
         )
 
-        announcements = self.make_client(
-            FakeCanvas([included, excluded])
-        ).get_recent_announcements(course_ids={1})
+        announcements = self.make_client(FakeCanvas([included, excluded])).get_recent_announcements(
+            course_ids={1}
+        )
 
         self.assertEqual(announcements, ())
 
@@ -470,7 +478,9 @@ class CanvasClientTests(unittest.TestCase):
         )
         active_course = course(files=[lecture_file, lab_file], modules=[module])
         with tempfile.TemporaryDirectory() as directory:
-            report = self.make_client(FakeCanvas([active_course])).download_lecture_materials(directory)
+            report = self.make_client(FakeCanvas([active_course])).download_lecture_materials(
+                directory
+            )
         self.assertEqual([item.title for item in report.materials], ["Lecture 1"])
         self.assertEqual(report.materials[0].module_name, "Week 1")
 
@@ -503,7 +513,9 @@ class CanvasClientTests(unittest.TestCase):
         )
         active_course = course(files=[introduction], modules=[module])
         with tempfile.TemporaryDirectory() as directory:
-            report = self.make_client(FakeCanvas([active_course])).download_lecture_materials(directory)
+            report = self.make_client(FakeCanvas([active_course])).download_lecture_materials(
+                directory
+            )
         self.assertEqual([item.title for item in report.materials], ["Introduction_canvas.pptx"])
         self.assertEqual(report.materials[0].module_name, "Introduction")
 
@@ -522,17 +534,21 @@ class CanvasClientTests(unittest.TestCase):
             name="Geometric Transformations",
             position=5,
             locked_for_user=False,
-            items=[{
-                "id": 501,
-                "type": "File",
-                "content_id": 31,
-                "title": "Coordinate Systems",
-                "position": 2,
-            }],
+            items=[
+                {
+                    "id": 501,
+                    "type": "File",
+                    "content_id": 31,
+                    "title": "Coordinate Systems",
+                    "position": 2,
+                }
+            ],
         )
         active_course = course(files=[material], modules=[module])
         with tempfile.TemporaryDirectory() as directory:
-            report = self.make_client(FakeCanvas([active_course])).download_lecture_materials(directory)
+            report = self.make_client(FakeCanvas([active_course])).download_lecture_materials(
+                directory
+            )
         self.assertEqual([item.title for item in report.materials], ["Coordinate Systems"])
         self.assertEqual(report.materials[0].module_id, "401")
         self.assertEqual(report.materials[0].item_id, "501")
@@ -552,11 +568,15 @@ class CanvasClientTests(unittest.TestCase):
             name="Resources",
             position=1,
             locked_for_user=False,
-            items=[{"id": 502, "type": "File", "content_id": 32, "title": "Reference", "position": 1}],
+            items=[
+                {"id": 502, "type": "File", "content_id": 32, "title": "Reference", "position": 1}
+            ],
         )
         active_course = course(files=[material], modules=[module])
         with tempfile.TemporaryDirectory() as directory:
-            report = self.make_client(FakeCanvas([active_course])).download_lecture_materials(directory)
+            report = self.make_client(FakeCanvas([active_course])).download_lecture_materials(
+                directory
+            )
         self.assertEqual(report.materials, ())
 
     def test_upcoming_window_includes_boundaries_and_excludes_invalid_dates(self):
@@ -572,10 +592,7 @@ class CanvasClientTests(unittest.TestCase):
 
         self.assertEqual([item.source_id for item in snapshot.items], ["1", "2"])
         self.assertTrue(
-            any(
-                "Skipped undated assignment" in warning
-                for warning in snapshot.warnings
-            )
+            any("Skipped undated assignment" in warning for warning in snapshot.warnings)
         )
 
     def test_all_day_event_uses_local_midnight(self):
@@ -625,9 +642,7 @@ class CanvasClientTests(unittest.TestCase):
     def test_announcement_uses_created_timestamp_when_posted_timestamp_is_null(self):
         item = announcement(1, "Delayed announcement", None)
         item.created_at = "2026-09-03T12:00:00Z"
-        snapshot = self.make_client(
-            FakeCanvas([course(announcements=[item])])
-        ).fetch_snapshot()
+        snapshot = self.make_client(FakeCanvas([course(announcements=[item])])).fetch_snapshot()
 
         self.assertTrue(snapshot.complete)
         self.assertEqual(
@@ -680,9 +695,7 @@ class CanvasClientTests(unittest.TestCase):
 
     def test_invalid_token_becomes_actionable_authentication_error(self):
         fake = FakeCanvas([], user_error=InvalidAccessToken("bad token"))
-        with self.assertRaisesRegex(
-            CanvasAuthenticationError, "rejected the API token"
-        ):
+        with self.assertRaisesRegex(CanvasAuthenticationError, "rejected the API token"):
             self.make_client(fake).validate_credentials()
 
     def test_invalid_configuration_fails_before_any_request(self):

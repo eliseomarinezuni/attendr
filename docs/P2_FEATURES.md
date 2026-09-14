@@ -1,6 +1,6 @@
 # P2 features
 
-Configure `data/preferences.json`, or set `ATTENDR_PREFERENCES_FILE` to a private JSON file. Invalid or explicitly missing configuration fails validation before the pipeline runs. The shipped defaults preserve the existing study windows, mute nothing, and enable up to three review questions per local day.
+Copy `data/preferences.example.json` to the ignored `data/preferences.json`, or set `ATTENDR_PREFERENCES_FILE` to another private JSON file. Invalid or explicitly missing configuration fails validation before the pipeline runs. The public example contains synthetic availability and no personal course priorities.
 
 ## Study preferences
 

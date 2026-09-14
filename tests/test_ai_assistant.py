@@ -235,13 +235,15 @@ class AIAssistantTests(unittest.TestCase):
         assistant = AIAssistant("test-key", client=fake)
         result = assistant.generate_hybrid_quiz("Lecture content")
         payload = hybrid_quiz_discord_payload("Algorithms", result)
-        self.assertEqual([item["question_type"] for item in result], [
-            "multiple_choice", "multiple_choice", "short_answer"
-        ])
+        self.assertEqual(
+            [item["question_type"] for item in result],
+            ["multiple_choice", "multiple_choice", "short_answer"],
+        )
         self.assertEqual(len(payload["embeds"]), 3)
 
     def test_powerpoint_text_extraction(self):
         from pptx import Presentation
+
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "lecture.pptx"
             deck = Presentation()
@@ -251,6 +253,7 @@ class AIAssistantTests(unittest.TestCase):
             deck.save(path)
             chunks = extract_powerpoint_text_chunks(path)
         self.assertIn("Binary Search Trees", chunks[0].text)
+
     def test_generate_quiz_uses_structured_schema_and_returns_exact_count(self):
         fake = FakeClient([json.dumps([question(1), question(2), question(3)])])
         assistant = AIAssistant("test-key", client=fake)
@@ -266,9 +269,7 @@ class AIAssistantTests(unittest.TestCase):
         self.assertNotIn("test-key", call["contents"])
 
     def test_aq_key_uses_interactions_structured_output(self):
-        fake = FakeClient(
-            [json.dumps({"results": [question(1), question(2), question(3)]})]
-        )
+        fake = FakeClient([json.dumps({"results": [question(1), question(2), question(3)]})])
         assistant = AIAssistant("AQ.test-key", client=fake)
 
         result = assistant.generate_quiz("Binary Search Trees", 3)
@@ -289,9 +290,7 @@ class AIAssistantTests(unittest.TestCase):
             output_text=None,
             outputs=[
                 SimpleNamespace(
-                    text=json.dumps(
-                        {"results": [question(1), question(2), question(3)]}
-                    )
+                    text=json.dumps({"results": [question(1), question(2), question(3)]})
                 )
             ],
         )
@@ -385,18 +384,23 @@ class AIAssistantTests(unittest.TestCase):
         self.assertIn("Do not return the other section's date", prompt)
 
     def test_deadline_extraction_sends_only_structurally_relevant_context(self):
-        response = [{
-            "title": "Quiz 1",
-            "due_date": "2026-10-09",
-            "due_time": None,
-            "kind": "quiz",
-            "source_evidence": "Quiz 1: October 8 & 9, 2026",
-        }]
+        response = [
+            {
+                "title": "Quiz 1",
+                "due_date": "2026-10-09",
+                "due_time": None,
+                "kind": "quiz",
+                "source_evidence": "Quiz 1: October 8 & 9, 2026",
+            }
+        ]
         fake = FakeClient([json.dumps(response)])
         assistant = AIAssistant("test-key", client=fake, max_input_chars=2_000)
         source = "\n".join(
-            [*(f"Policy section {index} " + "x" * 100 for index in range(200)),
-             "Assessment Schedule:", "Quiz 1: October 8 & 9, 2026"]
+            [
+                *(f"Policy section {index} " + "x" * 100 for index in range(200)),
+                "Assessment Schedule:",
+                "Quiz 1: October 8 & 9, 2026",
+            ]
         )
 
         assistant.extract_major_deadlines(
@@ -464,13 +468,9 @@ class AIAssistantTests(unittest.TestCase):
         fake_reader = SimpleNamespace(is_encrypted=False, pages=pages)
         with (
             tempfile.NamedTemporaryFile(suffix=".pdf") as pdf_file,
-            patch(
-                "academic_assistant.ai_assistant.PdfReader", return_value=fake_reader
-            ),
+            patch("academic_assistant.ai_assistant.PdfReader", return_value=fake_reader),
         ):
-            chunks = extract_pdf_text_chunks(
-                pdf_file.name, max_chars=1_000, overlap_chars=100
-            )
+            chunks = extract_pdf_text_chunks(pdf_file.name, max_chars=1_000, overlap_chars=100)
 
         self.assertEqual(len(chunks), 2)
         self.assertEqual(chunks[0].page_start, 1)

@@ -38,9 +38,7 @@ UTC = timezone.utc
 AI_EXTRACTION_VERSION = AI_TASKS["deadline_extraction"].prompt_version
 CACHE_FORMAT_VERSION = 1
 LEGACY_COMBINED_VERSION_MAX = 4
-DOCX_CONTENT_TYPE = (
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-)
+DOCX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
 
 class MaterialsConfigurationError(ValueError):
@@ -118,8 +116,7 @@ class _HTMLTextExtractor(HTMLParser):
 
     def text(self) -> str:
         return "\n".join(
-            line for raw in "".join(self.parts).splitlines()
-            if (line := " ".join(raw.split()))
+            line for raw in "".join(self.parts).splitlines() if (line := " ".join(raw.split()))
         )
 
 
@@ -143,9 +140,7 @@ class CourseMaterialsSync:
         if max_file_bytes < 1:
             raise MaterialsConfigurationError("Material size limit must be positive.")
         if future_days < 1:
-            raise MaterialsConfigurationError(
-                "Material future window must be positive."
-            )
+            raise MaterialsConfigurationError("Material future window must be positive.")
         try:
             self.timezone = ZoneInfo(app_timezone)
         except ZoneInfoNotFoundError as error:
@@ -185,7 +180,9 @@ class CourseMaterialsSync:
         return cls(
             canvas,
             AIAssistant.from_env(env_file),
-            state_store=StateStore(cls._resolve_path(os.getenv("ATTENDR_DB", "data/attendr.db"), base_directory)),
+            state_store=StateStore(
+                cls._resolve_path(os.getenv("ATTENDR_DB", "data/attendr.db"), base_directory)
+            ),
             materials_directory=materials_directory,
             index_path=index_path,
             app_timezone=os.getenv("APP_TIMEZONE", "America/Toronto"),
@@ -228,9 +225,19 @@ class CourseMaterialsSync:
                 if self.course_schedule
                 else None
             )
-            context_hash = sha256(str((model,
-                self.course_schedule.context_for_course(material.course_name) if self.course_schedule else None,
-                self.timezone.key, AI_EXTRACTION_VERSION, GROUNDING_VERSION)).encode()).hexdigest()
+            context_hash = sha256(
+                str(
+                    (
+                        model,
+                        self.course_schedule.context_for_course(material.course_name)
+                        if self.course_schedule
+                        else None,
+                        self.timezone.key,
+                        AI_EXTRACTION_VERSION,
+                        GROUNDING_VERSION,
+                    )
+                ).encode()
+            ).hexdigest()
             cached = index.sources.get(material.uid)
             source_text: str | None = source_text_by_hash.get(material.content_sha256)
             if source_text is None:
@@ -286,7 +293,10 @@ class CourseMaterialsSync:
                     deadlines = cached.deadlines
                 else:
                     deadlines = self._ground_deadlines(
-                        source_text, cached.deadlines, material, local_today,
+                        source_text,
+                        cached.deadlines,
+                        material,
+                        local_today,
                         warnings,
                     )
                 reused += 1
@@ -354,11 +364,12 @@ class CourseMaterialsSync:
                         current_date=local_today,
                         schedule_context=schedule_context,
                     )
-                    validated = [
-                        MajorDeadline.model_validate(item) for item in raw_deadlines
-                    ]
+                    validated = [MajorDeadline.model_validate(item) for item in raw_deadlines]
                     deadlines = self._ground_deadlines(
-                        source_text, validated, material, local_today,
+                        source_text,
+                        validated,
+                        material,
+                        local_today,
                         warnings,
                     )
                 except (
@@ -403,7 +414,11 @@ class CourseMaterialsSync:
                 extracted.append((material, deadline))
 
         found = {material.uid for material in downloads.materials}
-        active_courses = active_course_ids if active_course_ids is not None else {value.course_id for value in index.sources.values()}
+        active_courses = (
+            active_course_ids
+            if active_course_ids is not None
+            else {value.course_id for value in index.sources.values()}
+        )
         material_courses = {material.course_id for material in downloads.materials}
         for uid, previous in list(index.sources.items()):
             if uid not in found and previous.course_id in active_courses:
@@ -425,10 +440,18 @@ class CourseMaterialsSync:
                     f"Previously indexed syllabus temporarily unavailable: "
                     f"{previous.course_name} — {previous.title}; cached deadlines retained."
                 )
-                fallback = SyllabusMaterial(uid=uid, source_id=uid, course_id=previous.course_id,
-                    course_name=previous.course_name, title=previous.title, content_type="text/html",
-                    local_path=self.materials_directory, content_sha256=previous.content_sha256,
-                    updated_at=None, html_url=None)
+                fallback = SyllabusMaterial(
+                    uid=uid,
+                    source_id=uid,
+                    course_id=previous.course_id,
+                    course_name=previous.course_name,
+                    title=previous.title,
+                    content_type="text/html",
+                    local_path=self.materials_directory,
+                    content_sha256=previous.content_sha256,
+                    updated_at=None,
+                    html_url=None,
+                )
                 if (
                     previous.extraction_version == AI_EXTRACTION_VERSION
                     and previous.grounding_version == GROUNDING_VERSION
@@ -445,9 +468,7 @@ class CourseMaterialsSync:
         if changed:
             self._save_index(index)
 
-        items = self._normalize_deadlines(
-            extracted, local_today, warnings, blocking_warnings
-        )
+        items = self._normalize_deadlines(extracted, local_today, warnings, blocking_warnings)
         uncovered_courses = {
             course_id
             for course_id in incomplete_downloads
@@ -455,8 +476,7 @@ class CourseMaterialsSync:
         }
         for course_id in sorted(uncovered_courses):
             warning = (
-                f"No verified syllabus source or cache is available for active course "
-                f"{course_id}."
+                f"No verified syllabus source or cache is available for active course {course_id}."
             )
             warnings.append(warning)
             blocking_warnings.append(warning)
@@ -464,9 +484,7 @@ class CourseMaterialsSync:
         # remove or replace a valid event because trusted source data is missing
         # or contradictory? Ordinary warnings do not affect this decision.
         complete = not (
-            (blocking_courses & active_courses)
-            or uncovered_courses
-            or blocking_warnings
+            (blocking_courses & active_courses) or uncovered_courses or blocking_warnings
         )
         return MaterialsSyncReport(
             materials_found=len(downloads.materials),
@@ -488,9 +506,7 @@ class CourseMaterialsSync:
     ) -> list[MajorDeadline]:
         grounded: list[MajorDeadline] = []
         for deadline in deadlines:
-            result = ground_deadline(
-                source_text, deadline, reference_date=reference_date
-            )
+            result = ground_deadline(source_text, deadline, reference_date=reference_date)
             if result.accepted:
                 grounded.append(deadline)
             else:
@@ -511,17 +527,13 @@ class CourseMaterialsSync:
         try:
             raw = material.local_path.read_text(encoding="utf-8")
         except OSError as error:
-            raise AIInputError(
-                f"Could not read downloaded material: {material.title}"
-            ) from error
+            raise AIInputError(f"Could not read downloaded material: {material.title}") from error
         parser = _HTMLTextExtractor()
         parser.feed(raw)
         parser.close()
         text = parser.text()
         if not text:
-            raise AIInputError(
-                f"Downloaded material contains no text: {material.title}"
-            )
+            raise AIInputError(f"Downloaded material contains no text: {material.title}")
         return text
 
     @staticmethod
@@ -534,9 +546,7 @@ class CourseMaterialsSync:
             ) from error
         blocks: list[str] = []
         blocks.extend(
-            text
-            for paragraph in document.paragraphs
-            if (text := " ".join(paragraph.text.split()))
+            text for paragraph in document.paragraphs if (text := " ".join(paragraph.text.split()))
         )
         for table_number, table in enumerate(document.tables, start=1):
             blocks.append(f"[Table {table_number}]")
@@ -554,9 +564,7 @@ class CourseMaterialsSync:
                 )
         text = "\n".join(blocks).strip()
         if not text:
-            raise AIInputError(
-                f"Downloaded Word syllabus contains no text: {material.title}"
-            )
+            raise AIInputError(f"Downloaded Word syllabus contains no text: {material.title}")
         return text
 
     def _normalize_deadlines(
@@ -596,9 +604,7 @@ class CourseMaterialsSync:
             deadline_date = date.fromisoformat(deadline.due_date)
             effective_date = deadline_date
             lecture = (
-                self.course_schedule.lecture_for_course_on(
-                    material.course_name, deadline_date
-                )
+                self.course_schedule.lecture_for_course_on(material.course_name, deadline_date)
                 if self.course_schedule and deadline.kind == "exam"
                 else None
             )
@@ -608,9 +614,7 @@ class CourseMaterialsSync:
                 parsed_time = lecture.start
             else:
                 parsed_time = time.min
-            due_local = datetime.combine(
-                effective_date, parsed_time, tzinfo=self.timezone
-            )
+            due_local = datetime.combine(effective_date, parsed_time, tzinfo=self.timezone)
             all_day = deadline.due_time is None and lecture is None
             duration = timedelta(hours=2 if deadline.kind == "exam" else 1)
             end_local = (
@@ -619,9 +623,7 @@ class CourseMaterialsSync:
                 else due_local + duration
             )
             normalized_kind = (
-                deadline.kind
-                if deadline.kind in {"exam", "quiz", "assignment"}
-                else "assignment"
+                deadline.kind if deadline.kind in {"exam", "quiz", "assignment"} else "assignment"
             )
             items.append(
                 AcademicItem(
@@ -641,8 +643,7 @@ class CourseMaterialsSync:
                     points_possible=None,
                     submission_types=(),
                     description_html=(
-                        f"Extracted from {material.title}. "
-                        f"Evidence: {deadline.source_evidence}"
+                        f"Extracted from {material.title}. Evidence: {deadline.source_evidence}"
                     ),
                 )
             )
@@ -656,9 +657,7 @@ class CourseMaterialsSync:
         if not self.index_path.exists():
             return MaterialsIndex()
         try:
-            return MaterialsIndex.model_validate_json(
-                self.index_path.read_text(encoding="utf-8")
-            )
+            return MaterialsIndex.model_validate_json(self.index_path.read_text(encoding="utf-8"))
         except (OSError, ValidationError) as error:
             raise MaterialsStateError(
                 f"Material extraction cache is invalid: {self.index_path}"
@@ -691,9 +690,7 @@ class CourseMaterialsSync:
     def _now_local(self) -> datetime:
         current = self._now_provider()
         if not isinstance(current, datetime) or current.tzinfo is None:
-            raise MaterialsConfigurationError(
-                "now_provider must return a timezone-aware datetime."
-            )
+            raise MaterialsConfigurationError("now_provider must return a timezone-aware datetime.")
         return current.astimezone(self.timezone)
 
     def _extraction_method(self) -> Literal["gemini", "deterministic", "hybrid"]:
@@ -702,7 +699,11 @@ class CourseMaterialsSync:
 
     def _task_model(self) -> str:
         method = getattr(self.ai, "model_for_task", None)
-        value = method("deadline_extraction") if callable(method) else getattr(self.ai, "model", "injected")
+        value = (
+            method("deadline_extraction")
+            if callable(method)
+            else getattr(self.ai, "model", "injected")
+        )
         return value if isinstance(value, str) else "injected"
 
     @staticmethod

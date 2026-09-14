@@ -97,9 +97,7 @@ class GoogleCalendarAuthenticator:
         self.scopes = tuple(scopes)
         self.interactive = interactive
         if not self.scopes:
-            raise CalendarConfigurationError(
-                "At least one Google OAuth scope is required."
-            )
+            raise CalendarConfigurationError("At least one Google OAuth scope is required.")
 
     def authenticate(self) -> Credentials:
         """Return valid credentials and securely persist refreshed credentials."""
@@ -198,8 +196,7 @@ class GoogleCalendarAuthenticator:
                 ) from None
             if status == 429 or status >= 500:
                 raise CalendarAuthenticationError(
-                    "Google Calendar authentication check is temporarily unavailable; "
-                    "retry later."
+                    "Google Calendar authentication check is temporarily unavailable; retry later."
                 ) from None
             raise CalendarAuthenticationError(
                 "Google Calendar authentication check failed safely."
@@ -207,8 +204,7 @@ class GoogleCalendarAuthenticator:
         except (GoogleAuthError, httplib2.HttpLib2Error, OSError) as error:
             if isinstance(error, (TransportError, httplib2.HttpLib2Error, OSError)):
                 raise CalendarAuthenticationError(
-                    "Google Calendar authentication check is temporarily unavailable; "
-                    "retry later."
+                    "Google Calendar authentication check is temporarily unavailable; retry later."
                 ) from None
             raise CalendarAuthenticationError(
                 "Google Calendar authentication check failed safely."
@@ -313,27 +309,21 @@ class GoogleCalendarSync:
         credentials_path = cls._resolve_path(
             os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json"), base_directory
         )
-        token_path = cls._resolve_path(
-            os.getenv("GOOGLE_TOKEN_FILE", "token.json"), base_directory
-        )
+        token_path = cls._resolve_path(os.getenv("GOOGLE_TOKEN_FILE", "token.json"), base_directory)
         if service is None:
-            service = GoogleCalendarAuthenticator(
-                credentials_path, token_path
-            ).build_service()
+            service = GoogleCalendarAuthenticator(credentials_path, token_path).build_service()
         return cls(
             service,
-            state_store=StateStore(cls._resolve_path(os.getenv("ATTENDR_DB", "data/attendr.db"), base_directory)),
+            state_store=StateStore(
+                cls._resolve_path(os.getenv("ATTENDR_DB", "data/attendr.db"), base_directory)
+            ),
             calendar_id=os.getenv("GOOGLE_CALENDAR_ID") or None,
             calendar_name=os.getenv("GOOGLE_CALENDAR_NAME") or None,
-            create_calendar_if_missing=cls._read_bool(
-                "GOOGLE_CREATE_CALENDAR_IF_MISSING", True
-            ),
+            create_calendar_if_missing=cls._read_bool("GOOGLE_CREATE_CALENDAR_IF_MISSING", True),
             app_timezone=os.getenv("APP_TIMEZONE", "America/Toronto"),
             mark_submitted=cls._read_bool("GOOGLE_MARK_SUBMITTED", True),
             submitted_color_id=os.getenv("GOOGLE_SUBMITTED_COLOR_ID", "10").strip(),
-            event_duration_minutes=cls._read_positive_int(
-                "GOOGLE_EVENT_DURATION_MINUTES", 30
-            ),
+            event_duration_minutes=cls._read_positive_int("GOOGLE_EVENT_DURATION_MINUTES", 30),
         )
 
     @staticmethod
@@ -341,12 +331,22 @@ class GoogleCalendarSync:
         def normalized(body: dict[str, Any]) -> dict[str, Any]:
             result = {key: body.get(key) for key in ("summary", "description", "source", "colorId")}
             result["transparency"] = body.get("transparency", "opaque")
-            result["private"] = {key: value for key, value in body.get("extendedProperties", {}).get("private", {}).items() if key != "attendr_fingerprint"}
+            result["private"] = {
+                key: value
+                for key, value in body.get("extendedProperties", {}).get("private", {}).items()
+                if key != "attendr_fingerprint"
+            }
             for key in ("start", "end"):
                 value = body.get(key, {})
-                result[key] = (datetime.fromisoformat(value["dateTime"].replace("Z", "+00:00")).astimezone(UTC).isoformat()
-                               if value.get("dateTime") else value.get("date"))
+                result[key] = (
+                    datetime.fromisoformat(value["dateTime"].replace("Z", "+00:00"))
+                    .astimezone(UTC)
+                    .isoformat()
+                    if value.get("dateTime")
+                    else value.get("date")
+                )
             return result
+
         return normalized(existing) == normalized(desired)
 
     def sync_items(
@@ -367,11 +367,21 @@ class GoogleCalendarSync:
         for uid in set(delete_uids) - unique_items.keys():
             existing = existing_by_uid.pop(uid, None)
             if existing is None:
-                previous = self.state_store.calendar_record(calendar_id, uid) if self.state_store else None
+                previous = (
+                    self.state_store.calendar_record(calendar_id, uid) if self.state_store else None
+                )
                 if previous and previous["status"] == "pending" and previous["action"] == "deleted":
-                    self.state_store.calendar_confirm(previous, previous["event_id"], notify=self._source_tag == "canvas")
+                    self.state_store.calendar_confirm(
+                        previous, previous["event_id"], notify=self._source_tag == "canvas"
+                    )
                 continue
-            intent = self.state_store.calendar_intent(calendar_id, uid, existing["id"], "deleted", existing, "deleted") if self.state_store else None
+            intent = (
+                self.state_store.calendar_intent(
+                    calendar_id, uid, existing["id"], "deleted", existing, "deleted"
+                )
+                if self.state_store
+                else None
+            )
             if before_write:
                 before_write()
             try:
@@ -386,7 +396,9 @@ class GoogleCalendarSync:
                         f"Could not remove replaced Attendr event {uid}", error
                     ) from None
             if intent:
-                self.state_store.calendar_confirm(intent, existing["id"], notify=self._source_tag == "canvas")
+                self.state_store.calendar_confirm(
+                    intent, existing["id"], notify=self._source_tag == "canvas"
+                )
             entries.append(
                 CalendarSyncEntry(
                     canvas_uid=uid,
@@ -396,46 +408,82 @@ class GoogleCalendarSync:
                     html_link=None,
                 )
             )
-        for item in sorted(
-            unique_items.values(), key=lambda value: (value.due_at, value.uid)
-        ):
+        for item in sorted(unique_items.values(), key=lambda value: (value.due_at, value.uid)):
             desired = desired_by_uid[item.uid]
             fingerprint = self._fingerprint(desired)
-            desired["extendedProperties"]["private"]["attendr_fingerprint"] = (
-                fingerprint
-            )
+            desired["extendedProperties"]["private"]["attendr_fingerprint"] = fingerprint
             existing = existing_by_uid.get(item.uid)
 
-            previous = self.state_store.calendar_record(calendar_id, item.uid) if self.state_store else None
+            previous = (
+                self.state_store.calendar_record(calendar_id, item.uid)
+                if self.state_store
+                else None
+            )
             mapped_deleted = False
             if existing is None and previous and previous["action"] != "deleted":
                 try:
-                    mapped = self._service.events().get(calendarId=calendar_id, eventId=previous["event_id"]).execute()
+                    mapped = (
+                        self._service.events()
+                        .get(calendarId=calendar_id, eventId=previous["event_id"])
+                        .execute()
+                    )
                     if mapped.get("status") == "cancelled":
                         mapped_deleted = True
-                    elif mapped.get("extendedProperties", {}).get("private", {}).get("canvas_uid") != item.uid:
-                        raise CalendarAPIError("Mapped Google event no longer belongs to this Canvas item.")
+                    elif (
+                        mapped.get("extendedProperties", {}).get("private", {}).get("canvas_uid")
+                        != item.uid
+                    ):
+                        raise CalendarAPIError(
+                            "Mapped Google event no longer belongs to this Canvas item."
+                        )
                     else:
                         existing = mapped
                 except HttpError as error:
                     if error.resp.status not in (404, 410):
-                        raise self._api_error("Could not reconcile the mapped Google event", error) from None
-                    mapped_deleted = not (error.resp.status == 404 and previous["status"] == "pending" and previous["action"] == "created")
+                        raise self._api_error(
+                            "Could not reconcile the mapped Google event", error
+                        ) from None
+                    mapped_deleted = not (
+                        error.resp.status == 404
+                        and previous["status"] == "pending"
+                        and previous["action"] == "created"
+                    )
             if existing and self._managed_equal(existing, desired):
                 if self.state_store and previous is None:
-                    adopted = self.state_store.calendar_intent(calendar_id, item.uid, existing["id"], fingerprint, desired, "adopted")
+                    adopted = self.state_store.calendar_intent(
+                        calendar_id, item.uid, existing["id"], fingerprint, desired, "adopted"
+                    )
                     self.state_store.calendar_confirm(adopted, existing["id"], notify=False)
-                if previous and previous["status"] == "pending" and previous["fingerprint"] == fingerprint:
-                    self.state_store.calendar_confirm(previous, existing["id"], notify=self._source_tag == "canvas")
+                if (
+                    previous
+                    and previous["status"] == "pending"
+                    and previous["fingerprint"] == fingerprint
+                ):
+                    self.state_store.calendar_confirm(
+                        previous, existing["id"], notify=self._source_tag == "canvas"
+                    )
                 entries.append(self._entry(item, "skipped", existing))
                 continue
 
             action = "updated" if existing else "created"
-            event_id = existing["id"] if existing else (
-                previous["event_id"] if previous and previous["action"] != "deleted" and not mapped_deleted else
-                sha256(f"attendr:{calendar_id}:{self._source_tag}:{item.uid}:{previous['revision'] + 1 if previous else 1}".encode()).hexdigest()
+            event_id = (
+                existing["id"]
+                if existing
+                else (
+                    previous["event_id"]
+                    if previous and previous["action"] != "deleted" and not mapped_deleted
+                    else sha256(
+                        f"attendr:{calendar_id}:{self._source_tag}:{item.uid}:{previous['revision'] + 1 if previous else 1}".encode()
+                    ).hexdigest()
+                )
             )
-            intent = self.state_store.calendar_intent(calendar_id, item.uid, event_id, fingerprint, desired, action) if self.state_store else None
+            intent = (
+                self.state_store.calendar_intent(
+                    calendar_id, item.uid, event_id, fingerprint, desired, action
+                )
+                if self.state_store
+                else None
+            )
             if before_write:
                 before_write()
             try:
@@ -465,15 +513,23 @@ class GoogleCalendarSync:
                     action = "created"
             except HttpError as error:
                 if not existing and error.resp.status == 409:
-                    result = self._service.events().get(calendarId=calendar_id, eventId=event_id).execute()
+                    result = (
+                        self._service.events()
+                        .get(calendarId=calendar_id, eventId=event_id)
+                        .execute()
+                    )
                     if not self._managed_equal(result, desired):
-                        raise CalendarAPIError("Calendar event ID conflict requires reconciliation.") from None
+                        raise CalendarAPIError(
+                            "Calendar event ID conflict requires reconciliation."
+                        ) from None
                 else:
                     raise self._api_error(
                         f"Could not sync {item.course_name} — {item.title}", error
                     ) from None
             if intent:
-                self.state_store.calendar_confirm(intent, result["id"], notify=self._source_tag == "canvas")
+                self.state_store.calendar_confirm(
+                    intent, result["id"], notify=self._source_tag == "canvas"
+                )
 
             entries.append(self._entry(item, action, result))
 
@@ -481,7 +537,13 @@ class GoogleCalendarSync:
             for uid, event in existing_by_uid.items():
                 if uid in unique_items:
                     continue
-                intent = self.state_store.calendar_intent(calendar_id, uid, event["id"], "deleted", event, "deleted") if self.state_store else None
+                intent = (
+                    self.state_store.calendar_intent(
+                        calendar_id, uid, event["id"], "deleted", event, "deleted"
+                    )
+                    if self.state_store
+                    else None
+                )
                 if before_write:
                     before_write()
                 try:
@@ -495,7 +557,9 @@ class GoogleCalendarSync:
                         f"Could not remove obsolete Attendr event {uid}", error
                     ) from None
                 if intent:
-                    self.state_store.calendar_confirm(intent, event["id"], notify=self._source_tag == "canvas")
+                    self.state_store.calendar_confirm(
+                        intent, event["id"], notify=self._source_tag == "canvas"
+                    )
                 entries.append(
                     CalendarSyncEntry(
                         canvas_uid=uid,
@@ -542,9 +606,7 @@ class GoogleCalendarSync:
                 if not page_token:
                     break
         except HttpError as error:
-            raise self._api_error(
-                "Could not list writable Google calendars", error
-            ) from None
+            raise self._api_error("Could not list writable Google calendars", error) from None
 
         if len(matches) > 1:
             raise CalendarConfigurationError(
@@ -600,16 +662,18 @@ class GoogleCalendarSync:
                     private = event.get("extendedProperties", {}).get("private", {})
                     uid = private.get("canvas_uid")
                     if uid:
-                        if str(uid) in events_by_uid and events_by_uid[str(uid)].get("id") != event.get("id"):
-                            raise CalendarAPIError(f"Duplicate managed Calendar UID requires review: {uid}")
+                        if str(uid) in events_by_uid and events_by_uid[str(uid)].get(
+                            "id"
+                        ) != event.get("id"):
+                            raise CalendarAPIError(
+                                f"Duplicate managed Calendar UID requires review: {uid}"
+                            )
                         events_by_uid[str(uid)] = event
                 page_token = response.get("nextPageToken")
                 if not page_token:
                     return events_by_uid
         except HttpError as error:
-            raise self._api_error(
-                "Could not inspect existing calendar events", error
-            ) from None
+            raise self._api_error("Could not inspect existing calendar events", error) from None
 
     def _event_body(self, item: AcademicItem) -> dict[str, Any]:
         if item.due_at.tzinfo is None or (item.end_at is not None and item.end_at.tzinfo is None):
@@ -628,19 +692,24 @@ class GoogleCalendarSync:
             f"Type: {item.kind.replace('_', ' ').title()}",
             (
                 f"Stated date: {due_local.date().isoformat()} (time not specified)"
-                if item.all_day else f"Due: {due_local.strftime('%Y-%m-%d %H:%M %Z')}"
+                if item.all_day
+                else f"Due: {due_local.strftime('%Y-%m-%d %H:%M %Z')}"
             ),
         ]
         if item.points_possible is not None:
             description_lines.append(f"Points: {item.points_possible:g}")
         if item.submission_state:
             description_lines.append(f"Canvas submission: {item.submission_state}")
-        if item.source in {
-            "syllabus_deadline",
-            "announcement_deadline",
-            "university_schedule",
-            "class_schedule",
-        } and item.description_html:
+        if (
+            item.source
+            in {
+                "syllabus_deadline",
+                "announcement_deadline",
+                "university_schedule",
+                "class_schedule",
+            }
+            and item.description_html
+        ):
             description_lines.append(item.description_html[:800])
         safe_url = self._safe_url(item.html_url)
         if safe_url:
@@ -657,7 +726,10 @@ class GoogleCalendarSync:
         body: dict[str, Any] = {
             "summary": summary,
             "description": "\n".join(description_lines),
-            "transparency": "opaque" if self._source_tag == "study_plan" or item.kind in {"lecture", "lab", "tutorial", "class", "exam"} else "transparent",
+            "transparency": "opaque"
+            if self._source_tag == "study_plan"
+            or item.kind in {"lecture", "lab", "tutorial", "class", "exam"}
+            else "transparent",
             "extendedProperties": {"private": private_properties},
         }
         if safe_url:
@@ -695,11 +767,7 @@ class GoogleCalendarSync:
 
     @staticmethod
     def _existing_fingerprint(event: Mapping[str, Any]) -> str | None:
-        value = (
-            event.get("extendedProperties", {})
-            .get("private", {})
-            .get("attendr_fingerprint")
-        )
+        value = event.get("extendedProperties", {}).get("private", {}).get("attendr_fingerprint")
         return str(value) if value else None
 
     @staticmethod
@@ -754,9 +822,7 @@ class GoogleCalendarSync:
         try:
             value = int(raw)
         except ValueError as error:
-            raise CalendarConfigurationError(
-                f"{name} must be a positive integer."
-            ) from error
+            raise CalendarConfigurationError(f"{name} must be a positive integer.") from error
         if value < 1:
             raise CalendarConfigurationError(f"{name} must be a positive integer.")
         return value

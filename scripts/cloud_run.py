@@ -63,9 +63,7 @@ def main() -> int:
     secret = required("STUDY_SYNC_SECRET")
     key = required("ATTENDR_STATE_KEY")
     if secret == key:
-        raise CloudStateError(
-            "ATTENDR_STATE_KEY must be independent from STUDY_SYNC_SECRET"
-        )
+        raise CloudStateError("ATTENDR_STATE_KEY must be independent from STUDY_SYNC_SECRET")
     token = secrets.token_hex(16)
     headers = {"Authorization": f"Bearer {secret}"}
     response = requests.post(
@@ -82,14 +80,16 @@ def main() -> int:
     heartbeat(url, secret, automation_name, "started")
     try:
         restored = client.download(database)
-        os.environ.update({
-            "ATTENDR_DB": str(database),
-            "ATTENDR_STATE_URL": url,
-            "ATTENDR_STATE_SECRET": secret,
-            "ATTENDR_STATE_KEY": key,
-            "ATTENDR_STATE_LEASE": token,
-            "ATTENDR_STATE_REVISION": str(client.revision),
-        })
+        os.environ.update(
+            {
+                "ATTENDR_DB": str(database),
+                "ATTENDR_STATE_URL": url,
+                "ATTENDR_STATE_SECRET": secret,
+                "ATTENDR_STATE_KEY": key,
+                "ATTENDR_STATE_LEASE": token,
+                "ATTENDR_STATE_REVISION": str(client.revision),
+            }
+        )
         if not restored:
             print("Initializing the first encrypted state checkpoint")
         result = subprocess.call([sys.executable, str(ROOT / "main.py"), *sys.argv[1:]], cwd=ROOT)
@@ -107,7 +107,10 @@ def main() -> int:
                 timeout=30,
             ).raise_for_status()
         except requests.RequestException as error:
-            print(f"State lease release failed; it will expire automatically: {error}", file=sys.stderr)
+            print(
+                f"State lease release failed; it will expire automatically: {error}",
+                file=sys.stderr,
+            )
 
 
 if __name__ == "__main__":

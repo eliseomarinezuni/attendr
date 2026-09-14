@@ -1,6 +1,8 @@
 # Attendr
 
-Read-only Canvas ingestion, automatic syllabus/announcement date extraction, Google Calendar sync, Discord alerts, and post-lecture Gemini quizzes from Canvas PDFs, PowerPoints, and Pages. Python 3.11.
+Attendr is a self-hosted personal academic assistant with read-only Canvas ingestion, automatic syllabus/announcement date extraction, Google Calendar sync, Discord alerts, and post-lecture Gemini quizzes from Canvas PDFs, PowerPoints, and Pages. It is not a hosted service. Each deployer supplies their own credentials and is responsible for protecting the academic data Attendr processes. Python 3.11.
+
+Before accepting public contributions or deploying a fork, read the [public repository security model](docs/PUBLIC_RELEASE.md). Security issues should be reported through [GitHub's private vulnerability reporting](SECURITY.md), not a public issue.
 
 ## Run
 
@@ -8,7 +10,10 @@ Read-only Canvas ingestion, automatic syllabus/announcement date extraction, Goo
 python3.11 -m venv .venv
 .venv/bin/python -m pip install -r requirements.lock
 cp .env.example .env
-# Fill in .env and download Desktop OAuth credentials first.
+# Copy the example schedule/preferences to ignored private files, customize them,
+# update their paths in .env, and download Desktop OAuth credentials first.
+cp data/course_schedule.example.json data/course_schedule.json
+cp data/preferences.example.json data/preferences.json
 .venv/bin/python scripts/setup_google.py
 .venv/bin/python scripts/setup_google.py --check
 .venv/bin/python main.py
@@ -28,9 +33,9 @@ Useful modes:
 .venv/bin/python main.py --quiz-only --quiz-pdf data/materials/lecture.pdf
 ```
 
-The default run sends unseen announcements, extracts dated items from syllabuses and all recent announcements, syncs deadlines plus Example University academic dates and every lecture/lab/tutorial in the verified timetable, sends a configurable digest (72 hours by default), and retries any post-lecture quiz waiting for slides. Canvas assignments override announcements; newest announcements override syllabuses. A date without a stated time remains an all-day event on its stated date. Academic date ranges use an exclusive next-day end. The exception is a same-course midterm or exam on an unambiguous lecture date: when the source omits the time, Attendr uses that lecture slot. Explicit exam times are preserved when replacing a lecture occurrence.
+The default run sends unseen announcements, extracts dated items from syllabuses and all recent announcements, syncs deadlines plus configured institution dates and every lecture/lab/tutorial in the private timetable, sends a configurable digest (72 hours by default), and retries any post-lecture quiz waiting for slides. Canvas assignments override announcements; newest announcements override syllabuses. A date without a stated time remains an all-day event on its stated date. Academic date ranges use an exclusive next-day end. The exception is a same-course midterm or exam on an unambiguous lecture date: when the source omits the time, Attendr uses that lecture slot. Explicit exam times are preserved when replacing a lecture occurrence.
 
-`--lecture-quizzes` scans every published Canvas Module for the lecture that just ended. It reads PDF, PowerPoint (`.pptx`), Canvas Page content, and readable Google Slides links regardless of filenames; labs/tutorials never produce quizzes. It matches explicit date/lecture labels first, then stable Canvas IDs and ordered topic modules. Multiple items in one module are combined. Each quiz contains two conceptual multiple-choice questions and one short-answer active-recall question. The verified Fall 2026 timetable and no-class dates are in `data/course_schedule.json`.
+`--lecture-quizzes` scans every published Canvas Module for the lecture that just ended. It reads PDF, PowerPoint (`.pptx`), Canvas Page content, and readable Google Slides links regardless of filenames; labs/tutorials never produce quizzes. It matches explicit date/lecture labels first, then stable Canvas IDs and ordered topic modules. Multiple items in one module are combined. Each quiz contains two conceptual multiple-choice questions and one short-answer active-recall question. The owner's ignored timetable and no-class dates are configured through `COURSE_SCHEDULE_FILE`; a synthetic template is provided in `data/course_schedule.example.json`.
 
 Large lecture files up to `LECTURE_MAX_FILE_MB=768` are streamed to temporary disk with a five-minute download budget and bounded retries. PowerPoint extraction reads slide/table/notes XML without loading embedded video or images. Extracted large-file text is cached by Canvas file ID, update time, and size in the encrypted SQLite checkpoint, so fresh GitHub runners reuse it. Raw large files are deleted after extraction. A changed Canvas revision triggers re-extraction.
 
@@ -101,7 +106,7 @@ Scheduled sync and lecture-quiz workflows run on GitHub-hosted Linux runners, so
 
 The main cron runs at minute 17 to avoid top-of-hour GitHub congestion. Each hosted run records an authenticated heartbeat in D1. The Worker's five-minute cron dispatches a recovery run when the academic heartbeat is more than 150 minutes old during the 8:00 AM–10:00 PM Toronto window. Configure a fine-grained GitHub token with Actions write access as the Worker secret `GITHUB_ACTIONS_TOKEN`; repository, workflow, and ref are non-secret Wrangler variables.
 
-The workflows reconstruct `.env`, Google OAuth files, and the database from repository secrets. Required secrets are documented by `scripts/configure_github_secrets.py`; deployment also requires `STUDY_WORKER_URL`, `STUDY_SYNC_SECRET`, and an independent `ATTENDR_STATE_KEY`. Missing or revoked credentials fail promptly, and scheduled runs never launch interactive OAuth.
+The workflows reconstruct `.env`, Google OAuth files, the private course schedule/preferences, and the database from repository secrets. Required secrets are documented by `scripts/configure_github_secrets.py`; deployment also requires `STUDY_WORKER_URL`, `STUDY_SYNC_SECRET`, and an independent `ATTENDR_STATE_KEY`. Missing or revoked credentials fail promptly, and scheduled runs never launch interactive OAuth. Public pull requests receive none of these integration secrets and run only tests, lint, type checks, dependency audits, and secret scanning.
 
 Calendar authorization is intentionally repaired only on a trusted local machine. Run `.venv/bin/python scripts/setup_google.py`, verify it with `.venv/bin/python scripts/setup_google.py --check`, then replace the `GOOGLE_TOKEN_B64` repository secret with `base64 < token.json | tr -d '\n'`. Never paste that value into an issue or chat. If refresh tokens repeatedly expire, inspect **Google Cloud Console → Google Auth Platform / OAuth consent screen → Publishing status**. OAuth applications left in Testing can receive short-lived refresh tokens; evaluate the appropriate production publishing status for this private app. Publishing does not automatically remove Google's verification requirements.
 
@@ -136,8 +141,8 @@ separate `#ask` channel, select `/ask` and enter one sentence in its **question*
 
 - `for my web development course whens my midterm`
 - `EXMP 3030, explain HTTP requests`
-- `what is due tomorrow in algorithms`
-- `when is my web dev lecture next week`
+- `what is due tomorrow in example algorithms`
+- `when is my example web lecture next week`
 
 There is no structured course option. Names, keys, codes, `match` entries, and optional
 `aliases` from `data/course_schedule.json` identify the course. Unknown or multiple

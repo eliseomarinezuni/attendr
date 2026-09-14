@@ -57,7 +57,14 @@ class Settings(BaseModel):
                 or origin.fragment
             ):
                 raise ValueError("CANVAS_BASE_URL must be an HTTPS origin")
-        if plan.announcements or plan.calendar or plan.digest or plan.quiz or plan.lecture_quizzes or getattr(plan, "review", False):
+        if (
+            plan.announcements
+            or plan.calendar
+            or plan.digest
+            or plan.quiz
+            or plan.lecture_quizzes
+            or getattr(plan, "review", False)
+        ):
             from .notifier import DiscordNotifier
 
             DiscordNotifier._validate_webhook_url(required("DISCORD_WEBHOOK_URL"))
@@ -79,7 +86,9 @@ class Settings(BaseModel):
                 )
             if url:
                 if os.getenv("APP_TIMEZONE", "America/Toronto") != "America/Toronto":
-                    raise ValueError("Online study controls currently require APP_TIMEZONE=America/Toronto")
+                    raise ValueError(
+                        "Online study controls currently require APP_TIMEZONE=America/Toronto"
+                    )
                 parsed = urlparse(url)
                 if (
                     parsed.scheme != "https"

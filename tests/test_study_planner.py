@@ -43,34 +43,48 @@ class StudyPlannerTests(unittest.TestCase):
         due = datetime(2026, 9, 16, 23, 59, tzinfo=UTC)
 
         sessions, warnings = self.planner._build_sessions(
-            (task("assignment-1", "assignment", due),), [], set(),
+            (task("assignment-1", "assignment", due),),
+            [],
+            set(),
             self.now.astimezone(self.planner.timezone),
         )
 
         self.assertEqual(len(sessions), 3)
         self.assertEqual(warnings, ())
         self.assertEqual(len({item.due_at_local.date() for item in sessions}), 3)
-        self.assertTrue(all((item.end_at - item.due_at) == timedelta(minutes=45) for item in sessions))
+        self.assertTrue(
+            all((item.end_at - item.due_at) == timedelta(minutes=45) for item in sessions)
+        )
 
     def test_exam_sessions_are_longer_and_never_use_thursday(self):
         due = datetime(2026, 9, 28, 18, 0, tzinfo=UTC)
 
         sessions, _ = self.planner._build_sessions(
-            (task("exam-1", "exam", due),), [], set(),
+            (task("exam-1", "exam", due),),
+            [],
+            set(),
             self.now.astimezone(self.planner.timezone),
         )
 
         self.assertEqual(len(sessions), 5)
-        self.assertTrue(all((item.end_at - item.due_at) == timedelta(minutes=60) for item in sessions))
+        self.assertTrue(
+            all((item.end_at - item.due_at) == timedelta(minutes=60) for item in sessions)
+        )
         self.assertFalse(any(item.due_at_local.weekday() == 3 for item in sessions))
 
     def test_existing_calendar_busy_time_moves_session(self):
         due = datetime(2026, 9, 12, 23, 59, tzinfo=UTC)
         blocked_start = datetime(2026, 9, 8, 18, 45, tzinfo=self.planner.timezone)
-        busy = [BusyInterval(blocked_start.astimezone(UTC), (blocked_start + timedelta(hours=2)).astimezone(UTC))]
+        busy = [
+            BusyInterval(
+                blocked_start.astimezone(UTC), (blocked_start + timedelta(hours=2)).astimezone(UTC)
+            )
+        ]
 
         sessions, _ = self.planner._build_sessions(
-            (task("quiz-1", "quiz", due),), busy, set(),
+            (task("quiz-1", "quiz", due),),
+            busy,
+            set(),
             self.now.astimezone(self.planner.timezone),
         )
 
@@ -82,7 +96,9 @@ class StudyPlannerTests(unittest.TestCase):
         completed = {self.planner._session_uid(study_task.uid, 0)}
 
         sessions, _ = self.planner._build_sessions(
-            (study_task,), [], completed,
+            (study_task,),
+            [],
+            completed,
             self.now.astimezone(self.planner.timezone),
         )
 

@@ -131,38 +131,42 @@ def test_checkpoint_failure_propagates_before_side_effect(monkeypatch, tmp_path)
 
 
 def test_upload_recovers_committed_checkpoint_after_lost_response(monkeypatch, tmp_path):
-    path = tmp_path / 'state.db'
+    path = tmp_path / "state.db"
     with sqlite3.connect(path) as db:
-        db.execute('CREATE TABLE sample(value TEXT)')
+        db.execute("CREATE TABLE sample(value TEXT)")
     remote = {}
     puts = []
+
     def request(method, url, **kwargs):
-        if method == 'PUT':
-            puts.append(kwargs['json'])
-            remote.update(kwargs['json'], revision=1)
-            raise cloud_state.requests.ConnectionError('lost response')
+        if method == "PUT":
+            puts.append(kwargs["json"])
+            remote.update(kwargs["json"], revision=1)
+            raise cloud_state.requests.ConnectionError("lost response")
         return Response(remote)
-    monkeypatch.setattr(cloud_state.requests, 'request', request)
-    client = CloudStateClient('https://state.test', 'secret', 'key', 'a'*32, 0)
+
+    monkeypatch.setattr(cloud_state.requests, "request", request)
+    client = CloudStateClient("https://state.test", "secret", "key", "a" * 32, 0)
     client.upload(path)
     assert client.revision == 1
     assert len(puts) == 1
-    assert puts[0]['size'] < path.stat().st_size / 2
+    assert puts[0]["size"] < path.stat().st_size / 2
 
 
 def test_upload_retries_uncommitted_service_failure(monkeypatch, tmp_path):
-    path = tmp_path / 'state.db'
+    path = tmp_path / "state.db"
     with sqlite3.connect(path) as db:
-        db.execute('CREATE TABLE sample(value TEXT)')
+        db.execute("CREATE TABLE sample(value TEXT)")
     puts = []
+
     def request(method, url, **kwargs):
-        if method == 'GET':
-            return Response({'revision': 0, 'sha256': None})
-        puts.append(kwargs['json'])
-        return Response({}, 503) if len(puts) == 1 else Response({'revision': 1})
-    monkeypatch.setattr(cloud_state.requests, 'request', request)
-    monkeypatch.setattr(cloud_state.time, 'sleep', lambda _: None)
-    client = CloudStateClient('https://state.test', 'secret', 'key', 'a'*32, 0)
+        if method == "GET":
+            return Response({"revision": 0, "sha256": None})
+        puts.append(kwargs["json"])
+        return Response({}, 503) if len(puts) == 1 else Response({"revision": 1})
+
+    monkeypatch.setattr(cloud_state.requests, "request", request)
+    monkeypatch.setattr(cloud_state.time, "sleep", lambda _: None)
+    client = CloudStateClient("https://state.test", "secret", "key", "a" * 32, 0)
     client.upload(path)
     assert client.revision == 1
     assert puts[0] == puts[1]

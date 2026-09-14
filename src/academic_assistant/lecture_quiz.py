@@ -76,18 +76,30 @@ class LectureQuizRunner:
         if not due:
             return LectureQuizReport(0, 0, 0, ())
         state = self._load_state() if self.store is None else {"sent": {}}
-        pending = [(session, ended_at) for session, ended_at in due
-                   if force or not self._already_sent(session.session_id(ended_at.date()), state)]
+        pending = [
+            (session, ended_at)
+            for session, ended_at in due
+            if force or not self._already_sent(session.session_id(ended_at.date()), state)
+        ]
         already = len(due) - len(pending)
         if not pending:
             return LectureQuizReport(0, already, 0, ())
-        needs_materials = any(force or not self.store or not self.store.quiz(f"lecture-quiz:{session.session_id(ended_at.date())}") for session, ended_at in pending)
-        downloads = (self.canvas.download_lecture_materials(
-            self.materials_directory,
-            excluded_course_patterns=self.schedule.excluded_course_patterns,
-            max_file_bytes=self.max_file_bytes,
-            module_policy=self.schedule.lecture_module_policy,
-        ) if needs_materials else SimpleNamespace(materials=(), warnings=()))
+        needs_materials = any(
+            force
+            or not self.store
+            or not self.store.quiz(f"lecture-quiz:{session.session_id(ended_at.date())}")
+            for session, ended_at in pending
+        )
+        downloads = (
+            self.canvas.download_lecture_materials(
+                self.materials_directory,
+                excluded_course_patterns=self.schedule.excluded_course_patterns,
+                max_file_bytes=self.max_file_bytes,
+                module_policy=self.schedule.lecture_module_policy,
+            )
+            if needs_materials
+            else SimpleNamespace(materials=(), warnings=())
+        )
         sent = waiting = failed = 0
         warnings = list(downloads.warnings)
         for session, ended_at in pending:
@@ -97,10 +109,14 @@ class LectureQuizRunner:
                 continue
             key = f"lecture-quiz:{session_id}"
             cached = self.store.quiz(key) if self.store and not force else None
-            selected = self._select_materials(session, ended_at, downloads.materials) if not cached else ()
+            selected = (
+                self._select_materials(session, ended_at, downloads.materials) if not cached else ()
+            )
             if not selected and not cached:
                 waiting += 1
-                warnings.append(f"No matching slides for session {session_id}; will retry while in the configured window.")
+                warnings.append(
+                    f"No matching slides for session {session_id}; will retry while in the configured window."
+                )
                 continue
             try:
                 key = f"lecture-quiz:{session_id}"
@@ -115,14 +131,21 @@ class LectureQuizRunner:
                     if self.store and not force:
                         payload = self.store.save_quiz(key, payload)
                 delivered = self.notifier.send_custom_notification(
-                    key, payload, force=force, destination="lecture_quizzes",
+                    key,
+                    payload,
+                    force=force,
+                    destination="lecture_quizzes",
                     fixed_fingerprint="session",
                 )
                 if delivered:
                     state.setdefault("sent", {})[session_id] = {
                         "sent_at": current.astimezone(UTC).isoformat(),
-                        "material_uid": ",".join(item.uid for item in selected) if selected else "cached",
-                        "content_sha256": ",".join(item.content_sha256 for item in selected) if selected else "cached",
+                        "material_uid": ",".join(item.uid for item in selected)
+                        if selected
+                        else "cached",
+                        "content_sha256": ",".join(item.content_sha256 for item in selected)
+                        if selected
+                        else "cached",
                     }
                     if not force:
                         if self.store:
@@ -138,9 +161,7 @@ class LectureQuizRunner:
             except (AIInputError, AIProviderError, DiscordNotificationError, OSError) as error:
                 failed += 1
                 detail = str(error) if isinstance(error, AIProviderError) else type(error).__name__
-                warnings.append(
-                    f"Quiz failed for session {session_id}: {detail}"
-                )
+                warnings.append(f"Quiz failed for session {session_id}: {detail}")
         return LectureQuizReport(sent, already, waiting, tuple(warnings), failed)
 
     def _already_sent(self, session_id: str, state: dict[str, object]) -> bool:
@@ -198,16 +219,24 @@ class LectureQuizRunner:
             score = 0
             numbered = re.match(r"^\s*(\d{1,2})([a-z])\s*[-–:]", material.title, re.I)
             if numbered:
-                weekly = sorted((s for s in self.schedule.sessions if s.course_key == session.course_key
-                                 and s.activity == "lecture"), key=lambda s: (s.weekday, s.start))
+                weekly = sorted(
+                    (
+                        s
+                        for s in self.schedule.sessions
+                        if s.course_key == session.course_key and s.activity == "lecture"
+                    ),
+                    key=lambda s: (s.weekday, s.start),
+                )
                 slot = weekly.index(session) if session in weekly else -1
-                if int(numbered[1]) != week or ord(numbered[2].lower()) - ord('a') != slot:
+                if int(numbered[1]) != week or ord(numbered[2].lower()) - ord("a") != slot:
                     continue
                 score += 120
             explicit_lecture = re.search(r"\b(?:lecture|lect)[\s_-]*(\d+)\b", text)
             if explicit_lecture and int(explicit_lecture[1]) != lecture:
                 continue
-            if any(re.search(r"(?<!\d)" + re.escape(token) + r"(?!\d)", text) for token in date_tokens):
+            if any(
+                re.search(r"(?<!\d)" + re.escape(token) + r"(?!\d)", text) for token in date_tokens
+            ):
                 score += 100
             if re.search(rf"\bweek\s*0?{week}\b", text):
                 score += 60
@@ -237,8 +266,7 @@ class LectureQuizRunner:
         if module_key is None:
             return (selected,)
         bundled = tuple(
-            material for _, _, material in candidates
-            if self._module_key(material) == module_key
+            material for _, _, material in candidates if self._module_key(material) == module_key
         )
         return self._sort_materials(bundled)
 
@@ -250,16 +278,26 @@ class LectureQuizRunner:
         module_name = getattr(material, "module_name", None)
         module_position = getattr(material, "module_position", None)
         if module_name and module_position is not None:
-            return (getattr(material, "course_id", None), "position", module_position, module_name.casefold())
+            return (
+                getattr(material, "course_id", None),
+                "position",
+                module_position,
+                module_name.casefold(),
+            )
         return None
 
     @staticmethod
     def _sort_materials(materials: tuple[LectureMaterial, ...]) -> tuple[LectureMaterial, ...]:
-        return tuple(sorted(materials, key=lambda item: (
-            getattr(item, "item_position", None) is None,
-            getattr(item, "item_position", None) or 0,
-            getattr(item, "title", "").casefold(),
-        )))
+        return tuple(
+            sorted(
+                materials,
+                key=lambda item: (
+                    getattr(item, "item_position", None) is None,
+                    getattr(item, "item_position", None) or 0,
+                    getattr(item, "title", "").casefold(),
+                ),
+            )
+        )
 
     def _ordered_module_materials(
         self,
@@ -282,9 +320,7 @@ class LectureQuizRunner:
         if lecture < 1 or lecture > len(ordered):
             return ()
         allowed_ids = {id(item) for item in allowed}
-        selected = tuple(
-            item for item in groups[ordered[lecture - 1]] if id(item) in allowed_ids
-        )
+        selected = tuple(item for item in groups[ordered[lecture - 1]] if id(item) in allowed_ids)
         return self._sort_materials(selected)
 
     def _override_materials(
@@ -294,12 +330,20 @@ class LectureQuizRunner:
         module_name = str(override.get("module", "")).strip().casefold()
         item_ids = {str(value) for value in override.get("item_ids", [])}
         source_ids = {str(value) for value in override.get("source_ids", [])}
-        selected = tuple(material for material in materials if (
-            (not module_id or str(getattr(material, "module_id", "") or "") == module_id)
-            and (not module_name or str(getattr(material, "module_name", "") or "").strip().casefold() == module_name)
-            and (not item_ids or str(getattr(material, "item_id", "") or "") in item_ids)
-            and (not source_ids or str(getattr(material, "source_id", "") or "") in source_ids)
-        ))
+        selected = tuple(
+            material
+            for material in materials
+            if (
+                (not module_id or str(getattr(material, "module_id", "") or "") == module_id)
+                and (
+                    not module_name
+                    or str(getattr(material, "module_name", "") or "").strip().casefold()
+                    == module_name
+                )
+                and (not item_ids or str(getattr(material, "item_id", "") or "") in item_ids)
+                and (not source_ids or str(getattr(material, "source_id", "") or "") in source_ids)
+            )
+        )
         if not any((module_id, module_name, item_ids, source_ids)):
             return ()
         keys = {self._module_key(item) for item in selected}
@@ -337,8 +381,7 @@ class LectureQuizRunner:
     @classmethod
     def _materials_text(cls, materials: tuple[LectureMaterial, ...]) -> str:
         sections = [
-            f"Material: {material.title}\n{cls._material_text(material)}"
-            for material in materials
+            f"Material: {material.title}\n{cls._material_text(material)}" for material in materials
         ]
         text = "\n\n---\n\n".join(section for section in sections if section.strip())
         if not text.strip():
@@ -353,7 +396,11 @@ class LectureQuizRunner:
             for item in materials
             if getattr(item, "module_name", None)
         }
-        subject = next(iter(module_names)) if len(module_names) == 1 else " + ".join(item.title for item in materials)
+        subject = (
+            next(iter(module_names))
+            if len(module_names) == 1
+            else " + ".join(item.title for item in materials)
+        )
         return f"{first.course_name} — {subject}"
 
     @staticmethod
@@ -378,7 +425,11 @@ class LectureQuizRunner:
             return {"version": 1, "sent": {}}
         try:
             value = json.loads(self.state_path.read_text(encoding="utf-8"))
-            if not isinstance(value, dict) or value.get("version") != 1 or not isinstance(value.get("sent"), dict):
+            if (
+                not isinstance(value, dict)
+                or value.get("version") != 1
+                or not isinstance(value.get("sent"), dict)
+            ):
                 raise ValueError("Unsupported lecture quiz state")
             return value
         except (OSError, json.JSONDecodeError) as error:

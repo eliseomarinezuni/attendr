@@ -23,9 +23,7 @@ from academic_assistant import (  # noqa: E402
 def main() -> int:
     try:
         snapshot = CanvasClient.from_env(PROJECT_ROOT / ".env").fetch_snapshot()
-        assignments = tuple(
-            item for item in snapshot.items if item.source == "assignment"
-        )[:3]
+        assignments = tuple(item for item in snapshot.items if item.source == "assignment")[:3]
         if not assignments:
             print(
                 "No upcoming Canvas assignments were found; authenticating and "

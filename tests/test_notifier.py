@@ -131,9 +131,7 @@ class DiscordNotifierTests(unittest.TestCase):
         embed = payload["embeds"][0]
 
         self.assertEqual(embed["title"], "Problem Set 1")
-        self.assertEqual(
-            embed["url"], "https://canvas.example/courses/1/assignments/10"
-        )
+        self.assertEqual(embed["url"], "https://canvas.example/courses/1/assignments/10")
         self.assertEqual(embed["fields"][0]["value"], "Algorithms")
         self.assertEqual(embed["fields"][2]["value"], "20")
         self.assertEqual(payload["allowed_mentions"], {"parse": []})
@@ -242,9 +240,7 @@ class DiscordNotifierTests(unittest.TestCase):
         self.assertEqual(len(second_session.calls), 0)
 
     def test_snapshot_flow_sends_each_alert_once(self):
-        notifier, session, _ = self.make_notifier(
-            [FakeResponse(), FakeResponse(), FakeResponse()]
-        )
+        notifier, session, _ = self.make_notifier([FakeResponse(), FakeResponse(), FakeResponse()])
         snapshot = CanvasSnapshot(
             user_id="42",
             user_name="Ada Student",

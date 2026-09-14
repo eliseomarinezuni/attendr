@@ -403,6 +403,7 @@ def test_notification_content_can_change_back_to_previous_value(store):
 
 def test_public_calendar_notfound_falls_back_to_paginated_events():
     from zoneinfo import ZoneInfo
+
     service = Mock()
     service.calendarList().list().execute.return_value = {"items": [{"id": "holidays"}]}
     service.freebusy().query().execute.return_value = {
@@ -431,10 +432,16 @@ def test_failed_lecture_quiz_is_reported_and_remains_retryable(store):
     ]
     canvas, ai, notifier = Mock(), Mock(), Mock()
     canvas.download_lecture_materials.return_value = SimpleNamespace(warnings=(), materials=())
-    ai.generate_hybrid_quiz.side_effect = AIProviderError("Gemini returned an empty response for hybrid quiz generation.")
-    runner = LectureQuizRunner(canvas, ai, notifier, schedule,
-                               materials_directory=store.path.parent, state_path=store.path)
-    with patch.object(runner, "_select_materials", return_value=(Mock(),)), patch.object(runner, "_materials_text", return_value="lecture"):
+    ai.generate_hybrid_quiz.side_effect = AIProviderError(
+        "Gemini returned an empty response for hybrid quiz generation."
+    )
+    runner = LectureQuizRunner(
+        canvas, ai, notifier, schedule, materials_directory=store.path.parent, state_path=store.path
+    )
+    with (
+        patch.object(runner, "_select_materials", return_value=(Mock(),)),
+        patch.object(runner, "_materials_text", return_value="lecture"),
+    ):
         for _ in range(2):
             report = runner.run()
             assert report.failed == 1

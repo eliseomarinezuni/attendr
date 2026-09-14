@@ -6,100 +6,137 @@ import pytest
 import requests
 from canvasapi.exceptions import Unauthorized
 
-from academic_assistant.knowledge_sync import KnowledgeSync, KnowledgeSyncError, chunks, match_course, record
+from academic_assistant.knowledge_sync import (
+    KnowledgeSync,
+    KnowledgeSyncError,
+    chunks,
+    match_course,
+    record,
+)
 from scripts.setup_ask import setup, COMMAND
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEDULE = json.loads((ROOT / 'data/course_schedule.json').read_text())
-COURSE = next(c for c in SCHEDULE['courses'] if c['key'] == 'web-development')
+SCHEDULE = json.loads((ROOT / "data/course_schedule.example.json").read_text())
+COURSE = next(c for c in SCHEDULE["courses"] if c["key"] == "example-web")
 
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
     def blocked(*args, **kwargs):
-        raise AssertionError('Live network forbidden')
-    monkeypatch.setattr('requests.sessions.Session.request', blocked)
+        raise AssertionError("Live network forbidden")
+
+    monkeypatch.setattr("requests.sessions.Session.request", blocked)
 
 
 class Store:
-    def __init__(self): self.cache = {}
-    def cache_get(self, key): return self.cache.get(key)
-    def cache_set(self, key, value): self.cache[key] = value
+    def __init__(self):
+        self.cache = {}
+
+    def cache_get(self, key):
+        return self.cache.get(key)
+
+    def cache_set(self, key, value):
+        self.cache[key] = value
 
 
 class Session:
-    def __init__(self, statuses=(200,)): self.calls, self.statuses = [], iter(statuses)
+    def __init__(self, statuses=(200,)):
+        self.calls, self.statuses = [], iter(statuses)
+
     def post(self, url, **kwargs):
         self.calls.append((url, kwargs))
         return NS(status_code=next(self.statuses, 200))
 
 
 def build(tmp_path, session=None):
-    page = NS(url='intro', title='Introduction', body='HTTP is stateless.', updated_at=None)
-    assignment = NS(id=11, name='Midterm', description='Course assessment', due_at='2026-10-20T18:00:00Z')
-    topic = NS(id=21, title='Welcome', message='Read the syllabus', posted_at='2026-09-01T12:00:00Z')
-    api = NS(get_modules=lambda: [], get_pages=lambda: [page], get_page=lambda key: page,
-             get_files=lambda: [], get_assignments=lambda **kw: [assignment],
-             get_discussion_topics=lambda **kw: [topic])
-    summary = NS(id=1, name='Web Development', course_code='EXMP 3030')
+    page = NS(url="intro", title="Introduction", body="HTTP is stateless.", updated_at=None)
+    assignment = NS(
+        id=11, name="Midterm", description="Course assessment", due_at="2026-10-20T18:00:00Z"
+    )
+    topic = NS(
+        id=21, title="Welcome", message="Read the syllabus", posted_at="2026-09-01T12:00:00Z"
+    )
+    api = NS(
+        get_modules=lambda: [],
+        get_pages=lambda: [page],
+        get_page=lambda key: page,
+        get_files=lambda: [],
+        get_assignments=lambda **kw: [assignment],
+        get_discussion_topics=lambda **kw: [topic],
+    )
+    summary = NS(id=1, name="Example Web Systems", course_code="EXMP 3030")
     context = NS(resource=api, summary=summary)
-    canvas = NS(base_url='https://canvas.example', _get_active_course_contexts=lambda: [context],
-                _attr=lambda value, key, default=None: getattr(value, key, default),
-                _html_to_text=lambda text: text,
-                _canvas=NS(get_course=lambda *a, **kw: NS(syllabus_body='Midterm October 20, 2026')))
-    sync = KnowledgeSync(canvas, Store(), SCHEDULE, tmp_path, 'https://worker.test', 'secret', session or Session())
+    canvas = NS(
+        base_url="https://canvas.example",
+        _get_active_course_contexts=lambda: [context],
+        _attr=lambda value, key, default=None: getattr(value, key, default),
+        _html_to_text=lambda text: text,
+        _canvas=NS(get_course=lambda *a, **kw: NS(syllabus_body="Midterm October 20, 2026")),
+    )
+    sync = KnowledgeSync(
+        canvas, Store(), SCHEDULE, tmp_path, "https://worker.test", "secret", session or Session()
+    )
     return sync, context, page, assignment, topic
 
 
-@pytest.mark.parametrize('course', SCHEDULE['courses'])
+@pytest.mark.parametrize("course", SCHEDULE["courses"])
 def test_all_course_aliases(course):
-    for alias in [course['key'], course['name'], *course['match']]:
-        assert match_course(alias.upper(), '', SCHEDULE['courses'])['key'] == course['key']
-    assert match_course('Unconfigured course', '', SCHEDULE['courses']) is None
+    for alias in [course["key"], course["name"], *course["match"]]:
+        assert match_course(alias.upper(), "", SCHEDULE["courses"])["key"] == course["key"]
+    assert match_course("Unconfigured course", "", SCHEDULE["courses"]) is None
     with pytest.raises(KnowledgeSyncError):
-        match_course('web dev algorithms', '', SCHEDULE['courses'])
+        match_course("example web example algorithms", "", SCHEDULE["courses"])
 
 
 def test_complete_snapshots_include_all_sources_and_metadata(tmp_path):
     sync, context, *_ = build(tmp_path)
     assert sync.sync() == 1
-    payload = sync.session.calls[0][1]['json']
-    assert payload['complete'] is True
-    assert payload['course']['key'] == 'web-development'
-    records = {r['id'].rsplit(':', 1)[0]: r for r in payload['records']}
-    assert set(records) == {'syllabus', 'page:intro', 'assignment:11', 'announcement:21', 'verified-schedule'}
-    assert records['assignment:11']['deadline'] == '2026-10-20T18:00:00Z'
-    assert 'America/Toronto' in records['verified-schedule']['chunks'][0]
-    assert all(len(r['hash']) == 64 for r in records.values())
+    payload = sync.session.calls[0][1]["json"]
+    assert payload["complete"] is True
+    assert payload["course"]["key"] == "example-web"
+    records = {r["id"].rsplit(":", 1)[0]: r for r in payload["records"]}
+    assert set(records) == {
+        "syllabus",
+        "page:intro",
+        "assignment:11",
+        "announcement:21",
+        "verified-schedule",
+    }
+    assert records["assignment:11"]["deadline"] == "2026-10-20T18:00:00Z"
+    assert "America/Toronto" in records["verified-schedule"]["chunks"][0]
+    assert all(len(r["hash"]) == 64 for r in records.values())
 
 
 def test_updated_deleted_unpublished_sources_and_duplicate_sync(tmp_path):
     sync, context, page, *_ = build(tmp_path)
-    before = {r['id']: r for r in sync.collect(context, COURSE)}
-    assert before == {r['id']: r for r in sync.collect(context, COURSE)}
-    page.body = 'Updated HTTP course material'
-    after = {r['id']: r for r in sync.collect(context, COURSE)}
-    assert before['page:intro']['hash'] != after['page:intro']['hash']
+    before = {r["id"]: r for r in sync.collect(context, COURSE)}
+    assert before == {r["id"]: r for r in sync.collect(context, COURSE)}
+    page.body = "Updated HTTP course material"
+    after = {r["id"]: r for r in sync.collect(context, COURSE)}
+    assert before["page:intro"]["hash"] != after["page:intro"]["hash"]
     page.published = False
-    assert 'page:intro' not in {r['id'] for r in sync.collect(context, COURSE)}
+    assert "page:intro" not in {r["id"] for r in sync.collect(context, COURSE)}
     context.resource.get_pages = lambda: []
-    assert 'page:intro' not in {r['id'] for r in sync.collect(context, COURSE)}
+    assert "page:intro" not in {r["id"] for r in sync.collect(context, COURSE)}
 
 
 def test_partial_enumeration_and_download_failures_do_not_publish(tmp_path):
     sync, context, *_ = build(tmp_path)
+
     def broken():
-        yield NS(url='intro')
-        raise RuntimeError('private upstream detail')
+        yield NS(url="intro")
+        raise RuntimeError("private upstream detail")
+
     context.resource.get_pages = broken
-    with pytest.raises(KnowledgeSyncError, match='previous complete snapshots preserved') as error:
+    with pytest.raises(KnowledgeSyncError, match="previous complete snapshots preserved") as error:
         sync.sync()
-    assert 'private' not in str(error.value)
+    assert "private" not in str(error.value)
     assert not sync.session.calls
     context.resource.get_pages = lambda: []
-    context.resource.get_files = lambda: [NS(id=8, filename='lecture.pdf')]
+    context.resource.get_files = lambda: [NS(id=8, filename="lecture.pdf")]
     sync.canvas._download_lecture_file = lambda *args: None
-    with pytest.raises(KnowledgeSyncError): sync.sync()
+    with pytest.raises(KnowledgeSyncError):
+        sync.sync()
     assert not sync.session.calls
 
 
@@ -107,56 +144,73 @@ def test_retry_payloads_are_identical(tmp_path):
     sync, *_ = build(tmp_path, Session([503, 503, 200]))
     assert sync.sync() == 1
     assert len(sync.session.calls) == 4
-    assert sync.session.calls[0][1]['json'] == sync.session.calls[2][1]['json']
+    assert sync.session.calls[0][1]["json"] == sync.session.calls[2][1]["json"]
 
 
 def test_cached_extraction_is_not_reprocessed(tmp_path, monkeypatch):
     sync, *_ = build(tmp_path)
-    material = NS(uid='file:1', content_sha256='hash', content_type='application/pdf', local_path=tmp_path / 'x.pdf')
+    material = NS(
+        uid="file:1",
+        content_sha256="hash",
+        content_type="application/pdf",
+        local_path=tmp_path / "x.pdf",
+    )
     calls = []
-    monkeypatch.setattr('academic_assistant.knowledge_sync.extract_pdf_text_chunks', lambda path: calls.append(path) or [NS(text='Extracted PDF text')])
-    assert sync._text(material) == sync._text(material) == 'Extracted PDF text'
+    monkeypatch.setattr(
+        "academic_assistant.knowledge_sync.extract_pdf_text_chunks",
+        lambda path: calls.append(path) or [NS(text="Extracted PDF text")],
+    )
+    assert sync._text(material) == sync._text(material) == "Extracted PDF text"
     assert len(calls) == 1
-    material.content_sha256 = 'updated'
+    material.content_sha256 = "updated"
     sync._text(material)
     assert len(calls) == 2
 
 
 def test_module_metadata_and_hidden_module_sources(tmp_path):
     sync, context, *_ = build(tmp_path)
-    module = NS(name='Week 1', position=1, get_module_items=lambda: [NS(type='Page', page_url='intro', position=2)])
+    module = NS(
+        name="Week 1",
+        position=1,
+        get_module_items=lambda: [NS(type="Page", page_url="intro", position=2)],
+    )
     context.resource.get_modules = lambda: [module]
-    records = {r['id']: r for r in sync.collect(context, COURSE)}
-    assert records['page:intro']['module'] == [{'name': 'Week 1', 'position': 1, 'item_position': 2}]
+    records = {r["id"]: r for r in sync.collect(context, COURSE)}
+    assert records["page:intro"]["module"] == [
+        {"name": "Week 1", "position": 1, "item_position": 2}
+    ]
     module.published = False
-    assert 'page:intro' not in {r['id'] for r in sync.collect(context, COURSE)}
+    assert "page:intro" not in {r["id"] for r in sync.collect(context, COURSE)}
 
 
 def test_disabled_pages_and_files_tabs_still_use_visible_module_items(tmp_path):
     sync, context, page, *_ = build(tmp_path)
-    file = NS(id=8, display_name='lecture.pdf', published=True)
+    file = NS(id=8, display_name="lecture.pdf", published=True)
     module = NS(
-        name='Week 1',
+        name="Week 1",
         position=1,
         get_module_items=lambda: [
-            NS(type='Page', page_url='intro', position=1, published=True),
-            NS(type='File', content_id=8, position=2, published=True),
+            NS(type="Page", page_url="intro", position=1, published=True),
+            NS(type="File", content_id=8, position=2, published=True),
         ],
     )
     context.resource.get_modules = lambda: [module]
-    context.resource.get_pages = lambda: (_ for _ in ()).throw(Unauthorized('pages disabled'))
-    context.resource.get_files = lambda: (_ for _ in ()).throw(Unauthorized('files disabled'))
+    context.resource.get_pages = lambda: (_ for _ in ()).throw(Unauthorized("pages disabled"))
+    context.resource.get_files = lambda: (_ for _ in ()).throw(Unauthorized("files disabled"))
     context.resource.get_file = lambda key: file
     material = NS(
-        uid='file:8', content_sha256='a' * 64, content_type='application/pdf',
-        local_path=tmp_path / 'lecture.pdf', html_url='https://canvas.example/files/8',
+        uid="file:8",
+        content_sha256="a" * 64,
+        content_type="application/pdf",
+        local_path=tmp_path / "lecture.pdf",
+        html_url="https://canvas.example/files/8",
         updated_at=None,
     )
     sync.canvas._download_lecture_file = lambda *args: material
-    sync._text = lambda value: 'Accessible module lecture text'
-    records = {item['id']: item for item in sync.collect(context, COURSE)}
-    assert records['page:intro']['chunks'] == ['HTTP is stateless.']
-    assert records['file:8']['chunks'] == ['Accessible module lecture text']
+    sync._text = lambda value: "Accessible module lecture text"
+    records = {item["id"]: item for item in sync.collect(context, COURSE)}
+    assert records["page:intro"]["chunks"] == ["HTTP is stateless."]
+    assert records["file:8"]["chunks"] == ["Accessible module lecture text"]
 
 
 def test_syllabus_linked_file_is_indexed_when_files_tab_is_disabled(tmp_path):
@@ -164,189 +218,226 @@ def test_syllabus_linked_file_is_indexed_when_files_tab_is_disabled(tmp_path):
     sync.canvas._canvas.get_course = lambda *a, **kw: NS(
         syllabus_body='<a href="/courses/1/files/44">Course outline</a>'
     )
-    context.resource.get_files = lambda: (_ for _ in ()).throw(Unauthorized('files disabled'))
-    linked = NS(id=44, display_name='course-outline.pdf', published=True)
+    context.resource.get_files = lambda: (_ for _ in ()).throw(Unauthorized("files disabled"))
+    linked = NS(id=44, display_name="course-outline.pdf", published=True)
     fetched = []
     context.resource.get_file = lambda key: fetched.append(str(key)) or linked
     material = NS(
-        uid='file:44', content_sha256='b' * 64, content_type='application/pdf',
-        local_path=tmp_path / 'course-outline.pdf', html_url='https://canvas.example/files/44',
+        uid="file:44",
+        content_sha256="b" * 64,
+        content_type="application/pdf",
+        local_path=tmp_path / "course-outline.pdf",
+        html_url="https://canvas.example/files/44",
         updated_at=None,
     )
     sync.canvas._download_lecture_file = lambda *args: material
-    sync._text = lambda value: 'Midterm October 27, 2026'
+    sync._text = lambda value: "Midterm October 27, 2026"
 
-    records = {item['id']: item for item in sync.collect(context, COURSE)}
+    records = {item["id"]: item for item in sync.collect(context, COURSE)}
 
-    assert fetched == ['44']
-    assert records['file:44']['chunks'] == ['Midterm October 27, 2026']
+    assert fetched == ["44"]
+    assert records["file:44"]["chunks"] == ["Midterm October 27, 2026"]
 
 
 def test_chunk_bounds_and_url_secrets_removed():
-    assert max(map(len, chunks('text ' * 10000))) <= 1400
-    source = record('1', 'Title', 'page', 'Text', url='https://canvas.example/page?verifier=secret')
-    assert source['url'] == 'https://canvas.example/page'
-    assert record('1', 'Title', 'page', 'Text', url='https://user:secret@canvas.example')['url'] is None
+    assert max(map(len, chunks("text " * 10000))) <= 1400
+    source = record("1", "Title", "page", "Text", url="https://canvas.example/page?verifier=secret")
+    assert source["url"] == "https://canvas.example/page"
+    assert (
+        record("1", "Title", "page", "Text", url="https://user:secret@canvas.example")["url"]
+        is None
+    )
 
 
 class Discord:
-    def __init__(self, existing=False): self.calls, self.existing = [], existing
+    def __init__(self, existing=False):
+        self.calls, self.existing = [], existing
+
     def request(self, method, url, **kwargs):
         self.calls.append((method, url, kwargs))
-        if method == 'GET' and url.endswith('/channels'):
-            data = [{'id': '123', 'name': 'ask', 'type': 0}] if self.existing else []
-        elif url.endswith('/users/@me'): data = {'id': '888'}
-        else: data = {'id': '123'}
+        if method == "GET" and url.endswith("/channels"):
+            data = [{"id": "123", "name": "ask", "type": 0}] if self.existing else []
+        elif url.endswith("/users/@me"):
+            data = {"id": "888"}
+        else:
+            data = {"id": "123"}
         return NS(ok=True, json=lambda: data)
 
 
-@pytest.mark.parametrize('existing', [True, False])
+@pytest.mark.parametrize("existing", [True, False])
 def test_setup_reuses_channel_and_preserves_other_commands(existing):
     discord = Discord(existing)
-    assert setup('secret', '555', '666', '777', discord) == '123'
-    creates = [c for c in discord.calls if c[0] == 'POST' and c[1].endswith('/channels')]
+    assert setup("secret", "555", "666", "777", discord) == "123"
+    creates = [c for c in discord.calls if c[0] == "POST" and c[1].endswith("/channels")]
     assert len(creates) == (0 if existing else 1)
-    assert all(c[0] != 'PUT' for c in discord.calls)
-    assert discord.calls[-1][2]['json'] == COMMAND
-    assert len(COMMAND['options']) == 1
+    assert all(c[0] != "PUT" for c in discord.calls)
+    assert discord.calls[-1][2]["json"] == COMMAND
+    assert len(COMMAND["options"]) == 1
     if creates:
-        assert creates[0][2]['json']['permission_overwrites'][0]['deny'] == '1024'
+        assert creates[0][2]["json"]["permission_overwrites"][0]["deny"] == "1024"
 
 
 def test_scheduled_sync_keeps_encrypted_runner():
     workflows = [
-        (ROOT / '.github/workflows/schedule.yml').read_text(),
-        (ROOT / '.github/workflows/class-quizzes.yml').read_text(),
+        (ROOT / ".github/workflows/schedule.yml").read_text(),
+        (ROOT / ".github/workflows/class-quizzes.yml").read_text(),
     ]
     assert 'ATTENDR_ASK_SYNC: "true"' in workflows[0]
-    assert all('python scripts/cloud_run.py' in workflow for workflow in workflows)
+    assert all("python scripts/cloud_run.py" in workflow for workflow in workflows)
     assert all(
-        'ATTENDR_STATE_KEY: ${{ secrets.ATTENDR_STATE_KEY }}' in workflow
-        for workflow in workflows
+        "ATTENDR_STATE_KEY: ${{ secrets.ATTENDR_STATE_KEY }}" in workflow for workflow in workflows
     )
     assert all(
-        'ATTENDR_STATE_KEY: ${{ secrets.STUDY_SYNC_SECRET }}' not in workflow
+        "ATTENDR_STATE_KEY: ${{ secrets.STUDY_SYNC_SECRET }}" not in workflow
         for workflow in workflows
     )
 
 
 def test_large_course_batches_preserve_every_chunk_before_publish(tmp_path):
     sync, *_ = build(tmp_path)
-    sources = [record(str(i), 'Material', 'page', 'long course text ' * 10000) for i in range(10)]
+    sources = [record(str(i), "Material", "page", "long course text " * 10000) for i in range(10)]
     sync.collect = lambda *args: sources
     assert sync.sync() == 1
-    stages = [kwargs['json'] for url, kwargs in sync.session.calls if url.endswith('/stage')]
+    stages = [kwargs["json"] for url, kwargs in sync.session.calls if url.endswith("/stage")]
     assert len(stages) > 1
     assert all(len(json.dumps(payload).encode()) < 900_000 for payload in stages)
-    assert sum(len(r['chunks']) for payload in stages for r in payload['records']) == sum(len(r['chunks']) for r in sources)
-    assert sync.session.calls[-1][0].endswith('/publish')
-    assert sync.session.calls[-1][1]['json']['count'] == sum(len(p['records']) for p in stages)
+    assert sum(len(r["chunks"]) for payload in stages for r in payload["records"]) == sum(
+        len(r["chunks"]) for r in sources
+    )
+    assert sync.session.calls[-1][0].endswith("/publish")
+    assert sync.session.calls[-1][1]["json"]["count"] == sum(len(p["records"]) for p in stages)
 
 
 def test_failed_staging_never_publishes(tmp_path):
     sync, *_ = build(tmp_path, Session([503, 503, 503]))
-    with pytest.raises(KnowledgeSyncError): sync.sync()
-    assert all(url.endswith('/stage') for url, _ in sync.session.calls)
+    with pytest.raises(KnowledgeSyncError):
+        sync.sync()
+    assert all(url.endswith("/stage") for url, _ in sync.session.calls)
 
 
 def test_powerpoint_extraction_is_cached(tmp_path, monkeypatch):
     sync, *_ = build(tmp_path)
-    material = NS(uid='file:2', content_sha256='hash', content_type='presentation', local_path=tmp_path / 'x.pptx')
+    material = NS(
+        uid="file:2",
+        content_sha256="hash",
+        content_type="presentation",
+        local_path=tmp_path / "x.pptx",
+    )
     calls = []
-    monkeypatch.setattr('academic_assistant.knowledge_sync.extract_powerpoint_text_chunks', lambda path, **kwargs: calls.append(path) or [NS(text='PowerPoint slide text')])
-    assert sync._text(material) == sync._text(material) == 'PowerPoint slide text'
+    monkeypatch.setattr(
+        "academic_assistant.knowledge_sync.extract_powerpoint_text_chunks",
+        lambda path, **kwargs: calls.append(path) or [NS(text="PowerPoint slide text")],
+    )
+    assert sync._text(material) == sync._text(material) == "PowerPoint slide text"
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize('status,code,attempts', [
-    (401, 'WORKER_AUTH_REJECTED', 1),
-    (403, 'WORKER_AUTH_REJECTED', 1),
-    (400, 'WORKER_REJECTED', 1),
-    (429, 'WORKER_RATE_LIMITED', 3),
-    (503, 'WORKER_SERVER_ERROR', 3),
-])
+@pytest.mark.parametrize(
+    "status,code,attempts",
+    [
+        (401, "WORKER_AUTH_REJECTED", 1),
+        (403, "WORKER_AUTH_REJECTED", 1),
+        (400, "WORKER_REJECTED", 1),
+        (429, "WORKER_RATE_LIMITED", 3),
+        (503, "WORKER_SERVER_ERROR", 3),
+    ],
+)
 def test_safe_worker_diagnostics(tmp_path, caplog, status, code, attempts):
     sync, *_ = build(tmp_path, Session([status] * 3))
     with pytest.raises(KnowledgeSyncError) as error:
         sync.sync()
     assert code in str(error.value)
-    assert f'HTTP {status}' in str(error.value)
-    assert f'retries={attempts - 1}' in str(error.value)
-    assert 'web-development — upload:' in caplog.text
+    assert f"HTTP {status}" in str(error.value)
+    assert f"retries={attempts - 1}" in str(error.value)
+    assert "example-web — upload:" in caplog.text
     assert len(sync.session.calls) == attempts
-    assert all(url.endswith('/stage') for url, _ in sync.session.calls)
-    assert 'secret' not in caplog.text
+    assert all(url.endswith("/stage") for url, _ in sync.session.calls)
+    assert "secret" not in caplog.text
 
 
-@pytest.mark.parametrize('exception,code', [
-    (requests.Timeout, 'WORKER_TIMEOUT'),
-    (requests.ConnectionError, 'WORKER_NETWORK_ERROR'),
-])
+@pytest.mark.parametrize(
+    "exception,code",
+    [
+        (requests.Timeout, "WORKER_TIMEOUT"),
+        (requests.ConnectionError, "WORKER_NETWORK_ERROR"),
+    ],
+)
 def test_network_exception_bodies_never_logged(tmp_path, caplog, exception, code):
     sync, *_ = build(tmp_path)
     calls = []
+
     def broken(*args, **kwargs):
         calls.append(1)
-        raise exception('Bearer secret https://private.test?verifier=private-token')
+        raise exception("Bearer secret https://private.test?verifier=private-token")
+
     sync.session.post = broken
     with pytest.raises(KnowledgeSyncError) as error:
         sync.sync()
     assert len(calls) == 3
     assert code in str(error.value)
-    for forbidden in ('Bearer', 'secret', 'private.test', 'private-token'):
+    for forbidden in ("Bearer", "secret", "private.test", "private-token"):
         assert forbidden not in str(error.value) + caplog.text
 
 
 def test_publish_failure_stage(tmp_path, caplog):
     sync, *_ = build(tmp_path, Session([200, 403]))
-    with pytest.raises(KnowledgeSyncError, match='publish: WORKER_AUTH_REJECTED'):
+    with pytest.raises(KnowledgeSyncError, match="publish: WORKER_AUTH_REJECTED"):
         sync.sync()
     assert len(sync.session.calls) == 2
 
 
-@pytest.mark.parametrize('empty', [True, False])
+@pytest.mark.parametrize("empty", [True, False])
 def test_extraction_diagnostics_preserve_snapshot(tmp_path, monkeypatch, caplog, empty):
     sync, context, *_ = build(tmp_path)
-    context.resource.get_files = lambda: [NS(id=8, filename='private-title.pdf')]
-    material = NS(uid='file:8', content_sha256='hash', content_type='application/pdf',
-                  local_path=tmp_path / 'private-title.pdf')
+    context.resource.get_files = lambda: [NS(id=8, filename="private-title.pdf")]
+    material = NS(
+        uid="file:8",
+        content_sha256="hash",
+        content_type="application/pdf",
+        local_path=tmp_path / "private-title.pdf",
+    )
     sync.canvas._download_lecture_file = lambda *args: material
+
     def extract(*args):
         if empty:
             return []
-        raise ValueError('private document text and secret')
-    monkeypatch.setattr('academic_assistant.knowledge_sync.extract_pdf_text_chunks', extract)
-    code = 'TEXT_EXTRACTION_EMPTY' if empty else 'TEXT_EXTRACTION_FAILED'
-    with pytest.raises(KnowledgeSyncError, match=f'text_extraction: {code}') as error:
+        raise ValueError("private document text and secret")
+
+    monkeypatch.setattr("academic_assistant.knowledge_sync.extract_pdf_text_chunks", extract)
+    code = "TEXT_EXTRACTION_EMPTY" if empty else "TEXT_EXTRACTION_FAILED"
+    with pytest.raises(KnowledgeSyncError, match=f"text_extraction: {code}") as error:
         sync.sync()
     assert not sync.session.calls
-    assert 'private' not in str(error.value) + caplog.text
-    assert 'secret' not in str(error.value) + caplog.text
+    assert "private" not in str(error.value) + caplog.text
+    assert "secret" not in str(error.value) + caplog.text
 
 
 def test_failed_course_does_not_block_next_course(tmp_path, caplog):
     sync, context, *_ = build(tmp_path)
-    other = next(c for c in SCHEDULE['courses'] if c['key'] != COURSE['key'])
-    second = NS(resource=context.resource, summary=NS(name=other['name'], course_code='', id=2))
+    other = next(c for c in SCHEDULE["courses"] if c["key"] != COURSE["key"])
+    second = NS(resource=context.resource, summary=NS(name=other["name"], course_code="", id=2))
     sync.canvas._get_active_course_contexts = lambda: [context, second]
     collect = sync.collect
+
     def selective(ctx, course):
         if ctx is context:
-            raise RuntimeError('private provider body')
+            raise RuntimeError("private provider body")
         return collect(ctx, course)
+
     sync.collect = selective
-    with pytest.raises(KnowledgeSyncError, match='1 course snapshot'):
+    with pytest.raises(KnowledgeSyncError, match="1 course snapshot"):
         sync.sync()
     assert len(sync.session.calls) == 2
-    assert sync.session.calls[-1][0].endswith('/publish')
-    assert sync.session.calls[-1][1]['json']['course']['key'] == other['key']
-    assert 'private provider body' not in caplog.text
+    assert sync.session.calls[-1][0].endswith("/publish")
+    assert sync.session.calls[-1][1]["json"]["course"]["key"] == other["key"]
+    assert "private provider body" not in caplog.text
 
 
 def test_unexpected_summary_never_exposes_exception_text():
     from academic_assistant.knowledge_sync import failure_summary
-    assert 'secret' not in failure_summary(RuntimeError('secret'))
-    assert 'UNEXPECTED_ERROR' in failure_summary(RuntimeError('secret'))
+
+    assert "secret" not in failure_summary(RuntimeError("secret"))
+    assert "UNEXPECTED_ERROR" in failure_summary(RuntimeError("secret"))
 
 
 def test_source_failures_receive_safe_actionable_categories():
@@ -354,33 +445,39 @@ def test_source_failures_receive_safe_actionable_categories():
     import requests
 
     assert source_failure(requests.Timeout("private URL"), "source_retrieval") == (
-        "SOURCE_NETWORK_TIMEOUT", None
+        "SOURCE_NETWORK_TIMEOUT",
+        None,
     )
     response = requests.Response()
     response.status_code = 403
     error = requests.HTTPError("signed URL", response=response)
-    assert source_failure(error, "source_retrieval") == (
-        "SOURCE_PERMISSION_DENIED", 403
-    )
+    assert source_failure(error, "source_retrieval") == ("SOURCE_PERMISSION_DENIED", 403)
     assert source_failure(ValueError("private content"), "source_retrieval") == (
-        "MALFORMED_SOURCE", None
+        "MALFORMED_SOURCE",
+        None,
     )
 
 
 def test_oversized_source_is_explicitly_excluded_without_blocking_course(tmp_path, caplog):
     sync, context, *_ = build(tmp_path)
-    context.resource.get_files = lambda: [NS(
-        id=8, filename='large-slides.pptx', size=2 * 1024 * 1024 * 1024,
-    )]
+    context.resource.get_files = lambda: [
+        NS(
+            id=8,
+            filename="large-slides.pptx",
+            size=2 * 1024 * 1024 * 1024,
+        )
+    ]
+
     def forbidden_download(*args):
-        pytest.fail('Oversized files must not be downloaded')
+        pytest.fail("Oversized files must not be downloaded")
+
     sync.canvas._download_lecture_file = forbidden_download
     assert sync.sync() == 1
-    records = sync.session.calls[0][1]['json']['records']
-    omitted = next(r for r in records if r['id'] == 'file:8:0')
-    assert 'Contents not indexed' in omitted['chunks'][0]
-    assert omitted['url'] == 'https://canvas.example/courses/1/files/8'
-    assert any(r['id'] == 'assignment:11:0' for r in records)
-    assert sync.session.calls[-1][0].endswith('/publish')
-    assert 'SOURCE_TOO_LARGE' in caplog.text
-    assert 'large-slides.pptx' not in caplog.text
+    records = sync.session.calls[0][1]["json"]["records"]
+    omitted = next(r for r in records if r["id"] == "file:8:0")
+    assert "Contents not indexed" in omitted["chunks"][0]
+    assert omitted["url"] == "https://canvas.example/courses/1/files/8"
+    assert any(r["id"] == "assignment:11:0" for r in records)
+    assert sync.session.calls[-1][0].endswith("/publish")
+    assert "SOURCE_TOO_LARGE" in caplog.text
+    assert "large-slides.pptx" not in caplog.text

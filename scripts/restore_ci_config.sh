@@ -27,12 +27,14 @@ def restore(name: str, destination: str, *, required: bool, kind: str) -> None:
                 client.get(key) for key in ("client_id", "client_secret", "auth_uri", "token_uri")
             ):
                 raise ValueError
-        elif not all(value.get(key) for key in ("refresh_token", "client_id", "client_secret", "token_uri")):
+        elif kind == "token" and not all(value.get(key) for key in ("refresh_token", "client_id", "client_secret", "token_uri")):
             raise ValueError
     except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-        raise SystemExit(f"{name} does not contain valid Google OAuth JSON.") from None
+        expected = "Google OAuth JSON" if kind in {"credentials", "token"} else "private JSON configuration"
+        raise SystemExit(f"{name} does not contain valid {expected}.") from None
 
     target = Path(destination)
+    target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary = tempfile.mkstemp(prefix=f".{target.name}.", dir=target.parent)
     try:
         with os.fdopen(descriptor, "wb") as output:
@@ -49,6 +51,8 @@ calendar_required = os.environ.get("REQUIRE_GOOGLE_CALENDAR_AUTH", "").lower() =
 restore("GOOGLE_CREDENTIALS_B64", "credentials.json", required=calendar_required, kind="credentials")
 restore("GOOGLE_TOKEN_B64", "token.json", required=calendar_required, kind="token")
 restore("GOOGLE_SLIDES_TOKEN_B64", "google_slides_token.json", required=False, kind="token")
+restore("COURSE_SCHEDULE_B64", "data/course_schedule.json", required=True, kind="json")
+restore("ATTENDR_PREFERENCES_B64", "data/preferences.json", required=True, kind="json")
 PY
 
 cat > .env <<EOF
@@ -62,6 +66,7 @@ CANVAS_MATERIALS_INDEX=data/materials_index.json
 CANVAS_MATERIAL_MAX_MB=25
 CANVAS_MATERIAL_FUTURE_DAYS=550
 COURSE_SCHEDULE_FILE=data/course_schedule.json
+ATTENDR_PREFERENCES_FILE=data/preferences.json
 ANNOUNCEMENT_DATES_INDEX=data/announcement_dates_index.json
 LECTURE_QUIZ_STATE_FILE=data/lecture_quiz_state.json
 LECTURE_QUIZ_RETRY_HOURS=336

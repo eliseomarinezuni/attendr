@@ -56,10 +56,24 @@ class AITaskPolicy:
 
 
 AI_TASKS = {
-    "syllabus_schedule_extraction": AITaskPolicy("syllabus schedule extraction", 1, "GEMINI_DEADLINE_MODEL", True, 0.0, 8_192, "full"),
-    "deadline_extraction": AITaskPolicy("major deadline extraction", 5, "GEMINI_DEADLINE_MODEL", True, 0.0, 8_192, "deadline_focused"),
-    "quiz_generation": AITaskPolicy("quiz generation", 1, "GEMINI_QUIZ_MODEL", True, 0.45, 8_192, "full"),
-    "lecture_quiz_generation": AITaskPolicy("hybrid quiz generation", 1, "GEMINI_QUIZ_MODEL", True, 0.4, 8_192, "full"),
+    "syllabus_schedule_extraction": AITaskPolicy(
+        "syllabus schedule extraction", 1, "GEMINI_DEADLINE_MODEL", True, 0.0, 8_192, "full"
+    ),
+    "deadline_extraction": AITaskPolicy(
+        "major deadline extraction",
+        5,
+        "GEMINI_DEADLINE_MODEL",
+        True,
+        0.0,
+        8_192,
+        "deadline_focused",
+    ),
+    "quiz_generation": AITaskPolicy(
+        "quiz generation", 1, "GEMINI_QUIZ_MODEL", True, 0.45, 8_192, "full"
+    ),
+    "lecture_quiz_generation": AITaskPolicy(
+        "hybrid quiz generation", 1, "GEMINI_QUIZ_MODEL", True, 0.4, 8_192, "full"
+    ),
     "connection_check": AITaskPolicy("connection check", 1, None, False, 0.0, 256, "diagnostic"),
     "model_discovery": AITaskPolicy("model discovery", 1, None, False, 0.0, 0, "diagnostic"),
 }
@@ -153,8 +167,16 @@ class MajorDeadline(BaseModel):
     due_date: str = Field(min_length=10, max_length=10)
     due_time: str | None = Field(default=None, max_length=5)
     kind: Literal[
-        "exam", "quiz", "assignment", "project", "presentation", "lab",
-        "tutorial", "reading", "class", "other"
+        "exam",
+        "quiz",
+        "assignment",
+        "project",
+        "presentation",
+        "lab",
+        "tutorial",
+        "reading",
+        "class",
+        "other",
     ]
     source_evidence: str = Field(min_length=1, max_length=500)
 
@@ -194,9 +216,7 @@ def extract_pdf_text_chunks(
     if max_chars < 1_000:
         raise AIInputError("PDF chunk size must be at least 1,000 characters.")
     if overlap_chars < 0 or overlap_chars >= max_chars:
-        raise AIInputError(
-            "PDF chunk overlap must be nonnegative and smaller than the chunk."
-        )
+        raise AIInputError("PDF chunk overlap must be nonnegative and smaller than the chunk.")
     if not path.is_file():
         raise PDFExtractionError(f"PDF file was not found: {path}")
     if path.suffix.casefold() != ".pdf":
@@ -212,9 +232,7 @@ def extract_pdf_text_chunks(
                     "The PDF is password-protected and cannot be read."
                 ) from error
             if not unlocked:
-                raise PDFExtractionError(
-                    "The PDF is password-protected and cannot be read."
-                )
+                raise PDFExtractionError("The PDF is password-protected and cannot be read.")
     except (OSError, PdfReadError) as error:
         raise PDFExtractionError("The PDF is damaged or cannot be opened.") from error
 
@@ -289,13 +307,20 @@ def extract_powerpoint_text_chunks(
     if not path.is_file() or path.suffix.casefold() != ".pptx":
         raise AIInputError(f"PowerPoint file was not found: {path}")
     from .lecture_files import powerpoint_slide_text
+
     try:
         slides = powerpoint_slide_text(path)
     except (OSError, ValueError, KeyError, BadZipFile, ParseError) as error:
         raise AIInputError("The PowerPoint is damaged or exceeds extraction limits.") from error
-    chunks = [PDFTextChunk(index=index, page_start=number, page_end=number,
-                          text=f"[Slide {number}]\n{text[:max_chars]}")
-              for index, (number, text) in enumerate(slides, 1)]
+    chunks = [
+        PDFTextChunk(
+            index=index,
+            page_start=number,
+            page_end=number,
+            text=f"[Slide {number}]\n{text[:max_chars]}",
+        )
+        for index, (number, text) in enumerate(slides, 1)
+    ]
     if not chunks:
         raise AIInputError("No readable text was found in the PowerPoint.")
     return tuple(chunks)
@@ -345,7 +370,11 @@ class AIAssistant:
         self._task_models = dict(task_models or {})
         self._transient_failure: str | None = None
         self._uses_auth_key = api_key.startswith("AQ")
-        self._client = client if client is not None else genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=180_000))
+        self._client = (
+            client
+            if client is not None
+            else genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=180_000))
+        )
 
     @classmethod
     def from_env(
@@ -367,8 +396,7 @@ class AIAssistant:
             task_models={
                 key: value
                 for key, policy in AI_TASKS.items()
-                if policy.model_env
-                and (value := os.getenv(policy.model_env, "").strip())
+                if policy.model_env and (value := os.getenv(policy.model_env, "").strip())
             },
         )
 
@@ -404,9 +432,7 @@ class AIAssistant:
         )
         return [entry.model_dump(mode="json") for entry in entries]
 
-    def generate_quiz(
-        self, topic_or_text: str, num_questions: int = 3
-    ) -> list[dict[str, Any]]:
+    def generate_quiz(self, topic_or_text: str, num_questions: int = 3) -> list[dict[str, Any]]:
         """Generate exactly 3–5 validated conceptual multiple-choice questions."""
         if num_questions not in {3, 4, 5}:
             raise AIInputError("num_questions must be 3, 4, or 5.")
@@ -613,9 +639,7 @@ class AIAssistant:
                 )
                 text = str(response.text or "")
             if not text or not text.strip():
-                raise AIProviderError(
-                    "Gemini returned an empty connection-check response."
-                )
+                raise AIProviderError("Gemini returned an empty connection-check response.")
         except AIProviderError:
             raise
         except Exception as error:
@@ -697,8 +721,7 @@ class AIAssistant:
                     raise ValueError("unexpected generated response wrapper")
                 decoded = decoded["results"]
             if not isinstance(decoded, list) or any(
-                not isinstance(item, dict) or set(item) != expected_keys
-                for item in decoded
+                not isinstance(item, dict) or set(item) != expected_keys for item in decoded
             ):
                 raise ValueError("unexpected generated object shape")
             return adapter.validate_python(decoded)
@@ -746,7 +769,9 @@ class AIAssistant:
                     raise safe_error from None
                 delay = self._retry_delay(error, attempt)
                 AI_USAGE.record(task, retries=1)
-                reason = "rate-limited" if self._status_code(error) == 429 else "temporarily unavailable"
+                reason = (
+                    "rate-limited" if self._status_code(error) == 429 else "temporarily unavailable"
+                )
                 logging.getLogger("attendr.ai").warning(
                     "Gemini %s %s; retry %d/%d after %.1fs",
                     task_name,
@@ -856,7 +881,11 @@ class AIAssistant:
     def _safe_provider_error(error: BaseException, task_name: str) -> AIProviderError:
         """Translate provider details into actionable messages without leaking them."""
         if isinstance(error, TimeoutError) or type(error).__name__ in {
-            "APITimeoutError", "ReadTimeout", "ConnectTimeout", "WriteTimeout", "PoolTimeout"
+            "APITimeoutError",
+            "ReadTimeout",
+            "ConnectTimeout",
+            "WriteTimeout",
+            "PoolTimeout",
         }:
             return AIProviderError(
                 f"Gemini timed out during {task_name}. The request can be retried.",
@@ -873,12 +902,9 @@ class AIAssistant:
                 "and replace the value in .env."
             )
         if "model" in message and any(
-            phrase in message
-            for phrase in ("not found", "not supported", "unavailable")
+            phrase in message for phrase in ("not found", "not supported", "unavailable")
         ):
-            return AIProviderError(
-                "The configured GEMINI_MODEL is unavailable for this API key."
-            )
+            return AIProviderError("The configured GEMINI_MODEL is unavailable for this API key.")
         if code == 429 or "quota" in message or "resource exhausted" in message:
             return AIProviderError(
                 "Gemini free-tier quota is temporarily exhausted. Wait and try again.",
@@ -920,16 +946,12 @@ class AIAssistant:
         return value
 
 
-def quiz_discord_payload(
-    topic: str, questions: Sequence[Mapping[str, Any]]
-) -> dict[str, Any]:
+def quiz_discord_payload(topic: str, questions: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Build Discord embeds with answers and explanations hidden as spoilers."""
     try:
         validated = QUIZ_ADAPTER.validate_python(list(questions))
     except ValidationError:
-        raise AIInputError(
-            "Quiz data is not valid and cannot be sent to Discord."
-        ) from None
+        raise AIInputError("Quiz data is not valid and cannot be sent to Discord.") from None
     if not 3 <= len(validated) <= 5:
         raise AIInputError("A Discord quiz must contain 3–5 questions.")
 
@@ -1021,8 +1043,7 @@ def hybrid_quiz_discord_payload(
             {
                 "name": "Reveal answer",
                 "value": (
-                    f"||**{_discord_text(answer, 900)}**\n"
-                    f"{_discord_text(item.explanation, 650)}||"
+                    f"||**{_discord_text(answer, 900)}**\n{_discord_text(item.explanation, 650)}||"
                 ),
                 "inline": False,
             }
@@ -1122,9 +1143,7 @@ def _isolate_json_array(text: str) -> str:
     if stripped.startswith("```"):
         stripped = re.sub(r"^```(?:json)?\s*", "", stripped, flags=re.IGNORECASE)
         stripped = re.sub(r"\s*```$", "", stripped)
-    expected_open, expected_close = (
-        ("{", "}") if stripped.startswith("{") else ("[", "]")
-    )
+    expected_open, expected_close = ("{", "}") if stripped.startswith("{") else ("[", "]")
     start = stripped.find(expected_open)
     end = stripped.rfind(expected_close)
     if start < 0 or end < start:

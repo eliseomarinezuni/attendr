@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "example": true,
+  "institution_name": "Example University",
+  "academic_uid_namespace": "example-university",
+  "academic_calendar_url": "https://example.edu/academic-calendar",
+  "timezone": "America/Toronto",
+  "term": {
+    "start_date": "2026-09-08",
+    "end_date": "2026-12-07",
+    "no_class": [
+      {"start": "2026-10-12", "end": "2026-10-12", "reason": "Example holiday"},
+      {"start": "2026-10-13", "end": "2026-10-18", "reason": "Example study week"}
+    ]
+  },
+  "excluded_course_patterns": ["student orientation", "academic advising", "co-op program"],
+  "courses": [
+    {
+      "key": "example-graphics",
+      "name": "Example Graphics",
+      "match": ["example graphics", "exmp 1010"],
+      "lecture_materials": {"exclude_modules": ["Resources", "Examples"]},
+      "sessions": [
+        {"weekday": 0, "start": "17:10", "end": "18:30", "type": "lab"},
+        {"weekday": 2, "start": "09:40", "end": "11:00", "type": "lecture"},
+        {"weekday": 4, "start": "09:40", "end": "11:00", "type": "lecture"}
+      ]
+    },
+    {
+      "key": "example-algorithms",
+      "name": "Example Algorithms",
+      "match": ["example algorithms", "exmp 2020"],
+      "sessions": [
+        {"weekday": 1, "start": "11:10", "end": "12:30", "type": "tutorial"},
+        {"weekday": 2, "start": "15:40", "end": "17:00", "type": "lecture"},
+        {"weekday": 4, "start": "15:40", "end": "17:00", "type": "lecture"}
+      ]
+    },
+    {
+      "key": "example-web",
+      "name": "Example Web Systems",
+      "match": ["example web systems", "example web", "exmp 3030"],
+      "sessions": [
+        {"weekday": 1, "start": "12:40", "end": "14:00", "type": "lecture"},
+        {"weekday": 2, "start": "14:10", "end": "15:30", "type": "lab"},
+        {"weekday": 4, "start": "12:40", "end": "14:00", "type": "lecture"}
+      ]
+    },
+    {
+      "key": "example-ethics",
+      "name": "Example Computing and Society",
+      "match": ["example computing and society", "example ethics", "exmp 4040"],
+      "sessions": [
+        {"weekday": 3, "start": "11:10", "end": "14:00", "type": "lecture"}
+      ]
+    },
+    {
+      "key": "example-mobile",
+      "name": "Example Mobile Software",
+      "match": ["example mobile software", "example mobile", "exmp 5050"],
+      "sessions": [
+        {"weekday": 0, "start": "20:10", "end": "21:30", "type": "lecture"},
+        {"weekday": 1, "start": "17:10", "end": "18:30", "type": "lab"},
+        {"weekday": 3, "start": "20:10", "end": "21:30", "type": "lecture"}
+      ]
+    }
+  ],
+  "academic_dates": [
+    {"uid": "term-orientation", "title": "Example term orientation", "start_date": "2026-09-05", "end_date": "2026-09-07", "kind": "calendar_event"},
+    {"uid": "lectures-begin", "title": "Example lectures begin", "start_date": "2026-09-08", "kind": "calendar_event"},
+    {"uid": "add-drop-deadline", "title": "Example add/drop deadline", "start_date": "2026-09-21", "kind": "calendar_event"},
+    {"uid": "fall-study-week", "title": "Example study week", "start_date": "2026-10-13", "end_date": "2026-10-18", "kind": "calendar_event"},
+    {"uid": "lectures-end", "title": "Example lectures end", "start_date": "2026-12-07", "kind": "calendar_event"},
+    {"uid": "final-exams", "title": "Example final examination period", "start_date": "2026-12-09", "end_date": "2026-12-19", "kind": "exam"}
+  ]
+}

@@ -62,9 +62,7 @@ class AnnouncementDatesSync:
         self.timezone = ZoneInfo(app_timezone)
         self.course_schedule = course_schedule
 
-    def sync(
-        self, announcements: tuple[Announcement, ...]
-    ) -> AnnouncementDatesReport:
+    def sync(self, announcements: tuple[Announcement, ...]) -> AnnouncementDatesReport:
         index = self._load()
         analyzed = 0
         cached = 0
@@ -122,9 +120,7 @@ class AnnouncementDatesSync:
                 raw_deadlines = list(record.get("deadlines", []))
                 cached += 1
                 AI_USAGE.record("deadline_extraction", cache_hits=1)
-            elif self._legacy_cache_is_verifiable(
-                record, announcement, normalized_text
-            ):
+            elif self._legacy_cache_is_verifiable(record, announcement, normalized_text):
                 # Pre-versioned entries represented the old combined AI/grounding
                 # version. Upgrade only when every stored claim passes today.
                 assert isinstance(record, dict)
@@ -144,14 +140,10 @@ class AnnouncementDatesSync:
                     )
                 except (AIInputError, AIProviderError):
                     provider_failed = True
-                    provider_warning = (
-                        f"Could not inspect announcement dates: {announcement.course_name} — {announcement.title}."
-                    )
+                    provider_warning = f"Could not inspect announcement dates: {announcement.course_name} — {announcement.title}."
                     warnings.append(provider_warning)
                     raw_deadlines = (
-                        list(record.get("deadlines", []))
-                        if isinstance(record, dict)
-                        else []
+                        list(record.get("deadlines", [])) if isinstance(record, dict) else []
                     )
                 else:
                     newly_analyzed = True
@@ -181,10 +173,7 @@ class AnnouncementDatesSync:
                     continue
                 grounded_raw.append(deadline.model_dump(mode="json"))
                 items.append(self._to_item(announcement, deadline))
-            if (
-                provider_failed
-                and self._may_contain_deadline(announcement.message_text)
-            ):
+            if provider_failed and self._may_contain_deadline(announcement.message_text):
                 blocking_warnings.append(
                     f"Potential dated requirement could not be verified in "
                     f"{announcement.course_name} — {announcement.title}."
@@ -197,8 +186,10 @@ class AnnouncementDatesSync:
                     "model": model,
                     "extraction_method": self._extraction_method(),
                     "deadlines": grounded_raw,
-                    "source": {key: value.isoformat() if isinstance(value, datetime) else value
-                               for key, value in asdict(announcement).items()},
+                    "source": {
+                        key: value.isoformat() if isinstance(value, datetime) else value
+                        for key, value in asdict(announcement).items()
+                    },
                 }
                 content_cache[content_key] = {
                     "deadlines": grounded_raw,
@@ -229,7 +220,11 @@ class AnnouncementDatesSync:
 
     def _task_model(self) -> str:
         method = getattr(self.ai, "model_for_task", None)
-        value = method("deadline_extraction") if callable(method) else getattr(self.ai, "model", "injected")
+        value = (
+            method("deadline_extraction")
+            if callable(method)
+            else getattr(self.ai, "model", "injected")
+        )
         return value if isinstance(value, str) else "injected"
 
     @staticmethod
@@ -264,9 +259,7 @@ class AnnouncementDatesSync:
     def _to_item(self, announcement: Announcement, deadline: MajorDeadline) -> AcademicItem:
         actual_date = date.fromisoformat(deadline.due_date)
         lecture = (
-            self.course_schedule.lecture_for_course_on(
-                announcement.course_name, actual_date
-            )
+            self.course_schedule.lecture_for_course_on(announcement.course_name, actual_date)
             if self.course_schedule and deadline.kind == "exam"
             else None
         )

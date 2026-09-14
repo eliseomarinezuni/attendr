@@ -24,6 +24,17 @@ client_secret*.json
 *.db-*
 *.sqlite3
 *.sqlite3-*
+*.sqlite
+*.sqlite-*
+
+# Owner-only academic configuration and generated state.
+data/course_schedule.json
+data/preferences.json
+data/daily_topics.json
+data/announcement_dates_index.json
+data/lecture_quiz_state.json
+data/materials_index.json
+data/seen_ids.json
 
 data/materials/*
 !data/materials/.gitkeep
@@ -31,6 +42,13 @@ data/materials/*
 # Private recovery exports from managed calendar cleanup.
 data/calendar-duplicates-*.json
 data/cloud-state-rotation-*.json
+
+private/
+secrets/
+recovery/
+exports/
+output/
+*.tmp
 
 # Independent read-only Google Slides OAuth token
 google_slides_token.json

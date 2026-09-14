@@ -47,6 +47,10 @@ def environment() -> dict[str, str]:
             "token_uri": "https://accounts.example.test/token",
         }
     )
+    values["COURSE_SCHEDULE_B64"] = encoded(
+        {"timezone": "America/Toronto", "term": {}, "courses": []}
+    )
+    values["ATTENDR_PREFERENCES_B64"] = encoded({"study_windows": {}, "review_enabled": False})
     return {**os.environ, **values}
 
 
@@ -72,6 +76,8 @@ def test_valid_google_oauth_files_are_private_and_not_printed(tmp_path):
     )
     assert (tmp_path / "token.json").stat().st_mode & 0o777 == 0o600
     assert (tmp_path / "credentials.json").stat().st_mode & 0o777 == 0o600
+    assert (tmp_path / "data/course_schedule.json").stat().st_mode & 0o777 == 0o600
+    assert (tmp_path / "data/preferences.json").stat().st_mode & 0o777 == 0o600
 
 
 def test_invalid_base64_fails_without_writing_token(tmp_path):
@@ -109,3 +115,12 @@ def test_missing_required_token_fails_immediately(tmp_path):
     assert result.returncode != 0
     assert "GOOGLE_TOKEN_B64 is required" in result.stderr
     assert not (tmp_path / "token.json").exists()
+
+
+def test_missing_private_schedule_fails_without_falling_back_to_public_example(tmp_path):
+    env = environment()
+    env.pop("COURSE_SCHEDULE_B64")
+    result = run_restore(tmp_path, env)
+    assert result.returncode != 0
+    assert "COURSE_SCHEDULE_B64 is required" in result.stderr
+    assert not (tmp_path / "data/course_schedule.json").exists()

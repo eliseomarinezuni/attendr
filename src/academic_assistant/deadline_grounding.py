@@ -12,12 +12,30 @@ from .ai_assistant import MajorDeadline
 GROUNDING_VERSION = 2
 
 _MONTHS = {
-    "january": 1, "jan": 1, "february": 2, "feb": 2,
-    "march": 3, "mar": 3, "april": 4, "apr": 4,
-    "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
-    "august": 8, "aug": 8, "september": 9, "sept": 9, "sep": 9,
-    "october": 10, "oct": 10, "november": 11, "nov": 11,
-    "december": 12, "dec": 12,
+    "january": 1,
+    "jan": 1,
+    "february": 2,
+    "feb": 2,
+    "march": 3,
+    "mar": 3,
+    "april": 4,
+    "apr": 4,
+    "may": 5,
+    "june": 6,
+    "jun": 6,
+    "july": 7,
+    "jul": 7,
+    "august": 8,
+    "aug": 8,
+    "september": 9,
+    "sept": 9,
+    "sep": 9,
+    "october": 10,
+    "oct": 10,
+    "november": 11,
+    "nov": 11,
+    "december": 12,
+    "dec": 12,
 }
 _TEMPORAL_WORDS = set(_MONTHS) | {"am", "pm", "a", "p", "at", "on"}
 _TOKEN = re.compile(r"[a-z0-9]+")
@@ -59,13 +77,10 @@ def ground_deadline(
     if evidence_ambiguous and expected not in evidence_dates:
         return GroundingResult(False, "source evidence contains an ambiguous date")
     if evidence_dates and (
-        expected not in evidence_dates
-        or any(candidate != expected for candidate in evidence_dates)
+        expected not in evidence_dates or any(candidate != expected for candidate in evidence_dates)
     ):
         return GroundingResult(False, "source evidence conflicts with the extracted date")
-    expected_minutes = (
-        _time_minutes(deadline.due_time) if deadline.due_time is not None else None
-    )
+    expected_minutes = _time_minutes(deadline.due_time) if deadline.due_time is not None else None
     if expected_minutes is not None:
         evidence_times = _times_in_context(evidence, evidence_words)
         if evidence_times and (
@@ -77,7 +92,8 @@ def ground_deadline(
     match = _find_sequence(source_words, evidence_values)
     if match is None:
         anchor = [
-            value for value in evidence_values
+            value
+            for value in evidence_values
             if value not in _TEMPORAL_WORDS and not _is_number(value)
         ]
         # A semantic evidence template is allowed only when its non-temporal wording
@@ -90,11 +106,7 @@ def ground_deadline(
         if match is None:
             title_values = [word.value for word in _words(deadline.title.casefold())]
             title_is_quoted = _find_sequence(evidence_words, title_values) is not None
-            if (
-                title_is_quoted
-                and len(title_values) >= 2
-                and sum(map(len, title_values)) >= 5
-            ):
+            if title_is_quoted and len(title_values) >= 2 and sum(map(len, title_values)) >= 5:
                 match = _find_sequence(source_words, title_values)
         if match is None:
             return GroundingResult(False, "source evidence is not present")
@@ -117,7 +129,9 @@ def ground_deadline(
         if expected_minutes not in times:
             return GroundingResult(False, "the extracted time is not supported locally", locator)
         if any(candidate != expected_minutes for candidate in times):
-            return GroundingResult(False, "the local source unit contains conflicting times", locator)
+            return GroundingResult(
+                False, "the local source unit contains conflicting times", locator
+            )
     return GroundingResult(True, "grounded", locator)
 
 
@@ -135,12 +149,15 @@ def _local_context(
         line_end = len(source)
     line_number = source.count("\n", 0, match_start) + 1
 
-    sentence_start = max(
-        source.rfind(".", 0, match_start),
-        source.rfind("!", 0, match_start),
-        source.rfind("?", 0, match_start),
-        source.rfind("\n\n", 0, match_start),
-    ) + 1
+    sentence_start = (
+        max(
+            source.rfind(".", 0, match_start),
+            source.rfind("!", 0, match_start),
+            source.rfind("?", 0, match_start),
+            source.rfind("\n\n", 0, match_start),
+        )
+        + 1
+    )
     sentence_ends = [
         position
         for delimiter in (".", "!", "?", "\n\n")
@@ -174,7 +191,7 @@ def _local_context(
     anchor_index = next(
         (index for index, word in enumerate(context) if word.start >= match_start), 0
     )
-    narrowed = context[max(0, anchor_index - 8): min(len(context), anchor_index + 16)]
+    narrowed = context[max(0, anchor_index - 8) : min(len(context), anchor_index + 16)]
     if narrowed:
         start = narrowed[0].start
         end = narrowed[-1].end
@@ -190,7 +207,7 @@ def _find_sequence(words: list[_Word], values: list[str]) -> tuple[int, int] | N
     source_values = [word.value for word in words]
     width = len(values)
     for index in range(len(source_values) - width + 1):
-        if source_values[index:index + width] == values:
+        if source_values[index : index + width] == values:
             return index, width
     return None
 
@@ -205,7 +222,7 @@ def _number(value: str) -> int | None:
 
 
 def _separator(source: str, left: _Word, right: _Word) -> str:
-    return source[left.end:right.start].strip()
+    return source[left.end : right.start].strip()
 
 
 def _dates_in_context(
@@ -239,9 +256,7 @@ def _dates_in_context(
         first_sep = _separator(source, word, words[index + 1])
         third = _number(words[index + 2].value) if index + 2 < len(words) else None
         second_sep = (
-            _separator(source, words[index + 1], words[index + 2])
-            if index + 2 < len(words)
-            else ""
+            _separator(source, words[index + 1], words[index + 2]) if index + 2 < len(words) else ""
         )
         if third is not None and first_sep == second_sep == "-" and 1000 <= first <= 9999:
             candidate = _safe_date(first, second, third)
@@ -286,7 +301,9 @@ def _make_date(
     candidates = []
     for candidate_year in range(reference_date.year - 1, reference_date.year + 2):
         candidate = _safe_date(candidate_year, month, day)
-        if candidate and reference_date - timedelta(days=30) <= candidate <= reference_date + timedelta(days=370):
+        if candidate and reference_date - timedelta(
+            days=30
+        ) <= candidate <= reference_date + timedelta(days=370):
             candidates.append(candidate)
     return candidates[0] if len(candidates) == 1 else None
 
@@ -318,13 +335,21 @@ def _times_in_context(source: str, words: list[_Word]) -> set[int]:
             minute = parsed_minute
             suffix_index = index + 2
         suffix = words[suffix_index].value if suffix_index < len(words) else ""
-        if suffix in {"a", "p"} and suffix_index + 1 < len(words) and words[suffix_index + 1].value == "m":
+        if (
+            suffix in {"a", "p"}
+            and suffix_index + 1 < len(words)
+            and words[suffix_index + 1].value == "m"
+        ):
             suffix += "m"
         if suffix in {"am", "pm"}:
             if not 1 <= hour <= 12:
                 continue
             hour = hour % 12 + (12 if suffix == "pm" else 0)
             found.add(hour * 60 + minute)
-        elif minute or ":" in source[word.end: words[index + 1].start if index + 1 < len(words) else word.end]:
+        elif (
+            minute
+            or ":"
+            in source[word.end : words[index + 1].start if index + 1 < len(words) else word.end]
+        ):
             found.add(hour * 60 + minute)
     return found

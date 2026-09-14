@@ -161,9 +161,7 @@ class GoogleCalendarSyncTests(unittest.TestCase):
         calendar.sync_items([item])
         changed_due = datetime(2026, 9, 11, 20, 30, tzinfo=UTC)
 
-        report = calendar.sync_items(
-            [replace(item, due_at=changed_due, due_at_local=changed_due)]
-        )
+        report = calendar.sync_items([replace(item, due_at=changed_due, due_at_local=changed_due)])
 
         self.assertEqual(len(report.updated), 1)
         self.assertEqual(len(service.event_insert_calls), 1)
@@ -182,9 +180,7 @@ class GoogleCalendarSyncTests(unittest.TestCase):
             submitted_color_id="10",
         )
 
-        calendar.sync_items(
-            [academic_item(submitted=True, submission_state="submitted")]
-        )
+        calendar.sync_items([academic_item(submitted=True, submission_state="submitted")])
 
         body = service.event_insert_calls[0]["body"]
         self.assertTrue(body["summary"].startswith("✅ "))
@@ -202,9 +198,7 @@ class GoogleCalendarSyncTests(unittest.TestCase):
             service.calendar_insert_calls[0]["body"],
             {"summary": "College Deadlines", "timeZone": "America/Toronto"},
         )
-        self.assertEqual(
-            service.event_insert_calls[0]["calendarId"], "created-calendar"
-        )
+        self.assertEqual(service.event_insert_calls[0]["calendarId"], "created-calendar")
 
     def test_existing_named_writable_calendar_is_reused(self):
         service = FakeCalendarService(
@@ -222,9 +216,7 @@ class GoogleCalendarSyncTests(unittest.TestCase):
         calendar = GoogleCalendarSync(service, calendar_id="primary")
         due_at = datetime(2026, 9, 20, 4, 0, tzinfo=UTC)
 
-        calendar.sync_items(
-            [academic_item(due_at=due_at, due_at_local=due_at, all_day=True)]
-        )
+        calendar.sync_items([academic_item(due_at=due_at, due_at_local=due_at, all_day=True)])
 
         body = service.event_insert_calls[0]["body"]
         self.assertEqual(body["start"], {"date": "2026-09-20"})
@@ -257,9 +249,7 @@ class GoogleCalendarSyncTests(unittest.TestCase):
         retained = academic_item(uid="canvas:assignment:7:other")
         calendar.sync_items([replaced, retained])
 
-        report = calendar.sync_items(
-            [retained], delete_uids={replaced.uid}
-        )
+        report = calendar.sync_items([retained], delete_uids={replaced.uid})
 
         self.assertEqual([entry.canvas_uid for entry in report.deleted], [replaced.uid])
         self.assertEqual(len(service.event_delete_calls), 1)
@@ -279,9 +269,7 @@ class GoogleCalendarAuthenticatorTests(unittest.TestCase):
                 root / "credentials.json", root / "token.json"
             )
 
-            with self.assertRaisesRegex(
-                CalendarConfigurationError, "Desktop app credentials"
-            ):
+            with self.assertRaisesRegex(CalendarConfigurationError, "Desktop app credentials"):
                 authenticator.authenticate()
 
     def test_token_cache_is_written_with_private_permissions(self):

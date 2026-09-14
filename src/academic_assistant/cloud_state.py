@@ -106,13 +106,9 @@ class CloudStateClient:
         try:
             with sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True) as db:
                 if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-                    raise CloudStateError(
-                        "Downloaded SQLite checkpoint failed integrity check"
-                    )
+                    raise CloudStateError("Downloaded SQLite checkpoint failed integrity check")
         except sqlite3.Error as error:
-            raise CloudStateError(
-                "Downloaded SQLite checkpoint failed integrity check"
-            ) from error
+            raise CloudStateError("Downloaded SQLite checkpoint failed integrity check") from error
 
     @classmethod
     def _write_verified_database(cls, path: Path, plaintext: bytes) -> None:
@@ -148,7 +144,9 @@ class CloudStateClient:
         nonce = os.urandom(12)
         encrypted = b"\x02" + nonce + self.cipher.encrypt(nonce, zlib.compress(plaintext), _AAD)
         encoded = base64.b64encode(encrypted).decode("ascii")
-        chunks = [encoded[index : index + _CHUNK_BYTES] for index in range(0, len(encoded), _CHUNK_BYTES)]
+        chunks = [
+            encoded[index : index + _CHUNK_BYTES] for index in range(0, len(encoded), _CHUNK_BYTES)
+        ]
         payload = {
             "revision": self.revision,
             "sha256": hashlib.sha256(encrypted).hexdigest(),
@@ -168,7 +166,10 @@ class CloudStateClient:
             except CloudStateError:
                 # A lost response may hide a successful commit. Verify before retrying.
                 remote = self.request("GET", "/api/state-store").json()
-                if remote.get("sha256") == payload["sha256"] and remote["revision"] == self.revision + 1:
+                if (
+                    remote.get("sha256") == payload["sha256"]
+                    and remote["revision"] == self.revision + 1
+                ):
                     self.revision = int(remote["revision"])
                     return
                 if remote["revision"] != self.revision or attempt == 2:
@@ -210,7 +211,10 @@ def rotate_checkpoint(
         verified = temporary / "verified.db"
         if not new_client.download(verified):
             raise CloudStateError("Rotated checkpoint disappeared during verification")
-        if hashlib.sha256(verified.read_bytes()).digest() != hashlib.sha256(original.read_bytes()).digest():
+        if (
+            hashlib.sha256(verified.read_bytes()).digest()
+            != hashlib.sha256(original.read_bytes()).digest()
+        ):
             raise CloudStateError("Rotated checkpoint does not preserve the SQLite database")
     return True
 
@@ -237,7 +241,6 @@ def _save_encrypted_backup(path: Path, payload: dict[str, Any]) -> None:
         raise
 
 
-
 def client_from_env(path: Path) -> CloudStateClient | None:
     url = os.getenv("ATTENDR_STATE_URL", "").strip()
     if not url:
@@ -252,15 +255,16 @@ def client_from_env(path: Path) -> CloudStateClient | None:
         if missing:
             raise CloudStateError("Missing cloud state settings: " + ", ".join(missing))
         if required["ATTENDR_STATE_SECRET"] == required["ATTENDR_STATE_KEY"]:
-            raise CloudStateError(
-                "ATTENDR_STATE_KEY must be independent from ATTENDR_STATE_SECRET"
-            )
+            raise CloudStateError("ATTENDR_STATE_KEY must be independent from ATTENDR_STATE_SECRET")
         try:
             revision = int(os.getenv("ATTENDR_STATE_REVISION", "0"))
         except ValueError as error:
             raise CloudStateError("ATTENDR_STATE_REVISION must be an integer") from error
         _CLIENTS[resolved] = CloudStateClient(
-            url, required["ATTENDR_STATE_SECRET"], required["ATTENDR_STATE_KEY"],
-            required["ATTENDR_STATE_LEASE"], revision,
+            url,
+            required["ATTENDR_STATE_SECRET"],
+            required["ATTENDR_STATE_KEY"],
+            required["ATTENDR_STATE_LEASE"],
+            revision,
         )
     return _CLIENTS[resolved]

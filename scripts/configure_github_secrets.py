@@ -52,9 +52,7 @@ def main(argv: list[str] | None = None) -> int:
         "DISCORD_WEBHOOK_URL",
         "GEMINI_API_KEY",
     )
-    missing = [
-        name for name in required if not str(configuration.get(name) or "").strip()
-    ]
+    missing = [name for name in required if not str(configuration.get(name) or "").strip()]
     if missing:
         print(f"Missing .env values: {', '.join(missing)}", file=sys.stderr)
         return 1
@@ -107,11 +105,26 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         secrets[secret_name] = base64.b64encode(path.read_bytes()).decode("ascii")
 
-    slides_token = Path(str(configuration.get("GOOGLE_SLIDES_TOKEN_FILE") or "google_slides_token.json")).expanduser()
+    slides_token = Path(
+        str(configuration.get("GOOGLE_SLIDES_TOKEN_FILE") or "google_slides_token.json")
+    ).expanduser()
     if not slides_token.is_absolute():
         slides_token = PROJECT_ROOT / slides_token
     if slides_token.is_file():
-        secrets["GOOGLE_SLIDES_TOKEN_B64"] = base64.b64encode(slides_token.read_bytes()).decode("ascii")
+        secrets["GOOGLE_SLIDES_TOKEN_B64"] = base64.b64encode(slides_token.read_bytes()).decode(
+            "ascii"
+        )
+
+    for env_name, default_name, secret_name in (
+        ("COURSE_SCHEDULE_FILE", "data/course_schedule.json", "COURSE_SCHEDULE_B64"),
+        ("ATTENDR_PREFERENCES_FILE", "data/preferences.json", "ATTENDR_PREFERENCES_B64"),
+    ):
+        raw_path = Path(str(configuration.get(env_name) or default_name)).expanduser()
+        path = raw_path if raw_path.is_absolute() else PROJECT_ROOT / raw_path
+        if not path.is_file():
+            print(f"Required private configuration was not found: {path}", file=sys.stderr)
+            return 1
+        secrets[secret_name] = base64.b64encode(path.read_bytes()).decode("ascii")
 
     try:
         for name, value in secrets.items():
