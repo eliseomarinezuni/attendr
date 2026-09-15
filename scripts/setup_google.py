@@ -31,9 +31,16 @@ def main() -> int:
         action="store_true",
         help="Verify the existing Calendar authorization without opening a browser",
     )
+    parser.add_argument(
+        "--reauthorize",
+        action="store_true",
+        help="Force a new Calendar offline refresh token even if the cached access token works",
+    )
     args = parser.parse_args()
-    if args.check and args.lecture_slides:
-        parser.error("--check and --lecture-slides cannot be combined")
+    if args.check and (args.lecture_slides or args.reauthorize):
+        parser.error("--check cannot be combined with --lecture-slides or --reauthorize")
+    if args.reauthorize and args.lecture_slides:
+        parser.error("--reauthorize and --lecture-slides cannot be combined")
     authenticator = GoogleCalendarAuthenticator(
         ROOT / Path(os.getenv("GOOGLE_CREDENTIALS_FILE", "credentials.json")).expanduser(),
         ROOT / Path(os.getenv("GOOGLE_TOKEN_FILE", "token.json")).expanduser(),
@@ -62,6 +69,17 @@ def main() -> int:
             )
             credentials = flow.run_local_server(
                 port=0, access_type="offline", prompt="select_account consent", timeout_seconds=120
+            )
+            authenticator._save_token(credentials)
+        elif args.reauthorize:
+            flow = InstalledAppFlow.from_client_secrets_file(
+                str(authenticator.credentials_path), authenticator.scopes
+            )
+            credentials = flow.run_local_server(
+                port=0,
+                access_type="offline",
+                prompt="select_account consent",
+                timeout_seconds=120,
             )
             authenticator._save_token(credentials)
         else:

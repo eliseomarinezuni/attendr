@@ -134,7 +134,7 @@ Completion intent is committed to D1 before deleting Calendar events. This preve
 After `0007` and the Worker are deployed, repair Worker OAuth from a trusted local checkout:
 
 ```bash
-.venv/bin/python scripts/setup_google.py
+.venv/bin/python scripts/setup_google.py --reauthorize
 .venv/bin/python scripts/setup_google.py --check
 .venv/bin/python scripts/configure_cloudflare_secrets.py --google-only
 ```
