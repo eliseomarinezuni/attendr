@@ -33,5 +33,25 @@ test('correct credential can read state', async () => {
     { STUDY_SYNC_SECRET: 'configured-secret', DB: { prepare: () => ({ all: async () => ({ results: [] }) }) } }, {},
   );
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { completed_tasks: [], completed_sessions: [], rescheduled_sessions: {}, operations_pending: false });
+  assert.deepEqual(await response.json(), { completed_tasks: [], completed_sessions: [], rescheduled_sessions: {}, operations: [] });
+});
+
+test('Google health check is authenticated and returns only a safe category', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('provider-secret-body', { status: 400 });
+  try {
+    const unauthorized = await worker.fetch(
+      new Request('https://worker.example/api/google/health'),
+      { STUDY_SYNC_SECRET: 'configured-secret' }, {},
+    );
+    assert.equal(unauthorized.status, 401);
+    const response = await worker.fetch(
+      new Request('https://worker.example/api/google/health', { headers: { authorization: 'Bearer configured-secret' } }),
+      { STUDY_SYNC_SECRET: 'configured-secret', GOOGLE_CLIENT_ID: 'id', GOOGLE_CLIENT_SECRET: 'secret', GOOGLE_REFRESH_TOKEN: 'refresh' }, {},
+    );
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { ok: false, category: 'google_oauth_invalid', retryable: false });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

@@ -96,6 +96,7 @@ test('clean historical database applies the complete ordered migration chain', (
     '0004_cloud_state.sql',
     '0005_ask.sql',
     '0006_automation_watchdog.sql',
+    '0007_study_operation_recovery.sql',
   ]);
   const migrated = historicalDatabase();
   const fresh = freshDatabase();
@@ -130,6 +131,28 @@ test('representative rows survive every historical migration', () => {
   assert.equal(DB.sqlite.prepare('SELECT source_id FROM ask_staging').get().source_id, 'staged');
   assert.equal(DB.sqlite.prepare('SELECT run_id FROM automation_heartbeats').get().run_id, 'legacy-run');
   assert.equal(DB.sqlite.prepare('SELECT last_dispatch_at FROM automation_watchdog').get().last_dispatch_at, 1);
+  DB.sqlite.close();
+});
+
+test('unfinished legacy operation becomes immediately recoverable without losing payload', () => {
+  const DB = historicalDatabase();
+  for (const name of migrationFiles) {
+    if (name === '0007_study_operation_recovery.sql') {
+      DB.sqlite.prepare(`INSERT INTO study_operations
+        (interaction_id,task_uid,action,payload,status,lease_until,target_start,target_end)
+        VALUES(?,?,?,?,?,?,?,?)`).run(
+          'legacy-stuck', 'assignment:1', 'complete', '{"session_id":"safe-id"}',
+          'running', 9999999999999, null, null,
+        );
+    }
+    applyMigration(DB.sqlite, name);
+  }
+  const row = DB.sqlite.prepare(`SELECT status,lease_until,next_retry_at,attempt_count,payload
+    FROM study_operations WHERE interaction_id='legacy-stuck'`).get();
+  assert.deepEqual({ ...row }, {
+    status: 'retryable', lease_until: 0, next_retry_at: 0, attempt_count: 0,
+    payload: '{"session_id":"safe-id"}',
+  });
   DB.sqlite.close();
 });
 
@@ -199,12 +222,14 @@ test('migrated and fresh schemas enforce the same critical constraints and index
     assert.ok(indexes.has('idx_study_sessions_reminders'));
     assert.ok(indexes.has('idx_study_sessions_task'));
     assert.ok(indexes.has('idx_active_study_operation'));
-    assert.ok(indexes.has('idx_single_active_study_operation'));
+    assert.ok(indexes.has('idx_study_operations_recovery'));
+    assert.ok(!indexes.has('idx_single_active_study_operation'));
     assert.throws(() => DB.sqlite.prepare("INSERT INTO automation_heartbeats VALUES('x','invalid','r',1,NULL,1)").run());
     assert.throws(() => DB.sqlite.prepare("INSERT INTO plan_lease VALUES(2,'token',1)").run());
     assert.throws(() => DB.sqlite.prepare("INSERT INTO ask_courses VALUES('x','not-json','now')").run());
-    DB.sqlite.prepare("INSERT INTO study_operations VALUES('1','task','x','{}','running',1,NULL,NULL)").run();
-    assert.throws(() => DB.sqlite.prepare("INSERT INTO study_operations VALUES('2','other','x','{}','running',1,NULL,NULL)").run());
+    DB.sqlite.prepare("INSERT INTO study_operations(interaction_id,task_uid,action,payload,status,lease_until) VALUES('1','task','x','{}','running',1)").run();
+    DB.sqlite.prepare("INSERT INTO study_operations(interaction_id,task_uid,action,payload,status,lease_until) VALUES('2','other','x','{}','running',1)").run();
+    assert.throws(() => DB.sqlite.prepare("INSERT INTO study_operations(interaction_id,task_uid,action,payload,status,lease_until) VALUES('3','task','x','{}','retryable',1)").run());
     DB.sqlite.close();
   }
 });

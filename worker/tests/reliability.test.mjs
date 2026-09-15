@@ -226,7 +226,7 @@ test('stale correctly signed Discord requests are rejected', async () => {
   assert.equal(await verifyDiscord(request, body, { DISCORD_PUBLIC_KEY: publicKey }), false);
 });
 
-test('Google deletion followed by D1 failure resumes without replaying the action', async () => {
+test('D1 intent failure is retained and recovery completes safely', async () => {
   const DB = database();
   await sync(DB, { sessions: [session()] });
   let deletions = 0;
@@ -242,17 +242,18 @@ test('Google deletion followed by D1 failure resumes without replaying the actio
     if (fail && sql.startsWith("UPDATE study_sessions SET status='completed'")) { fail = false; throw new Error('injected D1 failure'); }
     return prepare(sql);
   };
-  await assert.rejects(handleButton(interaction, { DB }), /injected/);
-  DB.sqlite.exec('UPDATE study_operations SET lease_until=0');
+  await handleButton(interaction, { DB });
+  assert.equal(DB.sqlite.prepare('SELECT status FROM study_operations').get().status, 'retryable');
+  DB.sqlite.exec('UPDATE study_operations SET next_retry_at=0');
   await recoverOperations({ DB });
   assert.equal(DB.sqlite.prepare('SELECT status FROM study_sessions').get().status, 'completed');
   assert.equal(DB.sqlite.prepare('SELECT status FROM study_operations').get().status, 'done');
   await handleButton(interaction, { DB });
-  assert.equal(deletions, 2);
+  assert.equal(deletions, 1);
   DB.sqlite.close();
 });
 
-test('planner lease excludes both another planner and live buttons', async () => {
+test('planner lease queues a button without losing it', async () => {
   const DB = database();
   await sync(DB, { sessions: [session()] });
   assert.equal((await lease(DB, 'acquire')).status, 200);
@@ -261,9 +262,17 @@ test('planner lease excludes both another planner and live buttons', async () =>
   globalThis.fetch = async () => { writes++; return Response.json({}); };
   await handleButton({ id: '987', token: '', data: { custom_id: 'study:complete:' + sessionId } }, { DB });
   assert.equal(writes, 0);
-  assert.equal(DB.sqlite.prepare('SELECT count(*) AS count FROM study_operations').get().count, 0);
+  assert.equal(DB.sqlite.prepare('SELECT status FROM study_operations').get().status, 'pending');
   await lease(DB, 'release');
   assert.equal((await lease(DB, 'acquire', 'b'.repeat(32))).status, 200);
+  await lease(DB, 'release', 'b'.repeat(32));
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).includes('/token')) return Response.json({ access_token: 'fake' });
+    if (init.method === 'DELETE') return new Response(null, { status: 204 });
+    return Response.json({});
+  };
+  await recoverOperations({ DB });
+  assert.equal(DB.sqlite.prepare('SELECT status FROM study_operations').get().status, 'done');
   DB.sqlite.close();
 });
 
@@ -274,6 +283,147 @@ test('crashed planner lease expires and does not permanently block mutations', a
   DB.sqlite.exec('UPDATE plan_lease SET lease_until=0');
   assert.equal((await lease(DB, 'acquire', 'b'.repeat(32))).status, 200);
   await lease(DB, 'release', 'b'.repeat(32));
+  DB.sqlite.close();
+});
+
+test('permanent Worker OAuth failure is terminal and does not starve planner or reminders', async () => {
+  const DB = database();
+  const second = { ...session(), session_id: 'attendr:study:' + 'b'.repeat(20) + ':1', task_uid: 'assignment:2', event_id: 'event-2' };
+  await sync(DB, { sessions: [session(), second] });
+  let tokenCalls = 0;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('/token')) { tokenCalls++; return new Response('{}', { status: 400 }); }
+    return Response.json({ id: 'message' });
+  };
+  await handleButton({ id: '1001', type: 3, token: '', application_id: '', data: { custom_id: 'study:complete:' + sessionId } }, { DB });
+  const operation = DB.sqlite.prepare('SELECT status,attempt_count,last_error_code,intent_applied FROM study_operations').get();
+  assert.deepEqual({ ...operation }, { status: 'failed_terminal', attempt_count: 1, last_error_code: 'google_oauth_invalid', intent_applied: 1 });
+  assert.equal(DB.sqlite.prepare('SELECT status FROM study_sessions WHERE session_id=?').get(sessionId).status, 'completed');
+  await recoverOperations({ DB });
+  assert.equal(tokenCalls, 1);
+  assert.equal((await lease(DB, 'acquire', 'b'.repeat(32))).status, 200);
+  await lease(DB, 'release', 'b'.repeat(32));
+  let reminderSends = 0;
+  globalThis.fetch = async () => { reminderSends++; return Response.json({ id: 'message' }); };
+  await worker.fetch(reminderRequest(), reminderEnv(DB), {});
+  assert.equal(reminderSends, 1);
+  DB.sqlite.close();
+});
+
+test('transient operation failures use bounded retries and then stop', async () => {
+  const DB = database();
+  await sync(DB, { sessions: [session()] });
+  let tokenCalls = 0;
+  globalThis.fetch = async (url) => {
+    if (String(url).includes('/token')) { tokenCalls++; return new Response('{}', { status: 503 }); }
+    return Response.json({});
+  };
+  await handleButton({ id: '1002', type: 3, token: '', application_id: '', data: { custom_id: 'study:complete:' + sessionId } }, { DB });
+  for (let attempt = 1; attempt < 5; attempt++) {
+    DB.sqlite.exec('UPDATE study_operations SET next_retry_at=0');
+    await recoverOperations({ DB });
+  }
+  const operation = DB.sqlite.prepare('SELECT status,attempt_count,last_error_code FROM study_operations').get();
+  assert.deepEqual({ ...operation }, { status: 'failed_terminal', attempt_count: 5, last_error_code: 'google_unavailable' });
+  await recoverOperations({ DB });
+  assert.equal(tokenCalls, 5);
+  DB.sqlite.close();
+});
+
+test('temporary failure recovers and an already deleted Calendar event is success', async () => {
+  const DB = database();
+  await sync(DB, { sessions: [session()] });
+  let healthy = false;
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).includes('/token')) return healthy ? Response.json({ access_token: 'fake' }) : new Response('{}', { status: 503 });
+    if (init.method === 'DELETE') return new Response(null, { status: 410 });
+    return Response.json({});
+  };
+  await handleButton({ id: '1003', type: 3, token: '', application_id: '', data: { custom_id: 'study:complete:' + sessionId } }, { DB });
+  assert.equal(DB.sqlite.prepare('SELECT status FROM study_operations').get().status, 'effects_pending');
+  healthy = true;
+  DB.sqlite.exec('UPDATE study_operations SET next_retry_at=0');
+  await recoverOperations({ DB });
+  assert.equal(DB.sqlite.prepare('SELECT status FROM study_operations').get().status, 'done');
+  DB.sqlite.close();
+});
+
+test('completion intent is durable before the external delete and supports yesterday sessions', async () => {
+  const DB = database();
+  const yesterday = { ...session(),
+    start: new Date(Date.now() - 86400_000).toISOString(),
+    end: new Date(Date.now() - 84600_000).toISOString(),
+    task_due_at: new Date(Date.now() + 86400_000).toISOString() };
+  await sync(DB, { sessions: [yesterday] });
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).includes('/token')) return Response.json({ access_token: 'fake' });
+    if (init.method === 'DELETE') {
+      assert.equal(DB.sqlite.prepare('SELECT status FROM study_sessions').get().status, 'completed');
+      assert.equal(DB.sqlite.prepare('SELECT intent_applied FROM study_operations').get().intent_applied, 1);
+      return new Response(null, { status: 204 });
+    }
+    return Response.json({});
+  };
+  await handleButton({ id: '1004', type: 3, token: '', application_id: '', data: { custom_id: 'study:complete:' + sessionId } }, { DB });
+  assert.equal(DB.sqlite.prepare('SELECT status FROM study_operations').get().status, 'done');
+  DB.sqlite.close();
+});
+
+test('Discord acknowledgement failure does not reopen a completed operation', async () => {
+  const DB = database();
+  await sync(DB, { sessions: [session()] });
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).includes('/token')) return Response.json({ access_token: 'fake' });
+    if (init.method === 'DELETE') return new Response(null, { status: 204 });
+    throw new Error('Discord unavailable');
+  };
+  await handleButton({ id: '1005', type: 3, token: 'discord-token', application_id: 'app', data: { custom_id: 'study:complete:' + sessionId } }, { DB });
+  assert.equal(DB.sqlite.prepare('SELECT status FROM study_operations').get().status, 'done');
+  DB.sqlite.close();
+});
+
+test('safe operation inspection omits payload and manual retry completes after OAuth repair', async () => {
+  const DB = database();
+  await sync(DB, { sessions: [session()] });
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).includes('/token')) return new Response('{}', { status: 400 });
+    return Response.json({});
+  };
+  await handleButton({ id: '1006', type: 3, token: '', application_id: '', data: { custom_id: 'study:complete:' + sessionId } }, { DB });
+  const inspected = await worker.fetch(new Request('https://example.test/api/operations', { headers: { authorization: 'Bearer secret' } }), { DB, STUDY_SYNC_SECRET: 'secret' }, {});
+  const body = await inspected.json();
+  assert.equal(body.operations[0].status, 'failed_terminal');
+  assert.equal('payload' in body.operations[0], false);
+  assert.equal(JSON.stringify(body).includes('calendar_id'), false);
+  globalThis.fetch = async (url, init = {}) => {
+    if (String(url).includes('/token')) return Response.json({ access_token: 'fake' });
+    if (init.method === 'DELETE') return new Response(null, { status: 404 });
+    return Response.json({});
+  };
+  const retried = await worker.fetch(new Request('https://example.test/api/operations/retry', {
+    method: 'POST', headers: { authorization: 'Bearer secret' }, body: JSON.stringify({ interaction_id: '1006' }),
+  }), { DB, STUDY_SYNC_SECRET: 'secret' }, {});
+  assert.deepEqual(await retried.json(), { interaction_id: '1006', status: 'done' });
+  DB.sqlite.close();
+});
+
+test('operation logs use safe categories and never include provider error bodies', async () => {
+  const DB = database();
+  await sync(DB, { sessions: [session()] });
+  const logs = [];
+  const originalError = console.error;
+  console.error = (...values) => logs.push(values);
+  try {
+    globalThis.fetch = async (url) => {
+      if (String(url).includes('/token')) throw new Error('fake-secret-token');
+      return Response.json({});
+    };
+    await handleButton({ id: '1007', type: 3, token: '', application_id: '', data: { custom_id: 'study:complete:' + sessionId } }, { DB });
+  } finally {
+    console.error = originalError;
+  }
+  assert.match(JSON.stringify(logs), /google_network/);
+  assert.doesNotMatch(JSON.stringify(logs), /fake-secret-token/);
   DB.sqlite.close();
 });
 

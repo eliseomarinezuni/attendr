@@ -4,11 +4,13 @@ import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from academic_assistant import AcademicItem, BusyInterval, StudyPlanner
+from test_calendar_sync import FakeCalendarService
 
 UTC = timezone.utc
 
@@ -103,6 +105,33 @@ class StudyPlannerTests(unittest.TestCase):
         )
 
         self.assertEqual(len(sessions), 2)
+
+    def test_waiting_completion_operation_does_not_block_plan_and_prevents_recreation(self):
+        due = datetime(2026, 9, 16, 23, 59, tzinfo=UTC)
+        study_task = task("assignment-1", "assignment", due)
+        session_id = self.planner._session_uid(study_task.uid, 0)
+        remote = Mock()
+        remote.get_state.return_value = {
+            "completed_tasks": [],
+            "completed_sessions": [],
+            "rescheduled_sessions": {},
+            "operations": [
+                {
+                    "interaction_id": "123",
+                    "task_uid": study_task.uid,
+                    "session_id": session_id,
+                    "action": "complete",
+                    "status": "effects_pending",
+                }
+            ],
+        }
+        planner = StudyPlanner(FakeCalendarService(), remote=remote, now_provider=lambda: self.now)
+        with patch.object(planner, "_load_busy", return_value=[]):
+            report = planner.sync((study_task,), inputs_complete=True)
+
+        self.assertEqual(len(report.sessions), 2)
+        remote.sync_sessions.assert_called_once()
+        remote.release.assert_called_once()
 
 
 if __name__ == "__main__":

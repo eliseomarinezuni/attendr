@@ -20,9 +20,14 @@ WORKER_ROOT = PROJECT_ROOT / "worker"
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
-    result.add_argument("--worker-url", required=True)
-    result.add_argument("--guild-id", required=True)
-    result.add_argument("--channel-id", required=True)
+    result.add_argument("--worker-url")
+    result.add_argument("--guild-id")
+    result.add_argument("--channel-id")
+    result.add_argument(
+        "--google-only",
+        action="store_true",
+        help="Upload only Google OAuth secrets, then verify Worker Calendar access",
+    )
     return result
 
 
@@ -76,12 +81,51 @@ def put_secret(name: str, value: str) -> None:
     print(f"Set {name}")
 
 
+def google_values(configuration: dict[str, str | None]) -> dict[str, str]:
+    oauth_client = json_file(configuration, "GOOGLE_CREDENTIALS_FILE", "credentials.json").get(
+        "installed", {}
+    )
+    oauth_token = json_file(configuration, "GOOGLE_TOKEN_FILE", "token.json")
+    if not isinstance(oauth_client, dict):
+        raise RuntimeError("credentials.json is not a Desktop app credential.")
+    values = {
+        "GOOGLE_CLIENT_ID": str(oauth_client.get("client_id") or ""),
+        "GOOGLE_CLIENT_SECRET": str(oauth_client.get("client_secret") or ""),
+        "GOOGLE_REFRESH_TOKEN": str(oauth_token.get("refresh_token") or ""),
+    }
+    if any(not value for value in values.values()):
+        raise RuntimeError("Google OAuth files do not contain complete Worker credentials.")
+    return values
+
+
+def check_worker_google(worker_url: str, sync_secret: str) -> None:
+    try:
+        response = requests.get(
+            f"{worker_url.rstrip('/')}/api/google/health",
+            headers={"Authorization": f"Bearer {sync_secret}"},
+            timeout=20,
+        )
+    except requests.RequestException as error:
+        raise RuntimeError("Worker Google health check could not be reached.") from error
+    if response.status_code != 200:
+        category = "unknown"
+        try:
+            payload = response.json()
+            if isinstance(payload, dict) and isinstance(payload.get("category"), str):
+                category = payload["category"]
+        except ValueError:
+            pass
+        raise RuntimeError(f"Worker Google health check failed safely ({category}).")
+    print("Worker Google Calendar access verified.")
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = parser().parse_args(argv)
     env_path = PROJECT_ROOT / ".env"
     configuration = dict(dotenv_values(env_path))
     try:
-        parsed = urlparse(arguments.worker_url)
+        worker_url = str(arguments.worker_url or configuration.get("STUDY_WORKER_URL") or "")
+        parsed = urlparse(worker_url)
         if (
             parsed.scheme != "https"
             or not parsed.hostname
@@ -91,16 +135,17 @@ def main(argv: list[str] | None = None) -> int:
             or parsed.fragment
         ):
             raise RuntimeError("--worker-url must be an HTTPS deployment URL.")
-        if not arguments.guild_id.isdigit() or not arguments.channel_id.isdigit():
+        oauth_values = google_values(configuration)
+        if arguments.google_only:
+            for name, value in oauth_values.items():
+                put_secret(name, value)
+            check_worker_google(worker_url, required(configuration, "STUDY_SYNC_SECRET"))
+            print("Google OAuth Worker secrets refreshed; no values were displayed.")
+            return 0
+        if not (arguments.guild_id or "").isdigit() or not (arguments.channel_id or "").isdigit():
             raise RuntimeError("Discord IDs must be numeric.")
         bot_token = required(configuration, "DISCORD_BOT_TOKEN")
         owner_id = discord_owner(bot_token, arguments.guild_id)
-        oauth_client = json_file(configuration, "GOOGLE_CREDENTIALS_FILE", "credentials.json").get(
-            "installed", {}
-        )
-        oauth_token = json_file(configuration, "GOOGLE_TOKEN_FILE", "token.json")
-        if not isinstance(oauth_client, dict):
-            raise RuntimeError("credentials.json is not a Desktop app credential.")
 
         sync_secret = str(configuration.get("STUDY_SYNC_SECRET") or "").strip()
         if not sync_secret:
@@ -110,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
             "DISCORD_STUDY_CHANNEL_ID": arguments.channel_id,
             "DISCORD_OWNER_USER_ID": owner_id,
             "STUDY_SYNC_SECRET": sync_secret,
-            "STUDY_WORKER_URL": arguments.worker_url.rstrip("/"),
+            "STUDY_WORKER_URL": worker_url.rstrip("/"),
         }
         cloudflare_values = {
             "DISCORD_APPLICATION_ID": required(configuration, "DISCORD_APPLICATION_ID"),
@@ -119,9 +164,7 @@ def main(argv: list[str] | None = None) -> int:
             "DISCORD_STUDY_CHANNEL_ID": arguments.channel_id,
             "DISCORD_OWNER_USER_ID": owner_id,
             "STUDY_SYNC_SECRET": sync_secret,
-            "GOOGLE_CLIENT_ID": str(oauth_client.get("client_id") or ""),
-            "GOOGLE_CLIENT_SECRET": str(oauth_client.get("client_secret") or ""),
-            "GOOGLE_REFRESH_TOKEN": str(oauth_token.get("refresh_token") or ""),
+            **oauth_values,
         }
         for name, value in cloudflare_values.items():
             if not value:

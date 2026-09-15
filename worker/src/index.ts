@@ -46,6 +46,30 @@ interface SyncedSession {
   event_id: string;
 }
 
+type OperationStatus = "pending" | "running" | "retryable" | "effects_pending" | "failed_terminal" | "done";
+
+interface StudyOperation {
+  interaction_id: string;
+  task_uid: string;
+  action: string;
+  payload: string;
+  status: OperationStatus;
+  lease_until: number;
+  target_start: string | null;
+  target_end: string | null;
+  attempt_count: number;
+  next_retry_at: number;
+  last_attempt_at: number | null;
+  last_error_code: string | null;
+  intent_applied: number;
+}
+
+class OperationFailure extends Error {
+  constructor(readonly category: string, readonly retryable: boolean) {
+    super(category);
+  }
+}
+
 interface DiscordInteraction {
   id: string;
   type: number;
@@ -121,7 +145,7 @@ const REMINDER_LEASE_MS = 60_000;
 async function acquireMutationLease(env: Env, token: string, duration: number): Promise<boolean> {
   const now = Date.now();
   const acquired = await env.DB.prepare(`INSERT INTO plan_lease(id,token,lease_until)
-    SELECT 1,?,? WHERE NOT EXISTS(SELECT 1 FROM study_operations WHERE status!='done')
+    VALUES(1,?,?)
     ON CONFLICT(id) DO UPDATE SET token=excluded.token,lease_until=excluded.lease_until
     WHERE plan_lease.lease_until<? OR plan_lease.token=excluded.token RETURNING token`)
     .bind(token, now + duration, now).first();
@@ -229,13 +253,16 @@ async function getState(env: Env): Promise<Response> {
     env.DB.prepare("SELECT task_uid FROM completed_tasks").all<{ task_uid: string }>(),
     env.DB.prepare("SELECT session_id FROM study_sessions WHERE status = 'completed'").all<{ session_id: string }>(),
     env.DB.prepare("SELECT session_id, start_at, end_at FROM study_sessions WHERE status='scheduled' AND manual_override=1").all<{ session_id: string; start_at: string; end_at: string }>(),
-    env.DB.prepare("SELECT interaction_id FROM study_operations WHERE status!='done' LIMIT 1").all(),
+    env.DB.prepare(`SELECT interaction_id,task_uid,action,status,attempt_count,next_retry_at,
+      last_error_code,intent_applied,json_extract(payload,'$.session_id') AS session_id,
+      target_start,target_end FROM study_operations WHERE status!='done'
+      ORDER BY created_at,interaction_id LIMIT 100`).all(),
   ]);
   return json({
-    operations_pending: operations.results.length > 0,
     completed_tasks: tasks.results.map((item) => item.task_uid),
     completed_sessions: sessions.results.map((item) => item.session_id),
     rescheduled_sessions: Object.fromEntries(overrides.results.map((item) => [item.session_id, { start: item.start_at, end: item.end_at }])),
+    operations: operations.results,
   });
 }
 
@@ -376,8 +403,6 @@ async function syncSessions(request: Request, env: Env): Promise<Response> {
   const lease = await env.DB.prepare("SELECT token FROM plan_lease WHERE id=1 AND token=? AND lease_until>?")
     .bind(payload.plan_token ?? "", Date.now()).first();
   if (!lease) return json({ error: "Acquire the planner lease before syncing sessions" }, 409);
-  const active = await env.DB.prepare("SELECT 1 AS active FROM study_operations WHERE status!='done' LIMIT 1").first();
-  if (active) return json({ error: "Study operation pending; retry sync later" }, 409);
   const marker = crypto.randomUUID();
   const now = new Date().toISOString();
   const statements = sessions.map((item) =>
@@ -516,14 +541,22 @@ async function googleToken(env: Env): Promise<string> {
     refresh_token: env.GOOGLE_REFRESH_TOKEN,
     grant_type: "refresh_token",
   });
-  const response = await boundedFetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body,
-  });
-  if (!response.ok) throw new Error(`Google token refresh failed: ${response.status}`);
+  let response: Response;
+  try {
+    response = await boundedFetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+    });
+  } catch {
+    throw new OperationFailure("google_network", true);
+  }
+  if (!response.ok) {
+    if (response.status === 429 || response.status >= 500) throw new OperationFailure("google_unavailable", true);
+    throw new OperationFailure("google_oauth_invalid", false);
+  }
   const payload = await response.json() as { access_token?: string };
-  if (!payload.access_token) throw new Error("Google token refresh returned no access token");
+  if (!payload.access_token) throw new OperationFailure("google_oauth_invalid", false);
   return payload.access_token;
 }
 
@@ -531,7 +564,9 @@ async function deleteCalendarEvent(session: StudySession, token: string): Promis
   const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(session.calendar_id)}/events/${encodeURIComponent(session.event_id)}`;
   const response = await boundedFetch(url, { method: "DELETE", headers: { authorization: `Bearer ${token}` } });
   if (!response.ok && response.status !== 404 && response.status !== 410) {
-    throw new Error(`Calendar delete failed: ${response.status}`);
+    if (response.status === 429 || response.status >= 500) throw new OperationFailure("google_unavailable", true);
+    if (response.status === 401 || response.status === 403) throw new OperationFailure("google_oauth_invalid", false);
+    throw new OperationFailure("calendar_rejected", false);
   }
 }
 
@@ -551,41 +586,36 @@ async function getSession(id: string, env: Env): Promise<StudySession | null> {
   return env.DB.prepare("SELECT * FROM study_sessions WHERE session_id=?").bind(id).first<StudySession>();
 }
 
-async function completeSession(interaction: DiscordInteraction, session: StudySession, env: Env): Promise<void> {
-  const token = await googleToken(env);
-  await deleteCalendarEvent(session, token);
-  await env.DB.prepare(
-    "UPDATE study_sessions SET status='completed', updated_at=? WHERE session_id=?",
-  ).bind(new Date().toISOString(), session.session_id).run();
-  await env.DB.prepare("UPDATE study_operations SET status='done',lease_until=0 WHERE interaction_id=?").bind(interaction.id).run();
-  await originalResponse(interaction, {
-    content: "✅ Study session completed and removed from Google Calendar.",
-    embeds: [],
-    components: [],
-  });
+async function applyCompletionIntent(operation: StudyOperation, session: StudySession, env: Env): Promise<void> {
+  if (operation.intent_applied) return;
+  const now = new Date().toISOString();
+  const statements = operation.action === "task" ? [
+    env.DB.prepare("INSERT OR REPLACE INTO completed_tasks(task_uid,completed_at) VALUES(?,?)").bind(session.task_uid, now),
+    env.DB.prepare("UPDATE study_sessions SET status='completed',updated_at=? WHERE task_uid=?").bind(now, session.task_uid),
+  ] : [
+    env.DB.prepare("UPDATE study_sessions SET status='completed',updated_at=? WHERE session_id=?").bind(now, session.session_id),
+  ];
+  statements.push(env.DB.prepare("UPDATE study_operations SET intent_applied=1,updated_at=? WHERE interaction_id=? AND status='running'")
+    .bind(Date.now(), operation.interaction_id));
+  await env.DB.batch(statements);
+  operation.intent_applied = 1;
 }
 
-async function completeTask(interaction: DiscordInteraction, session: StudySession, env: Env): Promise<void> {
+async function completeSession(operation: StudyOperation, session: StudySession, env: Env): Promise<string> {
+  await applyCompletionIntent(operation, session, env);
+  const token = await googleToken(env);
+  await deleteCalendarEvent(session, token);
+  return "✅ Study session completed and removed from Google Calendar.";
+}
+
+async function completeTask(operation: StudyOperation, session: StudySession, env: Env): Promise<string> {
+  await applyCompletionIntent(operation, session, env);
   const rows = await env.DB.prepare(
-    "SELECT * FROM study_sessions WHERE task_uid=? AND status='scheduled'",
+    "SELECT * FROM study_sessions WHERE task_uid=? AND status='completed'",
   ).bind(session.task_uid).all<StudySession>();
   const token = await googleToken(env);
-  for (const row of rows.results) {
-    await deleteCalendarEvent(row, token);
-    await env.DB.prepare("UPDATE study_sessions SET status='completed',updated_at=? WHERE session_id=?")
-      .bind(new Date().toISOString(), row.session_id).run();
-  }
-  const now = new Date().toISOString();
-  await env.DB.batch([
-    env.DB.prepare("INSERT OR REPLACE INTO completed_tasks(task_uid, completed_at) VALUES (?, ?)").bind(session.task_uid, now),
-    env.DB.prepare("UPDATE study_sessions SET status='completed', updated_at=? WHERE task_uid=?").bind(now, session.task_uid),
-  ]);
-  await env.DB.prepare("UPDATE study_operations SET status='done',lease_until=0 WHERE interaction_id=?").bind(interaction.id).run();
-  await originalResponse(interaction, {
-    content: `✅ ${session.course_name} task completed. All remaining study sessions were removed.`,
-    embeds: [],
-    components: [],
-  });
+  for (const row of rows.results) await deleteCalendarEvent(row, token);
+  return `✅ ${session.course_name} task completed. All remaining study sessions were removed.`;
 }
 
 function localParts(value: Date): { year: number; month: number; day: number; hour: number; minute: number } {
@@ -743,34 +773,94 @@ async function currentStudySessions(
   };
 }
 
-async function reschedule(interaction: DiscordInteraction, session: StudySession, env: Env): Promise<void> {
+async function reschedule(operation: StudyOperation, session: StudySession, env: Env): Promise<string> {
   const token = await googleToken(env);
-  const saved = await env.DB.prepare("SELECT target_start,target_end FROM study_operations WHERE interaction_id=?").bind(interaction.id).first<{ target_start: string | null; target_end: string | null }>();
-  const slot = saved?.target_start && saved.target_end
-    ? { start: new Date(saved.target_start), end: new Date(saved.target_end) }
+  const slot = operation.target_start && operation.target_end
+    ? { start: new Date(operation.target_start), end: new Date(operation.target_end) }
     : await nextSlot(session, token, env);
   if (!slot) {
-    await originalResponse(interaction, { content: "⚠️ No acceptable free slot was found before the deadline.", embeds: [], components: [] });
-    return;
+    return "⚠️ No acceptable free slot was found before the deadline.";
   }
   await env.DB.prepare("UPDATE study_operations SET target_start=?,target_end=? WHERE interaction_id=?")
-    .bind(slot.start.toISOString(), slot.end.toISOString(), interaction.id).run();
+    .bind(slot.start.toISOString(), slot.end.toISOString(), operation.interaction_id).run();
+  operation.target_start = slot.start.toISOString();
+  operation.target_end = slot.end.toISOString();
   const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(session.calendar_id)}/events/${encodeURIComponent(session.event_id)}`;
   const response = await boundedFetch(url, {
     method: "PATCH",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ start: { dateTime: slot.start.toISOString(), timeZone: TIME_ZONE }, end: { dateTime: slot.end.toISOString(), timeZone: TIME_ZONE } }),
   });
-  if (!response.ok) throw new Error(`Calendar reschedule failed: ${response.status}`);
+  if (!response.ok) {
+    if (response.status === 429 || response.status >= 500) throw new OperationFailure("google_unavailable", true);
+    if (response.status === 401 || response.status === 403) throw new OperationFailure("google_oauth_invalid", false);
+    if (response.status === 404 || response.status === 410) throw new OperationFailure("calendar_event_missing", false);
+    throw new OperationFailure("calendar_rejected", false);
+  }
   await env.DB.prepare(
     "UPDATE study_sessions SET start_at=?, end_at=?, notified=0, manual_override=1, message_id=NULL, updated_at=? WHERE session_id=?",
   ).bind(slot.start.toISOString(), slot.end.toISOString(), new Date().toISOString(), session.session_id).run();
-  await env.DB.prepare("UPDATE study_operations SET status='done',lease_until=0 WHERE interaction_id=?").bind(interaction.id).run();
-  await originalResponse(interaction, {
-    content: `↪️ Rescheduled to ${discordTimestamp(slot.start.toISOString())}–${discordTimestamp(slot.end.toISOString())}.`,
-    embeds: [],
-    components: [],
-  });
+  return `↪️ Rescheduled to ${discordTimestamp(slot.start.toISOString())}–${discordTimestamp(slot.end.toISOString())}.`;
+}
+
+const OPERATION_LEASE_MS = 10 * 60_000;
+const MAX_OPERATION_ATTEMPTS = 5;
+const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000];
+
+function operationFailure(error: unknown): OperationFailure {
+  return error instanceof OperationFailure ? error : new OperationFailure("operation_internal", true);
+}
+
+interface OperationOutcome { status: OperationStatus | "queued"; message: string; }
+
+async function performOperation(operation: StudyOperation, env: Env): Promise<string> {
+  const session = JSON.parse(operation.payload) as StudySession;
+  if (operation.action === "complete") return completeSession(operation, session, env);
+  if (operation.action === "task") return completeTask(operation, session, env);
+  return reschedule(operation, session, env);
+}
+
+async function runOperation(interactionId: string, env: Env): Promise<OperationOutcome> {
+  const leaseToken = crypto.randomUUID().replaceAll("-", "");
+  if (!await acquireMutationLease(env, leaseToken, OPERATION_LEASE_MS)) {
+    return { status: "queued", message: "⏳ Your action was saved and will run shortly." };
+  }
+  try {
+    const now = Date.now();
+    const operation = await env.DB.prepare(`UPDATE study_operations SET
+      status='running',lease_until=?,attempt_count=attempt_count+1,last_attempt_at=?,updated_at=?
+      WHERE interaction_id=? AND (
+        (status IN ('pending','retryable','effects_pending') AND next_retry_at<=?) OR
+        (status='running' AND lease_until<=?)
+      ) RETURNING *`).bind(now + OPERATION_LEASE_MS, now, now, interactionId, now, now).first<StudyOperation>();
+    if (!operation) return { status: "queued", message: "⏳ Your saved action is waiting for its next safe retry." };
+    try {
+      const message = await performOperation(operation, env);
+      await env.DB.prepare(`UPDATE study_operations SET status='done',lease_until=0,next_retry_at=0,
+        last_error_code=NULL,updated_at=?,finished_at=? WHERE interaction_id=? AND status='running'`)
+        .bind(Date.now(), Date.now(), interactionId).run();
+      return { status: "done", message };
+    } catch (error) {
+      const failure = operationFailure(error);
+      const current = await env.DB.prepare("SELECT intent_applied,attempt_count FROM study_operations WHERE interaction_id=?")
+        .bind(interactionId).first<{ intent_applied: number; attempt_count: number }>();
+      const attempts = current?.attempt_count ?? operation.attempt_count;
+      const canRetry = failure.retryable && attempts < MAX_OPERATION_ATTEMPTS;
+      const status: OperationStatus = canRetry
+        ? ((current?.intent_applied ?? operation.intent_applied) ? "effects_pending" : "retryable")
+        : "failed_terminal";
+      const delay = canRetry ? RETRY_DELAYS_MS[Math.min(attempts - 1, RETRY_DELAYS_MS.length - 1)] : 0;
+      await env.DB.prepare(`UPDATE study_operations SET status=?,lease_until=0,next_retry_at=?,
+        last_error_code=?,updated_at=?,finished_at=? WHERE interaction_id=? AND status='running'`)
+        .bind(status, canRetry ? Date.now() + delay : 0, failure.category, Date.now(), canRetry ? null : Date.now(), interactionId).run();
+      console.error("Study operation attempt failed", { interaction_id: interactionId, category: failure.category, retryable: canRetry, attempt: attempts });
+      return canRetry
+        ? { status, message: "⚠️ Attendr saved your action but a temporary service problem delayed the Calendar update. It will retry automatically." }
+        : { status, message: "⚠️ Attendr saved your action, but it needs credential repair or a manual retry before the Calendar update can finish." };
+    }
+  } finally {
+    await releaseMutationLease(env, leaseToken);
+  }
 }
 
 async function handleButton(interaction: DiscordInteraction, env: Env): Promise<void> {
@@ -781,39 +871,82 @@ async function handleButton(interaction: DiscordInteraction, env: Env): Promise<
     return;
   }
   const session = await getSession(match[2], env);
-  if (!session || session.status !== "scheduled") {
+  if (!session || session.status === "completed" || (match[1] === "reschedule" && session.status !== "scheduled")) {
     await originalResponse(interaction, { content: "ℹ️ This study session was already handled.", embeds: [], components: [] });
     return;
   }
+  const now = Date.now();
   const claim = await env.DB.prepare(
-    "INSERT OR IGNORE INTO study_operations(interaction_id,task_uid,action,payload,status,lease_until) SELECT ?,task_uid,?,json_object('session_id',session_id,'task_uid',task_uid,'title',title,'course_name',course_name,'start_at',start_at,'end_at',end_at,'task_due_at',task_due_at,'calendar_id',calendar_id,'event_id',event_id,'status',status,'notified',notified,'manual_override',manual_override,'message_id',message_id),'running',? FROM study_sessions WHERE session_id=? AND status='scheduled' AND NOT EXISTS(SELECT 1 FROM plan_lease WHERE lease_until>?) RETURNING payload"
-  ).bind(interaction.id, match[1], Date.now() + 600_000, session.session_id, Date.now()).first<{ payload: string }>();
+    "INSERT OR IGNORE INTO study_operations(interaction_id,task_uid,action,payload,status,lease_until,next_retry_at,created_at,updated_at) SELECT ?,task_uid,?,json_object('session_id',session_id,'task_uid',task_uid,'title',title,'course_name',course_name,'start_at',start_at,'end_at',end_at,'task_due_at',task_due_at,'calendar_id',calendar_id,'event_id',event_id,'status',status,'notified',notified,'manual_override',manual_override,'message_id',message_id),'pending',0,0,?,? FROM study_sessions WHERE session_id=? RETURNING interaction_id"
+  ).bind(interaction.id, match[1], now, now, session.session_id).first<{ interaction_id: string }>();
   if (!claim) {
-    await originalResponse(interaction, { content: "Attendr is updating this plan or handling an earlier action. Try again shortly." });
+    await originalResponse(interaction, { content: "Attendr already has a saved action for this task. Check its status before trying again." });
     return;
   }
-  await executeOperation(interaction, match[1], JSON.parse(claim.payload) as StudySession, env);
-}
-
-async function executeOperation(interaction: DiscordInteraction, action: string, session: StudySession, env: Env): Promise<void> {
-  if (action === "complete") await completeSession(interaction, session, env);
-  else if (action === "task") await completeTask(interaction, session, env);
-  else await reschedule(interaction, session, env);
-  await env.DB.prepare("UPDATE study_operations SET status='done',lease_until=0 WHERE interaction_id=?").bind(interaction.id).run();
+  const outcome = await runOperation(interaction.id, env);
+  try {
+    await originalResponse(interaction, { content: outcome.message, embeds: [], components: [] });
+  } catch {
+    console.error("Discord acknowledgement failed", { interaction_id: interaction.id, operation_status: outcome.status });
+  }
 }
 
 async function recoverOperations(env: Env): Promise<void> {
-  const rows = await env.DB.prepare("SELECT interaction_id,action,payload FROM study_operations WHERE status!='done' AND lease_until<? LIMIT 10")
-    .bind(Date.now()).all<{ interaction_id: string; action: string; payload: string }>();
+  const now = Date.now();
+  const rows = await env.DB.prepare(`SELECT interaction_id FROM study_operations WHERE
+    (status IN ('pending','retryable','effects_pending') AND next_retry_at<=?) OR
+    (status='running' AND lease_until<=?) ORDER BY updated_at,interaction_id LIMIT 10`)
+    .bind(now, now).all<{ interaction_id: string }>();
   for (const row of rows.results) {
-    const claim = await env.DB.prepare("UPDATE study_operations SET lease_until=? WHERE interaction_id=? AND status!='done' AND lease_until<? RETURNING interaction_id")
-      .bind(Date.now() + 600_000, row.interaction_id, Date.now()).first();
-    if (!claim) continue;
     try {
-      await executeOperation({ id: row.interaction_id, type: 3, token: "", application_id: "" }, row.action, JSON.parse(row.payload) as StudySession, env);
+      await runOperation(row.interaction_id, env);
     } catch {
-      console.error("Study operation awaiting retry", row.interaction_id);
+      console.error("Study operation recovery unavailable", { interaction_id: row.interaction_id });
     }
+  }
+}
+
+async function listOperations(env: Env): Promise<Response> {
+  const rows = await env.DB.prepare(`SELECT interaction_id,task_uid,action,status,attempt_count,
+    next_retry_at,last_attempt_at,last_error_code,intent_applied,created_at,updated_at,finished_at,
+    json_extract(payload,'$.session_id') AS session_id,target_start,target_end
+    FROM study_operations ORDER BY created_at DESC,interaction_id DESC LIMIT 100`).all();
+  return json({ operations: rows.results });
+}
+
+async function retryOperation(request: Request, env: Env): Promise<Response> {
+  let body: { interaction_id?: unknown };
+  try { body = await request.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
+  if (!body || typeof body.interaction_id !== "string" || !/^\d{1,32}$/.test(body.interaction_id)) {
+    return json({ error: "Invalid interaction ID" }, 400);
+  }
+  const row = await env.DB.prepare(`UPDATE study_operations SET
+    status=CASE WHEN intent_applied=1 THEN 'effects_pending' ELSE 'retryable' END,
+    attempt_count=0,next_retry_at=0,lease_until=0,last_error_code=NULL,updated_at=?,finished_at=NULL
+    WHERE interaction_id=? AND status IN ('retryable','effects_pending','failed_terminal')
+    RETURNING interaction_id,status`).bind(Date.now(), body.interaction_id).first();
+  if (!row) return json({ error: "Operation is not retryable" }, 409);
+  const outcome = await runOperation(body.interaction_id, env);
+  return json({ interaction_id: body.interaction_id, status: outcome.status });
+}
+
+async function googleHealth(env: Env): Promise<Response> {
+  try {
+    const token = await googleToken(env);
+    const response = await boundedFetch("https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=1", {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      const failure = response.status === 429 || response.status >= 500
+        ? new OperationFailure("google_unavailable", true)
+        : new OperationFailure("google_oauth_invalid", false);
+      throw failure;
+    }
+    return json({ ok: true, calendar_api: "available" });
+  } catch (error) {
+    const failure = operationFailure(error);
+    console.error("Google Calendar health check failed", { category: failure.category, retryable: failure.retryable });
+    return json({ ok: false, category: failure.category, retryable: failure.retryable }, 503);
   }
 }
 
@@ -862,8 +995,8 @@ async function discordInteraction(request: Request, env: Env, ctx: ExecutionCont
     return json({ type: 5, data: { flags: 64 } });
   }
   ctx.waitUntil(handleButton(interaction, env).catch((error) => {
-    console.error("Button operation awaiting recovery", interaction.id);
-    return originalResponse(interaction, { content: "⚠️ Attendr could not complete that action. The saved operation will retry automatically.", embeds: [], components: [] });
+    console.error("Button operation could not be confirmed", { interaction_id: interaction.id });
+    return originalResponse(interaction, { content: "⚠️ Attendr could not confirm that action. Check its operation status before trying again.", embeds: [], components: [] });
   }));
   return json({ type: 6 });
 }
@@ -894,6 +1027,15 @@ export default {
     }
     if (url.pathname === "/api/state" && request.method === "GET") {
       return isAuthorized(request, env) ? getState(env) : unauthorized();
+    }
+    if (url.pathname === "/api/operations" && request.method === "GET") {
+      return isAuthorized(request, env) ? listOperations(env) : unauthorized();
+    }
+    if (url.pathname === "/api/operations/retry" && request.method === "POST") {
+      return isAuthorized(request, env) ? retryOperation(request, env) : unauthorized();
+    }
+    if (url.pathname === "/api/google/health" && request.method === "GET") {
+      return isAuthorized(request, env) ? googleHealth(env) : unauthorized();
     }
     if (url.pathname === "/api/automation/heartbeat" && request.method === "POST") {
       return isAuthorized(request, env) ? automationHeartbeat(request, env) : unauthorized();

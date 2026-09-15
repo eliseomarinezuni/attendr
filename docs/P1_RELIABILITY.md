@@ -121,16 +121,29 @@ npx wrangler d1 execute attendr-study --remote --file=migrations/0003_study_pref
 npx wrangler d1 execute attendr-study --remote --file=migrations/0004_cloud_state.sql
 npx wrangler d1 execute attendr-study --remote --file=migrations/0005_ask.sql
 npx wrangler d1 execute attendr-study --remote --file=migrations/0006_automation_watchdog.sql
+npx wrangler d1 execute attendr-study --remote --file=migrations/0007_study_operation_recovery.sql
 npm run deploy
 ```
 
 These are deployment instructions, not commands executed as part of the local implementation. Apply only migrations not already applied, in filename order. The migrations add resumable operations and canonicalize existing timestamps to UTC milliseconds. Invalid legacy timestamps fail rather than silently becoming valid dates. New installations can use `schema.sql`.
 
-Signed interactions now have a five-minute freshness bound, persistent interaction IDs, and one active operation globally. Selected reschedule destinations are saved before Google PATCH; interrupted operations replay the same destination. Google deletes tolerate already-deleted events. Successful D1 mutations are recorded before editing the Discord response, preventing a failed response update from repeating the action. Recovery runs from the five-minute Worker schedule after an expired ten-minute operation lease. Pending operations block new Python study reconciliation when observed.
+Signed interactions have a five-minute freshness bound and persistent interaction IDs. Operations move through `pending`, `running`, `retryable`/`effects_pending`, `failed_terminal`, and `done`. Only `running` attempts hold the shared mutation lease; waiting or terminal operations do not starve the planner or reminders. Recovery uses bounded backoff and stops after five transient failures. Permanent Google OAuth/permission failures stop immediately with a safe category. Selected reschedule destinations are saved before Google PATCH, and Google deletes treat 404/410 as success.
+
+Completion intent is committed to D1 before deleting Calendar events. This prevents a scheduled planner run from recreating a completed session after a Worker interruption. The delete is then retried idempotently, and the operation is marked `done` before Discord acknowledgement. An acknowledgement failure therefore cannot replay a completed mutation. `/api/state` exposes only structured, non-secret operation metadata so Python can protect affected sessions without globally refusing reconciliation.
+
+After `0007` and the Worker are deployed, repair Worker OAuth from a trusted local checkout:
+
+```bash
+.venv/bin/python scripts/setup_google.py
+.venv/bin/python scripts/setup_google.py --check
+.venv/bin/python scripts/configure_cloudflare_secrets.py --google-only
+```
+
+The last command uploads only `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REFRESH_TOKEN`, displays no values, and calls the authenticated `/api/google/health` endpoint. Inspect safe operation metadata with `GET /api/operations` using the existing bearer credential. Retry a repaired terminal operation with `POST /api/operations/retry` and JSON `{"interaction_id":"..."}`. The endpoint resets the bounded retry budget but preserves completion intent and any saved reschedule target.
 
 Reminders acquire the shared mutation lease before atomically claiming `notified=-1`, so Python planning and button operations cannot cancel or reschedule a session while its Discord delivery is in flight. Confirmed delivery and confirmed Discord rate limiting release the lease immediately. A crash or uncertain response leaves `notified=-1` to prevent duplicate delivery, while the reminder's 60-second lease expires automatically so planning cannot deadlock. Inspect the Discord channel and the D1 row before setting an unresolved reminder to `1` (confirmed sent) or `0` (confirmed absent). Python and Worker FreeBusy requests paginate all calendars, batch groups of 50, and reject incomplete coverage.
 
-A shared D1 planner lease excludes button operations while Python reads availability and updates Calendar. Button operations are serialized globally because different tasks share calendar openings. Claims capture the current session atomically. The planner stops starting Calendar mutations after 15 minutes; its server lease lasts 20 minutes, with Calendar HTTP calls bounded to 60 seconds. A crashed planner can temporarily block study controls until lease expiry. Pending Worker sync payloads are cached locally and retried under the next acquired lease. The Worker availability windows currently use America/Toronto; retain that timezone for online study controls.
+A shared D1 planner lease excludes only actively executing button/reminder mutations while Python reads availability and updates Calendar. Claims capture the current session atomically. The planner stops starting Calendar mutations after 15 minutes; its server lease lasts 20 minutes, with bounded HTTP calls. A crashed holder can temporarily block mutations only until lease expiry. Pending Worker sync payloads are cached locally and retried under the next acquired lease. The Worker availability windows currently use America/Toronto; retain that timezone for online study controls.
 
 ## Verification
 

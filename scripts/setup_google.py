@@ -76,6 +76,8 @@ def main() -> int:
     print("Google Calendar authorization succeeded.\n")
     print("If using GitHub Actions, replace GOOGLE_TOKEN_B64 with the base64")
     print("encoding of the newly generated token.json.")
+    print("If using study buttons, refresh and verify the Worker's separate OAuth copy with:")
+    print("  .venv/bin/python scripts/configure_cloudflare_secrets.py --google-only")
     return 0
 
 

@@ -308,15 +308,27 @@ class StudyPlanner:
                 ) from None
             if (
                 not isinstance(remote_state, dict)
-                or remote_state.get("operations_pending", False) is not False
                 or any(
                     not isinstance(remote_state.get(key), list)
                     or any(not isinstance(value, str) for value in remote_state[key])
                     for key in ("completed_tasks", "completed_sessions")
                 )
                 or not isinstance(remote_state.get("rescheduled_sessions"), dict)
+                or not isinstance(remote_state.get("operations"), list)
             ):
                 raise CalendarAPIError("Invalid online study state; existing study plan preserved.")
+            for operation in remote_state["operations"]:
+                if (
+                    not isinstance(operation, dict)
+                    or operation.get("action") not in {"complete", "task", "reschedule"}
+                    or operation.get("status")
+                    not in {"pending", "running", "retryable", "effects_pending", "failed_terminal"}
+                    or not isinstance(operation.get("task_uid"), str)
+                    or not isinstance(operation.get("session_id"), str)
+                ):
+                    raise CalendarAPIError(
+                        "Invalid online operation state; existing study plan preserved."
+                    )
             for override in remote_state["rescheduled_sessions"].values():
                 try:
                     start = datetime.fromisoformat(override["start"])
@@ -339,9 +351,19 @@ class StudyPlanner:
         warnings: list[str] = []
         completed_tasks = set(remote_state.get("completed_tasks", []))
         completed_sessions = set(remote_state.get("completed_sessions", []))
-        rescheduled_sessions = remote_state.get("rescheduled_sessions", {})
+        rescheduled_sessions = dict(remote_state.get("rescheduled_sessions", {}))
         if not isinstance(rescheduled_sessions, dict):
             rescheduled_sessions = {}
+        for operation in remote_state.get("operations", []):
+            if operation["action"] == "complete":
+                completed_sessions.add(operation["session_id"])
+            elif operation["action"] == "task":
+                completed_tasks.add(operation["task_uid"])
+            elif operation.get("target_start") and operation.get("target_end"):
+                rescheduled_sessions.setdefault(
+                    operation["session_id"],
+                    {"start": operation["target_start"], "end": operation["target_end"]},
+                )
         tasks = tuple(item for item in tasks if item.uid not in completed_tasks)
 
         if tasks:

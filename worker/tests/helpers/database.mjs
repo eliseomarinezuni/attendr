@@ -71,6 +71,6 @@ export function schemaSignature(sqlite) {
     WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name`).all();
   return objects.map((object) => ({
     ...object,
-    sql: object.sql?.replace(/\s+/g, ' ').trim() ?? null,
+    sql: object.sql?.replace(/\s+/g, ' ').replace(/\s+,/g, ',').replace(/\s+\)/g, ')').trim() ?? null,
   }));
 }

@@ -61,3 +61,12 @@ def test_private_runtime_data_is_ignored_and_examples_are_tracked() -> None:
 
     assert (ROOT / "data" / "course_schedule.example.json").is_file()
     assert (ROOT / "data" / "preferences.example.json").is_file()
+
+
+def test_worker_google_credentials_have_a_safe_scoped_refresh_command() -> None:
+    script = (ROOT / "scripts" / "configure_cloudflare_secrets.py").read_text(encoding="utf-8")
+
+    assert '"--google-only"' in script
+    assert "/api/google/health" in script
+    assert "response.text" not in script
+    assert "response.content" not in script

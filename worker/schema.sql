@@ -36,20 +36,26 @@ CREATE TABLE IF NOT EXISTS study_operations (
   status TEXT NOT NULL,
   lease_until INTEGER NOT NULL,
   target_start TEXT,
-  target_end TEXT
+  target_end TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  next_retry_at INTEGER NOT NULL DEFAULT 0,
+  last_attempt_at INTEGER,
+  last_error_code TEXT,
+  intent_applied INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT 0,
+  finished_at INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_active_study_operation
   ON study_operations(task_uid) WHERE status != 'done';
+CREATE INDEX IF NOT EXISTS idx_study_operations_recovery
+  ON study_operations(status,next_retry_at,lease_until);
 
 CREATE TABLE IF NOT EXISTS plan_lease (
   id INTEGER PRIMARY KEY CHECK(id=1),
   token TEXT NOT NULL,
   lease_until INTEGER NOT NULL
 );
-
--- Rescheduling different tasks must also be serialized: they share availability.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_single_active_study_operation
-  ON study_operations((1)) WHERE status != 'done';
 
 CREATE TABLE IF NOT EXISTS study_preferences (
   name TEXT PRIMARY KEY,
