@@ -551,6 +551,19 @@ class DiscordNotifier:
         if not isinstance(self.state, StateStore):
             return 0
         pending_deliveries = self.state.pending_deliveries()
+        max_lecture_age = self._read_positive_int("LECTURE_REVIEW_MAX_AGE_MINUTES", 60) * 60
+        now_timestamp = self._now_utc().timestamp()
+        pending_deliveries = [
+            pending
+            for pending in pending_deliveries
+            if not (
+                pending["destination"] in {"lecture_quizzes", "lecture_summaries"}
+                and now_timestamp - float(pending["created_at"]) > max_lecture_age
+                and self.state.discard_pending_delivery(
+                    str(pending["event_key"]), str(pending["fingerprint"])
+                )
+            )
+        ]
         if pending_deliveries:
             self._assert_delivery_allowed()
         sent = 0

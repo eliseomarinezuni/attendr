@@ -238,6 +238,25 @@ class DiscordNotifierTests(unittest.TestCase):
         self.assertEqual(session.calls, [])
         self.assertEqual(len(store.pending_deliveries()), 1)
 
+    def test_stale_lecture_retry_is_discarded_instead_of_sent_late(self):
+        store = StateStore(self.state_path)
+        store.enqueue_messages(
+            "lecture_quizzes:custom:lecture-quiz:old",
+            "fingerprint",
+            "lecture_quizzes",
+            ({"content": "old quiz"},),
+        )
+        with store.connect() as database:
+            database.execute(
+                "UPDATE delivery_outbox SET created_at=?",
+                (NOW.timestamp() - 61 * 60,),
+            )
+        notifier, session, _ = self.make_notifier()
+
+        self.assertEqual(notifier.flush_pending(), 0)
+        self.assertEqual(session.calls, [])
+        self.assertEqual(store.pending_deliveries(), [])
+
     def test_rate_limit_uses_retry_after_then_retries(self):
         notifier, session, sleeps = self.make_notifier(
             [FakeResponse(429, {"retry_after": 1.25}), FakeResponse(204)]

@@ -212,6 +212,15 @@ class StateStore:
                 )
             ]
 
+    def discard_pending_delivery(self, key: str, fingerprint: str) -> bool:
+        """Discard only an unclaimed retry; sending/uncertain rows remain untouched."""
+        with self.connect() as db:
+            result = db.execute(
+                "DELETE FROM delivery_outbox WHERE event_key=? AND fingerprint=? AND status='pending'",
+                (key, fingerprint),
+            )
+            return result.rowcount == 1
+
     def blocked_deliveries(self) -> int:
         with self.connect() as db:
             return db.execute(
