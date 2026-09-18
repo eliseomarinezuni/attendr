@@ -8,23 +8,30 @@ import re
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from html.parser import HTMLParser
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
 from .ai_assistant import (
+    AI_TASKS,
     AIAssistant,
     AIInputError,
     AIProviderError,
-    extract_pdf_text_chunks,
-    extract_powerpoint_text_chunks,
     hybrid_quiz_discord_payload,
 )
+from .ai_efficiency import AI_USAGE
 from .canvas_client import CanvasClient, INTRODUCTORY_MATERIAL_PATTERN, LectureMaterial
-from .lecture_files import lecture_file_limit
 from .course_schedule import ClassSession, CourseSchedule
-from .state_store import StateStore
+from .lecture_content import (
+    LectureContentBundle,
+    LectureContentSource,
+    build_lecture_content_bundle,
+    extract_lecture_material,
+)
+from .lecture_files import lecture_file_limit
+from .lecture_summary import lecture_summary_discord_payload
 from .notifier import DiscordNotificationError, DiscordNotifier
+from .state_store import StateStore
 
 UTC = timezone.utc
 
@@ -38,13 +45,17 @@ class LectureQuizReport:
     failed: int = 0
 
 
-class _HTMLText(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.parts: list[str] = []
-
-    def handle_data(self, data: str) -> None:
-        self.parts.append(data)
+@dataclass(frozen=True, slots=True)
+class LectureReviewReport:
+    summaries_sent: int
+    summaries_already_sent: int
+    summaries_waiting_for_slides: int
+    summaries_failed: int
+    quizzes_sent: int
+    quizzes_already_sent: int
+    quizzes_waiting_for_slides: int
+    quizzes_failed: int
+    warnings: tuple[str, ...]
 
 
 class LectureQuizRunner:
@@ -71,23 +82,89 @@ class LectureQuizRunner:
         self.max_file_bytes = max_file_bytes if max_file_bytes is not None else lecture_file_limit()
 
     def run(self, *, now: datetime | None = None, force: bool = False) -> LectureQuizReport:
+        """Backward-compatible quiz-only entry point."""
+        report = self.process(
+            now=now,
+            force=force,
+            include_summaries=False,
+            include_quizzes=True,
+        )
+        return LectureQuizReport(
+            report.quizzes_sent,
+            report.quizzes_already_sent,
+            report.quizzes_waiting_for_slides,
+            report.warnings,
+            report.quizzes_failed,
+        )
+
+    def process(
+        self,
+        *,
+        now: datetime | None = None,
+        force: bool = False,
+        include_summaries: bool = True,
+        include_quizzes: bool = True,
+    ) -> LectureReviewReport:
+        """Generate selected post-lecture outputs from one shared content bundle."""
+        if include_summaries and self.store is None:
+            raise AIInputError("Lecture summaries require the SQLite ATTENDR_DB state store.")
         current = now or datetime.now(UTC)
         due = self.schedule.ended_lecture_sessions(current, retry_hours=self.retry_hours)
         if not due:
-            return LectureQuizReport(0, 0, 0, ())
+            return LectureReviewReport(0, 0, 0, 0, 0, 0, 0, 0, ())
         state = self._load_state() if self.store is None else {"sent": {}}
+        summary_records = {
+            session.session_id(ended_at.date()): self._summary_record(
+                session.session_id(ended_at.date())
+            )
+            for session, ended_at in due
+            if include_summaries and not force
+        }
+        summary_already = sum(
+            1
+            for session, ended_at in due
+            if include_summaries
+            and not force
+            and self._summary_delivered(
+                session.session_id(ended_at.date()),
+                summary_records.get(session.session_id(ended_at.date())),
+            )
+        )
+        quiz_already = sum(
+            1
+            for session, ended_at in due
+            if include_quizzes
+            and not force
+            and self._already_sent(session.session_id(ended_at.date()), state)
+        )
         pending = [
             (session, ended_at)
             for session, ended_at in due
-            if force or not self._already_sent(session.session_id(ended_at.date()), state)
+            if force
+            or (
+                include_summaries
+                and not self._summary_delivered(
+                    session.session_id(ended_at.date()),
+                    summary_records.get(session.session_id(ended_at.date())),
+                )
+            )
+            or (
+                include_quizzes
+                and not self._already_sent(session.session_id(ended_at.date()), state)
+            )
         ]
-        already = len(due) - len(pending)
         if not pending:
-            return LectureQuizReport(0, already, 0, ())
+            return LectureReviewReport(0, summary_already, 0, 0, 0, quiz_already, 0, 0, ())
         needs_materials = any(
             force
-            or not self.store
-            or not self.store.quiz(f"lecture-quiz:{session.session_id(ended_at.date())}")
+            or (include_summaries and not summary_records.get(session.session_id(ended_at.date())))
+            or (
+                include_quizzes
+                and (
+                    not self.store
+                    or not self.store.quiz(f"lecture-quiz:{session.session_id(ended_at.date())}")
+                )
+            )
             for session, ended_at in pending
         )
         downloads = (
@@ -100,69 +177,260 @@ class LectureQuizRunner:
             if needs_materials
             else SimpleNamespace(materials=(), warnings=())
         )
-        sent = waiting = failed = 0
+        summary_sent = summary_waiting = summary_failed = 0
+        quiz_sent = quiz_waiting = quiz_failed = 0
         warnings = list(downloads.warnings)
         for session, ended_at in pending:
             session_id = session.session_id(ended_at.date())
-            if session_id in state.get("sent", {}) and not force:
-                already += 1
-                continue
-            key = f"lecture-quiz:{session_id}"
-            cached = self.store.quiz(key) if self.store and not force else None
-            selected = (
-                self._select_materials(session, ended_at, downloads.materials) if not cached else ()
+            summary_record = summary_records.get(session_id) if not force else None
+            summary_pending = include_summaries and (
+                force or not self._summary_delivered(session_id, summary_record)
             )
-            if not selected and not cached:
-                waiting += 1
-                warnings.append(
-                    f"No matching slides for session {session_id}; will retry while in the configured window."
-                )
-                continue
-            try:
-                key = f"lecture-quiz:{session_id}"
-                cached = self.store.quiz(key) if self.store and not force else None
-                if cached:
-                    payload = cached["payload"]
-                else:
-                    source = self._materials_text(selected)
-                    questions = self.ai.generate_hybrid_quiz(source)
-                    title = self._materials_title(selected)
-                    payload = hybrid_quiz_discord_payload(title, questions)
-                    if self.store and not force:
-                        payload = self.store.save_quiz(key, payload)
-                delivered = self.notifier.send_custom_notification(
-                    key,
-                    payload,
-                    force=force,
-                    destination="lecture_quizzes",
-                    fixed_fingerprint="session",
-                )
-                if delivered:
-                    state.setdefault("sent", {})[session_id] = {
-                        "sent_at": current.astimezone(UTC).isoformat(),
-                        "material_uid": ",".join(item.uid for item in selected)
-                        if selected
-                        else "cached",
-                        "content_sha256": ",".join(item.content_sha256 for item in selected)
-                        if selected
-                        else "cached",
-                    }
-                    if not force:
-                        if self.store:
+            quiz_pending = include_quizzes and (force or not self._already_sent(session_id, state))
+            quiz_key = f"lecture-quiz:{session_id}"
+            quiz_record = self.store.quiz(quiz_key) if self.store and not force else None
+            generation_needed = (summary_pending and not summary_record) or (
+                quiz_pending and not quiz_record
+            )
+            selected: tuple[LectureMaterial, ...] = ()
+            bundle = None
+            if generation_needed:
+                selected = self._select_materials(session, ended_at, downloads.materials)
+                if selected:
+                    try:
+                        bundle = self._build_content_bundle(session, ended_at, selected)
+                        warnings.extend(bundle.warnings)
+                        if not force:
                             self._save_material_mapping(session_id, selected)
-                            self.store.complete_quiz(key)
-                        else:
-                            self._save_state(state)
-                    sent += 1
+                    except (AIInputError, OSError) as error:
+                        detail = type(error).__name__
+                        if summary_pending and not summary_record:
+                            summary_failed += 1
+                            summary_pending = False
+                            warnings.append(f"Summary failed for session {session_id}: {detail}")
+                        if quiz_pending and not quiz_record:
+                            quiz_failed += 1
+                            quiz_pending = False
+                            warnings.append(f"Quiz failed for session {session_id}: {detail}")
                 else:
-                    if self.store and not force:
-                        self.store.complete_quiz(key)
-                    already += 1
-            except (AIInputError, AIProviderError, DiscordNotificationError, OSError) as error:
-                failed += 1
-                detail = str(error) if isinstance(error, AIProviderError) else type(error).__name__
-                warnings.append(f"Quiz failed for session {session_id}: {detail}")
-        return LectureQuizReport(sent, already, waiting, tuple(warnings), failed)
+                    if summary_pending and not summary_record:
+                        summary_waiting += 1
+                        summary_pending = False
+                    if quiz_pending and not quiz_record:
+                        quiz_waiting += 1
+                        quiz_pending = False
+                    warnings.append(
+                        f"No matching slides for session {session_id}; will retry while in the configured window."
+                    )
+                if not summary_pending and not quiz_pending:
+                    continue
+
+            if summary_pending:
+                try:
+                    if summary_record:
+                        AI_USAGE.record("lecture_summary", cache_hits=1)
+                        summary_payload = summary_record["payload"]
+                        summary_fingerprint = summary_record["content_hash"]
+                    else:
+                        assert bundle is not None
+                        summary_payload, summary_fingerprint = self._generate_summary(
+                            bundle, force=force
+                        )
+                    delivered = self.notifier.send_custom_notification(
+                        f"lecture-summary:{session_id}",
+                        summary_payload,
+                        force=force,
+                        destination="lecture_summaries",
+                        fixed_fingerprint=summary_fingerprint,
+                    )
+                    if delivered:
+                        summary_sent += 1
+                    else:
+                        summary_already += 1
+                except (AIInputError, AIProviderError, DiscordNotificationError, OSError) as error:
+                    summary_failed += 1
+                    detail = (
+                        str(error) if isinstance(error, AIProviderError) else type(error).__name__
+                    )
+                    warnings.append(f"Summary failed for session {session_id}: {detail}")
+
+            if quiz_pending:
+                try:
+                    if quiz_record:
+                        quiz_payload = quiz_record["payload"]
+                    else:
+                        assert bundle is not None
+                        questions = self.ai.generate_hybrid_quiz(bundle.combined_text)
+                        quiz_payload = hybrid_quiz_discord_payload(bundle.title, questions)
+                        if self.store and not force:
+                            quiz_payload = self.store.save_quiz(quiz_key, quiz_payload)
+                    delivered = self.notifier.send_custom_notification(
+                        quiz_key,
+                        quiz_payload,
+                        force=force,
+                        destination="lecture_quizzes",
+                        fixed_fingerprint="session",
+                    )
+                    if delivered:
+                        state.setdefault("sent", {})[session_id] = {
+                            "sent_at": current.astimezone(UTC).isoformat(),
+                            "material_uid": ",".join(item.uid for item in selected) or "cached",
+                            "content_sha256": (
+                                ",".join(item.content_sha256 for item in selected) or "cached"
+                            ),
+                        }
+                        if not force:
+                            if self.store:
+                                self.store.complete_quiz(quiz_key)
+                            else:
+                                self._save_state(state)
+                        quiz_sent += 1
+                    else:
+                        if self.store and not force:
+                            self.store.complete_quiz(quiz_key)
+                        quiz_already += 1
+                except (AIInputError, AIProviderError, DiscordNotificationError, OSError) as error:
+                    quiz_failed += 1
+                    detail = (
+                        str(error) if isinstance(error, AIProviderError) else type(error).__name__
+                    )
+                    warnings.append(f"Quiz failed for session {session_id}: {detail}")
+        return LectureReviewReport(
+            summary_sent,
+            summary_already,
+            summary_waiting,
+            summary_failed,
+            quiz_sent,
+            quiz_already,
+            quiz_waiting,
+            quiz_failed,
+            tuple(warnings),
+        )
+
+    def _build_content_bundle(
+        self,
+        session: ClassSession,
+        ended_at: datetime,
+        materials: tuple[LectureMaterial, ...],
+    ) -> LectureContentBundle:
+        if all(isinstance(getattr(item, "local_path", None), Path) for item in materials):
+            return build_lecture_content_bundle(session, ended_at, materials)
+        # Compatibility for synthetic callers that supplied material-like test objects
+        # before the source-preserving bundle existed. Production LectureMaterial values
+        # always carry a concrete Path and use the audited extraction path above.
+        text = self._materials_text(materials)
+        first = materials[0]
+        text_hash = sha256(text.encode("utf-8")).hexdigest()
+        source = LectureContentSource(
+            reference_id="S1",
+            canvas_uid=str(getattr(first, "uid", "synthetic")),
+            canvas_source_id=str(getattr(first, "source_id", "synthetic")),
+            title=str(getattr(first, "title", "Lecture material")),
+            content_hash=str(getattr(first, "content_sha256", text_hash)),
+            text_hash=text_hash,
+            text=text,
+            location=None,
+            extraction_method="synthetic",
+            safe_url=None,
+        )
+        session_id = session.session_id(ended_at.date())
+        course_name = str(getattr(first, "course_name", "Lecture"))
+        return LectureContentBundle(
+            course_key=str(getattr(session, "course_key", "synthetic")),
+            course_name=course_name,
+            session_id=session_id,
+            session_date=ended_at.date().isoformat(),
+            session_type=str(getattr(session, "activity", "lecture")),
+            lecture_label=str(getattr(first, "title", "Lecture material")),
+            sources=(source,),
+            combined_text=text,
+            content_hash=sha256(
+                f"{session_id}:{source.content_hash}:{text_hash}".encode("utf-8")
+            ).hexdigest(),
+        )
+
+    def _summary_record(self, session_id: str) -> dict[str, object] | None:
+        if not self.store:
+            return None
+        value = self.store.cache_get(f"lecture-summary-session:v1:{session_id}")
+        if not isinstance(value, dict):
+            return None
+        if not isinstance(value.get("payload"), dict) or not isinstance(
+            value.get("content_hash"), str
+        ):
+            return None
+        return value
+
+    def _summary_delivered(self, session_id: str, record: dict[str, object] | None) -> bool:
+        if not self.store or not record:
+            return False
+        return self.store.was_sent(
+            f"lecture_summaries:custom:lecture-summary:{session_id}",
+            str(record["content_hash"]),
+        )
+
+    def _generate_summary(
+        self, bundle: LectureContentBundle, *, force: bool
+    ) -> tuple[dict[str, object], str]:
+        policy = AI_TASKS["lecture_summary"]
+        model = self.ai.model_for_task("lecture_summary")
+        cache_identity = f"lecture-summary:v{policy.prompt_version}:{model}:{bundle.content_hash}"
+        cache_key = f"lecture-summary-content:{sha256(cache_identity.encode()).hexdigest()}"
+        cached = self.store.cache_get(cache_key) if self.store and not force else None
+        if isinstance(cached, dict) and isinstance(cached.get("summary"), dict):
+            AI_USAGE.record("lecture_summary", cache_hits=1)
+            structured = cached["summary"]
+            generated_at = str(cached.get("generated_at") or datetime.now(UTC).isoformat())
+        else:
+            AI_USAGE.record("lecture_summary", cache_misses=1)
+            structured = self.ai.generate_lecture_summary(
+                bundle.summary_context(self.ai.max_input_chars),
+                source_texts=bundle.source_texts,
+            )
+            generated_at = datetime.now(UTC).isoformat()
+            if self.store and not force:
+                self.store.cache_set(
+                    cache_key,
+                    {
+                        "summary": structured,
+                        "content_hash": bundle.content_hash,
+                        "prompt_version": policy.prompt_version,
+                        "model": model,
+                        "generated_at": generated_at,
+                        "sources": self._summary_provenance(bundle),
+                    },
+                )
+        payload = lecture_summary_discord_payload(bundle, structured)
+        if self.store and not force:
+            self.store.cache_set(
+                f"lecture-summary-session:v1:{bundle.session_id}",
+                {
+                    "payload": payload,
+                    "content_hash": bundle.content_hash,
+                    "cache_key": cache_key,
+                    "prompt_version": policy.prompt_version,
+                    "model": model,
+                    "generated_at": generated_at,
+                    "sources": self._summary_provenance(bundle),
+                },
+            )
+        return payload, bundle.content_hash
+
+    @staticmethod
+    def _summary_provenance(bundle: LectureContentBundle) -> list[dict[str, object]]:
+        return [
+            {
+                "source_id": source.reference_id,
+                "canvas_uid": source.canvas_uid,
+                "canvas_source_id": source.canvas_source_id,
+                "title": source.title,
+                "content_hash": source.content_hash,
+                "text_hash": source.text_hash,
+                "location": source.location,
+                "extraction_method": source.extraction_method,
+            }
+            for source in bundle.sources
+        ]
 
     def _already_sent(self, session_id: str, state: dict[str, object]) -> bool:
         if self.store:
@@ -372,9 +640,15 @@ class LectureQuizRunner:
             self.store.cache_set(
                 f"lecture-material-map:v1:{session_id}",
                 {
-                    "material_uids": [item.uid for item in materials],
-                    "module_ids": [getattr(item, "module_id", None) for item in materials],
-                    "item_ids": [getattr(item, "item_id", None) for item in materials],
+                    "material_uids": [str(item.uid) for item in materials],
+                    "module_ids": [
+                        str(value) if (value := getattr(item, "module_id", None)) else None
+                        for item in materials
+                    ],
+                    "item_ids": [
+                        str(value) if (value := getattr(item, "item_id", None)) else None
+                        for item in materials
+                    ],
                 },
             )
 
@@ -405,20 +679,8 @@ class LectureQuizRunner:
 
     @staticmethod
     def _material_text(material: LectureMaterial) -> str:
-        if material.local_path.suffix.casefold() == ".txt":
-            return material.local_path.read_text(encoding="utf-8")
-        if material.local_path.suffix.casefold() == ".pdf":
-            chunks = extract_pdf_text_chunks(material.local_path)
-        elif material.local_path.suffix.casefold() == ".pptx":
-            chunks = extract_powerpoint_text_chunks(material.local_path)
-        else:
-            parser = _HTMLText()
-            parser.feed(material.local_path.read_text(encoding="utf-8"))
-            text = " ".join(" ".join(parser.parts).split())
-            if not text:
-                raise AIInputError("Canvas lecture page contains no readable text.")
-            return text
-        return "\n\n".join(chunk.text for chunk in chunks)
+        text, _, _ = extract_lecture_material(material)
+        return text
 
     def _load_state(self) -> dict[str, object]:
         if not self.state_path.exists():

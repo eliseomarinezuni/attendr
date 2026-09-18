@@ -13,6 +13,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 import main as attendr_main
 from academic_assistant.logging_config import HarmlessPypdfRepairFilter, RedactedJSONFormatter
+from academic_assistant.settings import Settings
 
 
 class MainRunnerTests(unittest.TestCase):
@@ -74,8 +75,44 @@ class MainRunnerTests(unittest.TestCase):
 
         self.assertEqual(
             attendr_main.resolve_plan(arguments),
-            attendr_main.RunPlan(True, True, True, True, False, True, True),
+            attendr_main.RunPlan(
+                True,
+                True,
+                True,
+                True,
+                False,
+                True,
+                True,
+                lecture_summaries=True,
+            ),
         )
+
+    def test_lecture_summary_mode_does_not_enable_quizzes(self):
+        arguments = attendr_main.build_parser().parse_args(["--lecture-summaries"])
+
+        plan = attendr_main.resolve_plan(arguments)
+
+        self.assertTrue(plan.lecture_summaries)
+        self.assertFalse(plan.lecture_quizzes)
+        self.assertTrue(plan.needs_canvas)
+
+    def test_lecture_summary_mode_requires_dedicated_discord_channel(self):
+        plan = attendr_main.resolve_plan(
+            attendr_main.build_parser().parse_args(["--lecture-summaries"])
+        )
+        environment = {
+            "CANVAS_BASE_URL": "https://canvas.example.edu",
+            "CANVAS_API_TOKEN": "canvas-test-value",
+            "DISCORD_WEBHOOK_URL": "https://discord.com/api/webhooks/1/test-value",
+            "DISCORD_BOT_TOKEN": "bot-test-value",
+            "GEMINI_API_KEY": "gemini-test-value",
+        }
+
+        with patch.dict("os.environ", environment, clear=True):
+            with self.assertRaisesRegex(
+                ValueError, "DISCORD_LECTURE_SUMMARIES_CHANNEL_ID must be configured"
+            ):
+                Settings.from_env(plan)
 
     def test_sync_only_disables_unrelated_steps(self):
         arguments = attendr_main.build_parser().parse_args(["--sync-only"])

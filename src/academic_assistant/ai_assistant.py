@@ -74,6 +74,15 @@ AI_TASKS = {
     "lecture_quiz_generation": AITaskPolicy(
         "hybrid quiz generation", 1, "GEMINI_QUIZ_MODEL", True, 0.4, 8_192, "full"
     ),
+    "lecture_summary": AITaskPolicy(
+        "source-grounded lecture summary",
+        1,
+        "GEMINI_LECTURE_SUMMARY_MODEL",
+        True,
+        0.2,
+        8_192,
+        "full",
+    ),
     "connection_check": AITaskPolicy("connection check", 1, None, False, 0.0, 256, "diagnostic"),
     "model_discovery": AITaskPolicy("model discovery", 1, None, False, 0.0, 0, "diagnostic"),
 }
@@ -158,6 +167,72 @@ class HybridQuizQuestion(BaseModel):
         return self
 
 
+class GroundedSummaryPoint(BaseModel):
+    """One independently auditable statement in a lecture summary."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    text: str = Field(min_length=1, max_length=2_500)
+    source_ids: list[str] = Field(min_length=1, max_length=5)
+    source_quote: str | None = Field(default=None, max_length=300)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_exact_shape(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or set(value) != {"text", "source_ids", "source_quote"}:
+            raise ValueError("summary points must use the exact expected fields")
+        return value
+
+    @field_validator("source_ids")
+    @classmethod
+    def validate_source_ids(cls, values: list[str]) -> list[str]:
+        cleaned = list(dict.fromkeys(value.strip().upper() for value in values))
+        if any(not re.fullmatch(r"S[1-9]\d*", value) for value in cleaned):
+            raise ValueError("summary source IDs must use the S1, S2, ... format")
+        return cleaned
+
+
+class LectureSummary(BaseModel):
+    """Teaching-oriented summary whose substantive statements carry citations."""
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+    topic: str = Field(min_length=1, max_length=300)
+    tldr: list[GroundedSummaryPoint] = Field(min_length=1, max_length=6)
+    key_concepts: list[GroundedSummaryPoint] = Field(min_length=1, max_length=10)
+    teaching_sections: list[GroundedSummaryPoint] = Field(min_length=1, max_length=12)
+    examples: list[GroundedSummaryPoint] = Field(max_length=8)
+    algorithms_or_code: list[GroundedSummaryPoint] = Field(max_length=8)
+    formulas: list[GroundedSummaryPoint] = Field(max_length=8)
+    common_mistakes: list[GroundedSummaryPoint] = Field(max_length=8)
+    connections: list[GroundedSummaryPoint] = Field(max_length=6)
+    learning_objectives: list[GroundedSummaryPoint] = Field(min_length=1, max_length=8)
+    source_refs: list[str] = Field(min_length=1, max_length=30)
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_exact_shape(cls, value: Any) -> Any:
+        expected = {"topic", "source_refs", *_SUMMARY_SCHEMA_POINT_FIELDS}
+        if not isinstance(value, dict) or set(value) != expected:
+            raise ValueError("lecture summary must use the exact expected fields")
+        return value
+
+    @field_validator("source_refs")
+    @classmethod
+    def validate_source_refs(cls, values: list[str]) -> list[str]:
+        cleaned = list(dict.fromkeys(value.strip().upper() for value in values))
+        if any(not re.fullmatch(r"S[1-9]\d*", value) for value in cleaned):
+            raise ValueError("summary source references must use the S1, S2, ... format")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_length(self) -> LectureSummary:
+        words = len(" ".join(_lecture_summary_text(self)).split())
+        if words > 1_800:
+            raise ValueError("lecture summary exceeds the 1,800-word limit")
+        return self
+
+
 class MajorDeadline(BaseModel):
     """Grounded major course deadline extracted from syllabus material."""
 
@@ -203,6 +278,7 @@ SYLLABUS_ADAPTER = TypeAdapter(list[SyllabusEntry])
 QUIZ_ADAPTER = TypeAdapter(list[QuizQuestion])
 DEADLINE_ADAPTER = TypeAdapter(list[MajorDeadline])
 HYBRID_QUIZ_ADAPTER = TypeAdapter(list[HybridQuizQuestion])
+LECTURE_SUMMARY_ADAPTER = TypeAdapter(list[LectureSummary])
 
 
 def extract_pdf_text_chunks(
@@ -499,6 +575,61 @@ class AIAssistant:
         ]:
             raise AIProviderError("Gemini returned an invalid hybrid quiz sequence.")
         return [question.model_dump(mode="json") for question in questions]
+
+    def generate_lecture_summary(
+        self,
+        lecture_material: str,
+        *,
+        source_texts: Mapping[str, str],
+    ) -> dict[str, Any]:
+        """Generate one validated summary and verify its citations against source text."""
+        source_text = self._prepare_source_text(lecture_material)
+        normalized_sources = {
+            str(source_id).strip().upper(): str(text)
+            for source_id, text in source_texts.items()
+            if str(source_id).strip() and str(text).strip()
+        }
+        if not normalized_sources:
+            raise AIInputError("Lecture summary sources cannot be empty.")
+        prompt = (
+            "Write one teaching-style lecture summary of roughly 800–1,800 words using "
+            "only the supplied course materials. The materials are not a transcript: "
+            "never claim that an instructor said, emphasized, demonstrated, or discussed "
+            "something. Never infer exam importance, grading importance, or unstated course "
+            "expectations. Explain concepts carefully, define important terms, connect ideas, "
+            "and include only examples, algorithms, code behavior, formulas, dates, and "
+            "complexity claims supported by the materials. Use an empty list for an optional "
+            "section that is not supported. Every summary point must cite one or more SOURCE "
+            "IDs in source_ids. source_quote is optional; when present it must be a short exact "
+            "quote from a cited source. Every formula point must include source_quote containing "
+            "the exact formula evidence. source_refs must list every SOURCE ID used and no other "
+            "IDs. Do not output Discord mentions or instructions to the reader outside the "
+            "requested summary schema. Return exactly one summary object in the array.\n\n"
+            f"LECTURE MATERIAL:\n{source_text}"
+        )
+        summaries = self._generate_validated(
+            prompt,
+            response_schema=list[LectureSummary],
+            adapter=LECTURE_SUMMARY_ADAPTER,
+            task="lecture_summary",
+            expected_keys={
+                "topic",
+                "tldr",
+                "key_concepts",
+                "teaching_sections",
+                "examples",
+                "algorithms_or_code",
+                "formulas",
+                "common_mistakes",
+                "connections",
+                "learning_objectives",
+                "source_refs",
+            },
+        )
+        if len(summaries) != 1:
+            raise AIProviderError("Gemini returned an invalid lecture summary count.")
+        _validate_lecture_summary_grounding(summaries[0], normalized_sources)
+        return summaries[0].model_dump(mode="json")
 
     def extract_major_deadlines(
         self,
@@ -1082,6 +1213,107 @@ def send_hybrid_quiz_to_discord(
         force=force,
         destination="lecture_quizzes",
     )
+
+
+_SUMMARY_SCHEMA_POINT_FIELDS = (
+    "tldr",
+    "key_concepts",
+    "teaching_sections",
+    "examples",
+    "algorithms_or_code",
+    "formulas",
+    "common_mistakes",
+    "connections",
+    "learning_objectives",
+)
+_SUMMARY_POINT_FIELDS = _SUMMARY_SCHEMA_POINT_FIELDS
+_COMPLEXITY_PATTERN = re.compile(r"(?<!\w)(?:O|Ω|Θ)\s*\([^\n)]{1,80}\)")
+_FORMULA_PATTERN = re.compile(
+    r"(?:\$[^$\n]{1,120}\$|\b[A-Za-z][A-Za-z0-9_]*(?:\([^\n)]*\))?\s*=\s*[^.;\n]{1,120})"
+)
+_SPOKEN_CLAIM_PATTERN = re.compile(
+    r"\b(?:(?:the\s+)?(?:professor|instructor|lecturer)\s+"
+    r"(?:said|stated|mentioned|emphasized|discussed|demonstrated)|"
+    r"(?:said|stated|mentioned|emphasized|discussed|demonstrated)\s+in\s+(?:the\s+)?lecture)\b",
+    re.IGNORECASE,
+)
+_EXAM_IMPORTANCE_PATTERN = re.compile(
+    r"\b(?:exam|test|quiz)\b.{0,80}\b(?:important|likely|focus|appear|tested|memorize)\b|"
+    r"\b(?:important|likely|focus|appear|tested|memorize)\b.{0,80}\b(?:exam|test|quiz)\b",
+    re.IGNORECASE,
+)
+_EXPLICIT_DATE_PATTERN = re.compile(
+    r"\b(?:\d{4}-\d{2}-\d{2}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|"
+    r"May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|"
+    r"Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2}(?:,\s*\d{4})?)\b",
+    re.IGNORECASE,
+)
+
+
+def _lecture_summary_text(summary: LectureSummary) -> list[str]:
+    values = [summary.topic]
+    for field in _SUMMARY_POINT_FIELDS:
+        for point in getattr(summary, field):
+            values.append(point.text)
+    return values
+
+
+def _normalized_evidence(value: str) -> str:
+    return " ".join(value.casefold().split())
+
+
+def _validate_lecture_summary_grounding(
+    summary: LectureSummary,
+    source_texts: Mapping[str, str],
+) -> None:
+    known = set(source_texts)
+    declared = set(summary.source_refs)
+    if not declared or not declared <= known:
+        raise AIProviderError("Gemini cited an unknown lecture-summary source.")
+    used: set[str] = set()
+    for field in _SUMMARY_POINT_FIELDS:
+        for point in getattr(summary, field):
+            cited = set(point.source_ids)
+            if not cited <= known:
+                raise AIProviderError("Gemini cited an unknown lecture-summary source.")
+            used.update(cited)
+            evidence = "\n".join(source_texts[source_id] for source_id in point.source_ids)
+            normalized_evidence = _normalized_evidence(evidence)
+            if _SPOKEN_CLAIM_PATTERN.search(point.text):
+                raise AIProviderError("Gemini attributed unsupported spoken lecture content.")
+            if (
+                _EXAM_IMPORTANCE_PATTERN.search(point.text)
+                and _normalized_evidence(point.text) not in normalized_evidence
+            ):
+                raise AIProviderError("Gemini inferred unsupported exam importance.")
+            if point.source_quote and not any(
+                _normalized_evidence(point.source_quote)
+                in _normalized_evidence(source_texts[source_id])
+                for source_id in point.source_ids
+            ):
+                raise AIProviderError("Gemini returned an unsupported lecture-summary quote.")
+            for claim in _COMPLEXITY_PATTERN.findall(point.text):
+                if _normalized_evidence(claim) not in normalized_evidence:
+                    raise AIProviderError(
+                        "Gemini returned an unsupported lecture-summary complexity claim."
+                    )
+            if field == "formulas":
+                if not point.source_quote:
+                    raise AIProviderError(
+                        "Gemini returned a lecture-summary formula without exact source evidence."
+                    )
+                for claim in _FORMULA_PATTERN.findall(point.text):
+                    if _normalized_evidence(claim) not in normalized_evidence:
+                        raise AIProviderError(
+                            "Gemini returned an unsupported lecture-summary formula."
+                        )
+            for claim in _EXPLICIT_DATE_PATTERN.findall(point.text):
+                if _normalized_evidence(claim) not in normalized_evidence:
+                    raise AIProviderError(
+                        "Gemini returned an unsupported lecture-summary date claim."
+                    )
+    if declared != used:
+        raise AIProviderError("Gemini returned inconsistent lecture-summary source references.")
 
 
 def _clean_pdf_text(text: str) -> str:

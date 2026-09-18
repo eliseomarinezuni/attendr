@@ -1,6 +1,6 @@
 # Attendr
 
-Attendr is a self-hosted personal academic assistant with read-only Canvas ingestion, automatic syllabus/announcement date extraction, Google Calendar sync, Discord alerts, and post-lecture Gemini quizzes from Canvas PDFs, PowerPoints, and Pages. It is not a hosted service. Each deployer supplies their own credentials and is responsible for protecting the academic data Attendr processes. Python 3.11.
+Attendr is a self-hosted personal academic assistant with read-only Canvas ingestion, automatic syllabus/announcement date extraction, Google Calendar sync, Discord alerts, and source-grounded post-lecture Gemini summaries and quizzes from Canvas PDFs, PowerPoints, and Pages. It is not a hosted service. Each deployer supplies their own credentials and is responsible for protecting the academic data Attendr processes. Python 3.11.
 
 Before accepting public contributions or deploying a fork, read the [public repository security model](docs/PUBLIC_RELEASE.md). Security issues should be reported through [GitHub's private vulnerability reporting](SECURITY.md), not a public issue.
 
@@ -29,17 +29,20 @@ Useful modes:
 .venv/bin/python main.py --quiz-only --topic "Binary search trees"
 .venv/bin/python main.py --daily-quiz
 .venv/bin/python main.py --lecture-quizzes
+.venv/bin/python main.py --lecture-summaries
 .venv/bin/python main.py --study-plan-only
 .venv/bin/python main.py --quiz-only --quiz-pdf data/materials/lecture.pdf
 ```
 
-The default run sends unseen announcements, extracts dated items from syllabuses and all recent announcements, syncs deadlines plus configured institution dates and every lecture/lab/tutorial in the private timetable, sends a configurable digest (72 hours by default), and retries any post-lecture quiz waiting for slides. Canvas assignments override announcements; newest announcements override syllabuses. A date without a stated time remains an all-day event on its stated date. Academic date ranges use an exclusive next-day end. The exception is a same-course midterm or exam on an unambiguous lecture date: when the source omits the time, Attendr uses that lecture slot. Explicit exam times are preserved when replacing a lecture occurrence.
+The default run sends unseen announcements, extracts dated items from syllabuses and all recent announcements, syncs deadlines plus configured institution dates and every lecture/lab/tutorial in the private timetable, sends a configurable digest (72 hours by default), and retries any post-lecture summary or quiz waiting for slides. Canvas assignments override announcements; newest announcements override syllabuses. A date without a stated time remains an all-day event on its stated date. Academic date ranges use an exclusive next-day end. The exception is a same-course midterm or exam on an unambiguous lecture date: when the source omits the time, Attendr uses that lecture slot. Explicit exam times are preserved when replacing a lecture occurrence.
 
-`--lecture-quizzes` scans every published Canvas Module for the lecture that just ended. It reads PDF, PowerPoint (`.pptx`), Canvas Page content, and readable Google Slides links regardless of filenames; labs/tutorials never produce quizzes. It matches explicit date/lecture labels first, then stable Canvas IDs and ordered topic modules. Multiple items in one module are combined. Each quiz contains two conceptual multiple-choice questions and one short-answer active-recall question. The owner's ignored timetable and no-class dates are configured through `COURSE_SCHEDULE_FILE`; a synthetic template is provided in `data/course_schedule.example.json`.
+`--lecture-quizzes` scans every published Canvas Module for the lecture that just ended and sends both a summary and a quiz. `--lecture-summaries` runs only the summary half. The shared pipeline reads PDF, PowerPoint (`.pptx`), Canvas Page content, and readable Google Slides links regardless of filenames; labs/tutorials never produce either output. It matches explicit date/lecture labels first, then stable Canvas IDs and ordered topic modules. Multiple items in one module are combined and extracted once. Each quiz contains two conceptual multiple-choice questions and one short-answer active-recall question. Each summary is a teaching-oriented, roughly 800–1,800 word explanation with per-point source IDs and a deterministic source section; it never claims to represent spoken lecture content. The owner's ignored timetable and no-class dates are configured through `COURSE_SCHEDULE_FILE`; a synthetic template is provided in `data/course_schedule.example.json`.
 
 Large lecture files up to `LECTURE_MAX_FILE_MB=768` are streamed to temporary disk with a five-minute download budget and bounded retries. PowerPoint extraction reads slide/table/notes XML without loading embedded video or images. Extracted large-file text is cached by Canvas file ID, update time, and size in the encrypted SQLite checkpoint, so fresh GitHub runners reuse it. Raw large files are deleted after extraction. A changed Canvas revision triggers re-extraction.
 
-Lecture quizzes retry unsent sessions for `LECTURE_QUIZ_RETRY_HOURS=336` (14 days), including slides posted late. A failed source does not stop other lecture files. Files above the configured cap get an explicit search exclusion note. Unpublished/inaccessible slides and image-only or video-only content cannot yield a text-grounded quiz; missing or structurally ambiguous matches are reported rather than guessed. Private Google Slides require a one-time `python scripts/setup_google.py --lecture-slides` authorization with an account that can read the course decks, the Google Slides API enabled in the OAuth project, and a `GOOGLE_SLIDES_TOKEN_B64` repository secret containing the separate `google_slides_token.json` token (the Calendar account stays unchanged). Scheduled runs never request interactive login. Google Slides exports refresh every six hours; their access controls remain enforced. Per-course `lecture_materials` rules in `data/course_schedule.json` can exclude non-teaching modules or map a date/session explicitly with `module`, `module_id`, `item_ids`, or `source_ids`; explicit mappings override learned stable IDs.
+Lecture summaries and quizzes retry unsent sessions for `LECTURE_QUIZ_RETRY_HOURS=336` (14 days), including slides posted late. Summary generation and Discord delivery are separate durable states: a delivery retry reuses the exact validated payload and does not call Gemini again. After confirmed delivery, the session summary is immutable unless an operator explicitly uses `--force`. A failed source does not stop other lecture files. Files above the configured cap get an explicit search exclusion note. Unpublished/inaccessible slides and image-only or video-only content cannot yield text-grounded output; missing or structurally ambiguous matches are reported rather than guessed. Private Google Slides require a one-time `python scripts/setup_google.py --lecture-slides` authorization with an account that can read the course decks, the Google Slides API enabled in the OAuth project, and a `GOOGLE_SLIDES_TOKEN_B64` repository secret containing the separate `google_slides_token.json` token (the Calendar account stays unchanged). Scheduled runs never request interactive login. Google Slides exports refresh every six hours; their access controls remain enforced. Per-course `lecture_materials` rules in `data/course_schedule.json` can exclude non-teaching modules or map a date/session explicitly with `module`, `module_id`, `item_ids`, or `source_ids`; explicit mappings override learned stable IDs.
+
+See [Lecture Summaries setup and operations](docs/LECTURE_SUMMARIES.md) for the dedicated Discord channel, GitHub secret, cache behavior, model override, source limitations, and troubleshooting.
 
 The older manual `--daily-quiz` mode uses `DAILY_QUIZ_TOPIC`, `--topic`, `--quiz-pdf`, or a date entry in `data/daily_topics.json`:
 
@@ -52,7 +55,7 @@ The older manual `--daily-quiz` mode uses `DAILY_QUIZ_TOPIC`, `--topic`, `--quiz
 
 Production state lives in `ATTENDR_DB` (`data/attendr.db`): durable notification delivery, Calendar mappings, quiz history, and extraction caches. Calendar events have deterministic IDs and are checked for actual field changes. Read [P1 migration, recovery, and deployment instructions](docs/P1_RELIABILITY.md) before upgrading an existing scheduled installation.
 
-Discord is separated by purpose: Canvas announcements, deadline alerts, and digests go to `#announcements`; created/changed Calendar items go to `#calendar-updates`; post-lecture quizzes go to `#lecture-quizzes`; interactive reminders remain in `#study-sessions`.
+Discord is separated by purpose: Canvas announcements, deadline alerts, and digests go to `#announcements`; created/changed Calendar items go to `#calendar-updates`; post-lecture summaries go to `#lecture-summaries`; post-lecture quizzes go to `#lecture-quizzes`; interactive reminders remain in `#study-sessions`.
 
 Attendr also creates a separate `Attendr Study Plan` calendar. It places a small number of conflict-free study blocks before each assignment, quiz, project, presentation, midterm, or exam. Regular work uses 30–45 minute sessions; exams use 60 minutes. Thursday is excluded, Wednesday/Friday 6–8 PM is blocked, and existing readable Google calendars are respected. One study block is scheduled per day.
 
@@ -102,7 +105,7 @@ Check it with `crontab -l`. The Mac must be awake and online.
 
 ## GitHub Actions automation
 
-Scheduled sync and lecture-quiz workflows run on GitHub-hosted Linux runners, so the Mac may remain off. A Cloudflare D1 lease serializes runs and stores an AES-256-GCM-encrypted SQLite checkpoint after each committed mutation. `STUDY_SYNC_SECRET` authenticates Worker requests; an independent `ATTENDR_STATE_KEY` encrypts the checkpoint. D1 never receives plaintext application state. Existing installations must follow the one-time key-separation procedure in [P1 reliability and rollout](docs/P1_RELIABILITY.md#one-time-checkpoint-key-separation) before changing the GitHub secret.
+Scheduled sync and post-lecture review workflows run on GitHub-hosted Linux runners, so the Mac may remain off. A Cloudflare D1 lease serializes runs and stores an AES-256-GCM-encrypted SQLite checkpoint after each committed mutation. `STUDY_SYNC_SECRET` authenticates Worker requests; an independent `ATTENDR_STATE_KEY` encrypts the checkpoint. D1 never receives plaintext application state. Existing installations must follow the one-time key-separation procedure in [P1 reliability and rollout](docs/P1_RELIABILITY.md#one-time-checkpoint-key-separation) before changing the GitHub secret.
 
 The main cron runs at minute 17 to avoid top-of-hour GitHub congestion. Each hosted run records an authenticated heartbeat in D1. The Worker's five-minute cron dispatches a recovery run when the academic heartbeat is more than 150 minutes old during the 8:00 AM–10:00 PM Toronto window. Configure a fine-grained GitHub token with Actions write access as the Worker secret `GITHUB_ACTIONS_TOKEN`; repository, workflow, and ref are non-secret Wrangler variables.
 
@@ -291,8 +294,8 @@ untrusted content, synchronization retries/updates/removals, and existing contro
 
 Attendr content-addresses verified deadline extractions, rechecks them when grounding
 rules change, and sends only structurally relevant deadline sections to Gemini.
-`GEMINI_DEADLINE_MODEL` and `GEMINI_QUIZ_MODEL` are optional task-specific overrides;
-both inherit `GEMINI_MODEL` when blank. Scheduled Python requests are serialized using
+`GEMINI_DEADLINE_MODEL`, `GEMINI_QUIZ_MODEL`, and `GEMINI_LECTURE_SUMMARY_MODEL` are optional task-specific overrides;
+all inherit `GEMINI_MODEL` when blank. Scheduled Python requests are serialized using
 `GEMINI_MIN_REQUEST_INTERVAL_SECONDS` (default `0.5`), while deterministic extraction
 and verified-cache hits make no provider request and do not sleep.
 - **Reply delivery failed:** Discord rejected or timed out on both message edits;

@@ -50,6 +50,8 @@ def main(argv: list[str] | None = None) -> int:
         "CANVAS_BASE_URL",
         "CANVAS_API_TOKEN",
         "DISCORD_WEBHOOK_URL",
+        "DISCORD_BOT_TOKEN",
+        "DISCORD_LECTURE_SUMMARIES_CHANNEL_ID",
         "GEMINI_API_KEY",
     )
     missing = [name for name in required if not str(configuration.get(name) or "").strip()]
@@ -66,10 +68,10 @@ def main(argv: list[str] | None = None) -> int:
         "STUDY_WORKER_URL",
         "STUDY_SYNC_SECRET",
         "ATTENDR_STATE_KEY",
-        "DISCORD_BOT_TOKEN",
         "DISCORD_ANNOUNCEMENTS_CHANNEL_ID",
         "DISCORD_CALENDAR_CHANNEL_ID",
         "DISCORD_QUIZ_CHANNEL_ID",
+        "GEMINI_LECTURE_SUMMARY_MODEL",
     ):
         value = str(configuration.get(optional) or "").strip()
         if value:

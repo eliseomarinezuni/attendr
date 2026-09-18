@@ -57,12 +57,14 @@ class Settings(BaseModel):
                 or origin.fragment
             ):
                 raise ValueError("CANVAS_BASE_URL must be an HTTPS origin")
+        lecture_summaries = bool(getattr(plan, "lecture_summaries", False))
         if (
             plan.announcements
             or plan.calendar
             or plan.digest
             or plan.quiz
             or plan.lecture_quizzes
+            or lecture_summaries
             or getattr(plan, "review", False)
         ):
             from .notifier import DiscordNotifier
@@ -72,11 +74,24 @@ class Settings(BaseModel):
                 "DISCORD_ANNOUNCEMENTS_CHANNEL_ID",
                 "DISCORD_CALENDAR_CHANNEL_ID",
                 "DISCORD_QUIZ_CHANNEL_ID",
+                "DISCORD_LECTURE_SUMMARIES_CHANNEL_ID",
             ):
                 if os.getenv(key):
                     DiscordNotifier._validate_channel_id(required(key))
                     required("DISCORD_BOT_TOKEN")
-        if plan.materials or plan.quiz or plan.lecture_quizzes or plan.calendar or plan.study_plan:
+            if lecture_summaries:
+                DiscordNotifier._validate_channel_id(
+                    required("DISCORD_LECTURE_SUMMARIES_CHANNEL_ID")
+                )
+                required("DISCORD_BOT_TOKEN")
+        if (
+            plan.materials
+            or plan.quiz
+            or plan.lecture_quizzes
+            or lecture_summaries
+            or plan.calendar
+            or plan.study_plan
+        ):
             required("GEMINI_API_KEY")
         if plan.study_plan:
             url, secret = os.getenv("STUDY_WORKER_URL", ""), os.getenv("STUDY_SYNC_SECRET", "")
@@ -102,7 +117,7 @@ class Settings(BaseModel):
         numeric = []
         if plan.needs_canvas:
             numeric += ["CANVAS_LOOKAHEAD_DAYS", "CANVAS_ANNOUNCEMENT_DAYS"]
-        if plan.materials or plan.lecture_quizzes:
+        if plan.materials or plan.lecture_quizzes or lecture_summaries:
             numeric += [
                 "CANVAS_MATERIAL_MAX_MB",
                 "CANVAS_MATERIAL_FUTURE_DAYS",
@@ -110,7 +125,14 @@ class Settings(BaseModel):
             ]
         if plan.calendar or plan.study_plan:
             numeric += ["GOOGLE_EVENT_DURATION_MINUTES"]
-        if plan.materials or plan.quiz or plan.lecture_quizzes or plan.calendar or plan.study_plan:
+        if (
+            plan.materials
+            or plan.quiz
+            or plan.lecture_quizzes
+            or lecture_summaries
+            or plan.calendar
+            or plan.study_plan
+        ):
             numeric += ["GEMINI_MAX_INPUT_CHARS"]
         for key in numeric:
             if key in os.environ:

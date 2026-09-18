@@ -24,6 +24,8 @@ def environment() -> dict[str, str]:
         "DISCORD_ANNOUNCEMENTS_CHANNEL_ID": "1",
         "DISCORD_CALENDAR_CHANNEL_ID": "2",
         "DISCORD_QUIZ_CHANNEL_ID": "3",
+        "DISCORD_LECTURE_SUMMARIES_CHANNEL_ID": "4",
+        "GEMINI_LECTURE_SUMMARY_MODEL": "gemini-summary-test",
         "STUDY_WORKER_URL": "https://worker.example.test",
         "STUDY_SYNC_SECRET": "test-worker-value",
         "GEMINI_API_KEY": "test-gemini-value",
@@ -78,6 +80,9 @@ def test_valid_google_oauth_files_are_private_and_not_printed(tmp_path):
     assert (tmp_path / "credentials.json").stat().st_mode & 0o777 == 0o600
     assert (tmp_path / "data/course_schedule.json").stat().st_mode & 0o777 == 0o600
     assert (tmp_path / "data/preferences.json").stat().st_mode & 0o777 == 0o600
+    restored = (tmp_path / ".env").read_text()
+    assert "DISCORD_LECTURE_SUMMARIES_CHANNEL_ID=4" in restored
+    assert "GEMINI_LECTURE_SUMMARY_MODEL=gemini-summary-test" in restored
 
 
 def test_invalid_base64_fails_without_writing_token(tmp_path):

@@ -1,4 +1,4 @@
-name: Post-Class Lecture Quizzes
+name: Post-Class Lecture Review
 
 on:
   schedule:
@@ -40,14 +40,16 @@ jobs:
           DISCORD_ANNOUNCEMENTS_CHANNEL_ID: ""
           DISCORD_CALENDAR_CHANNEL_ID: ""
           DISCORD_QUIZ_CHANNEL_ID: ${{ secrets.DISCORD_QUIZ_CHANNEL_ID }}
+          DISCORD_LECTURE_SUMMARIES_CHANNEL_ID: ${{ secrets.DISCORD_LECTURE_SUMMARIES_CHANNEL_ID }}
           GOOGLE_SLIDES_TOKEN_B64: ${{ secrets.GOOGLE_SLIDES_TOKEN_B64 }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_LECTURE_SUMMARY_MODEL: ${{ secrets.GEMINI_LECTURE_SUMMARY_MODEL }}
           STUDY_WORKER_URL: ${{ secrets.STUDY_WORKER_URL }}
           STUDY_SYNC_SECRET: ${{ secrets.STUDY_SYNC_SECRET }}
           COURSE_SCHEDULE_B64: ${{ secrets.COURSE_SCHEDULE_B64 }}
           ATTENDR_PREFERENCES_B64: ${{ secrets.ATTENDR_PREFERENCES_B64 }}
         run: bash scripts/restore_ci_config.sh
-      - name: Send due lecture quizzes with durable cloud state
+      - name: Send due lecture summaries and quizzes with durable cloud state
         env:
           ATTENDR_STATE_KEY: ${{ secrets.ATTENDR_STATE_KEY }}
         run: python scripts/cloud_run.py --lecture-quizzes

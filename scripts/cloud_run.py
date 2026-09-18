@@ -75,7 +75,11 @@ def main() -> int:
     revision = int(response.json()["revision"])
     database = Path(os.getenv("RUNNER_TEMP", "/tmp")) / "attendr.db"
     client = CloudStateClient(url, secret, key, token, revision)
-    automation_name = "lecture-quizzes" if "--lecture-quizzes" in sys.argv[1:] else "academic"
+    automation_name = (
+        "lecture-quizzes"
+        if {"--lecture-quizzes", "--lecture-summaries"} & set(sys.argv[1:])
+        else "academic"
+    )
     final_status = "failure"
     heartbeat(url, secret, automation_name, "started")
     try:

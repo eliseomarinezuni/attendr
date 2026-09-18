@@ -237,6 +237,7 @@ class DiscordNotifier:
                 "announcements": os.getenv("DISCORD_ANNOUNCEMENTS_CHANNEL_ID", ""),
                 "calendar_updates": os.getenv("DISCORD_CALENDAR_CHANNEL_ID", ""),
                 "lecture_quizzes": os.getenv("DISCORD_QUIZ_CHANNEL_ID", ""),
+                "lecture_summaries": os.getenv("DISCORD_LECTURE_SUMMARIES_CHANNEL_ID", ""),
             },
             state_path=state_path,
             app_timezone=os.getenv("APP_TIMEZONE", "America/Toronto"),
@@ -540,6 +541,10 @@ class DiscordNotifier:
     ) -> str | None:
         channel_id = self._channel_ids.get(destination)
         use_bot = bool(self._bot_token and channel_id)
+        if destination == "lecture_summaries" and not use_bot:
+            raise DiscordNotificationError(
+                "The dedicated lecture-summaries bot destination is not configured."
+            )
         url = (
             f"https://discord.com/api/v10/channels/{channel_id}/messages"
             if use_bot

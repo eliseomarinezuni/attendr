@@ -97,6 +97,7 @@ class RunPlan:
     lecture_quizzes: bool
     study_plan: bool
     review: bool = False
+    lecture_summaries: bool = False
 
     @property
     def needs_canvas(self) -> bool:
@@ -106,6 +107,7 @@ class RunPlan:
             or self.calendar
             or self.digest
             or self.lecture_quizzes
+            or self.lecture_summaries
             or self.study_plan
         )
 
@@ -155,7 +157,12 @@ def build_parser() -> argparse.ArgumentParser:
     modes.add_argument(
         "--lecture-quizzes",
         action="store_true",
-        help="Send quizzes for lecture sessions that recently ended.",
+        help="Send summaries and quizzes for lecture sessions that recently ended.",
+    )
+    modes.add_argument(
+        "--lecture-summaries",
+        action="store_true",
+        help="Only send summaries for lecture sessions that recently ended.",
     )
     modes.add_argument(
         "--study-plan-only",
@@ -208,7 +215,27 @@ def resolve_plan(arguments: argparse.Namespace) -> RunPlan:
     if arguments.quiz_only:
         return RunPlan(False, False, False, False, True, False, False)
     if arguments.lecture_quizzes:
-        return RunPlan(False, False, False, False, False, True, False)
+        return RunPlan(
+            False,
+            False,
+            False,
+            False,
+            False,
+            True,
+            False,
+            lecture_summaries=True,
+        )
+    if arguments.lecture_summaries:
+        return RunPlan(
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            False,
+            lecture_summaries=True,
+        )
     if arguments.study_plan_only:
         return RunPlan(False, not arguments.no_materials, False, False, False, False, True)
     return RunPlan(
@@ -219,6 +246,7 @@ def resolve_plan(arguments: argparse.Namespace) -> RunPlan:
         bool(arguments.daily_quiz),
         True,
         not arguments.no_study_plan,
+        lecture_summaries=True,
     )
 
 
@@ -652,7 +680,14 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
 
             results.append(run_step("Study plan", sync_study_plan))
 
-    if plan.calendar or plan.announcements or plan.quiz or plan.lecture_quizzes or plan.review:
+    if (
+        plan.calendar
+        or plan.announcements
+        or plan.quiz
+        or plan.lecture_quizzes
+        or plan.lecture_summaries
+        or plan.review
+    ):
         results.append(
             run_step(
                 "Delivery outbox", lambda: f"{get_notifier().flush_pending()} recovered delivery(s)"
@@ -733,14 +768,18 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
 
             results.append(run_step("Quiz", generate_quiz))
 
-    if plan.lecture_quizzes:
+    if plan.lecture_quizzes or plan.lecture_summaries:
         if canvas_client is None or schedule is None:
-            results.append(
-                StepResult("Lecture quizzes", "skipped", "Canvas or schedule unavailable")
-            )
+            if plan.lecture_summaries:
+                results.append(
+                    StepResult("Lecture summaries", "skipped", "Canvas or schedule unavailable")
+                )
+            if plan.lecture_quizzes:
+                results.append(
+                    StepResult("Lecture quizzes", "skipped", "Canvas or schedule unavailable")
+                )
         else:
-
-            def send_lecture_quizzes() -> str:
+            try:
                 runner = LectureQuizRunner(
                     canvas_client,
                     AIAssistant.from_env(PROJECT_ROOT / ".env"),
@@ -751,21 +790,57 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                     state_path=PROJECT_ROOT / os.getenv("ATTENDR_DB", "data/attendr.db"),
                     retry_hours=int(os.getenv("LECTURE_QUIZ_RETRY_HOURS", "336")),
                 )
-                report = runner.run(force=arguments.force)
-                for warning in report.warnings:
-                    logging.getLogger("attendr.lecture_quiz").warning("%s", warning)
-                if report.failed:
-                    raise AIProviderError(
-                        f"{report.failed} lecture quiz(es) failed; {report.sent} sent. "
-                        "Unsent sessions remain eligible for retry."
-                    )
-                return (
-                    f"{report.sent} sent, {report.already_sent} already sent, "
-                    f"{report.waiting_for_slides} waiting for slides, "
-                    f"{len(report.warnings)} warnings"
+                report = runner.process(
+                    force=arguments.force,
+                    include_summaries=plan.lecture_summaries,
+                    include_quizzes=plan.lecture_quizzes,
                 )
-
-            results.append(run_step("Lecture quizzes", send_lecture_quizzes))
+                for warning in report.warnings:
+                    logging.getLogger("attendr.lecture_review").warning("%s", warning)
+            except KNOWN_ERRORS as error:
+                if plan.lecture_summaries:
+                    results.append(StepResult("Lecture summaries", "failed", str(error)))
+                if plan.lecture_quizzes:
+                    results.append(StepResult("Lecture quizzes", "failed", str(error)))
+            except Exception as error:  # noqa: BLE001 - isolate the combined review run.
+                failed = unexpected_step_result("Post-lecture review", error)
+                if plan.lecture_summaries:
+                    results.append(StepResult("Lecture summaries", failed.status, failed.detail))
+                if plan.lecture_quizzes:
+                    results.append(StepResult("Lecture quizzes", failed.status, failed.detail))
+            else:
+                if plan.lecture_summaries:
+                    summary_status = (
+                        "degraded"
+                        if report.summaries_failed or report.summaries_waiting_for_slides
+                        else "ok"
+                    )
+                    results.append(
+                        StepResult(
+                            "Lecture summaries",
+                            summary_status,
+                            f"{report.summaries_sent} sent, "
+                            f"{report.summaries_already_sent} already sent, "
+                            f"{report.summaries_waiting_for_slides} waiting for slides, "
+                            f"{report.summaries_failed} failed",
+                        )
+                    )
+                if plan.lecture_quizzes:
+                    quiz_status = (
+                        "degraded"
+                        if report.quizzes_failed or report.quizzes_waiting_for_slides
+                        else "ok"
+                    )
+                    results.append(
+                        StepResult(
+                            "Lecture quizzes",
+                            quiz_status,
+                            f"{report.quizzes_sent} sent, "
+                            f"{report.quizzes_already_sent} already sent, "
+                            f"{report.quizzes_waiting_for_slides} waiting for slides, "
+                            f"{report.quizzes_failed} failed",
+                        )
+                    )
 
     if preferences.review_enabled and (
         plan.review or (plan.announcements and not arguments.announcements_only)

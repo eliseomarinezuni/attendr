@@ -26,6 +26,11 @@ private schedule and preferences from `COURSE_SCHEDULE_B64` and
 `ATTENDR_PREFERENCES_B64`; the restoration is atomic, validates JSON, and creates
 owner-readable files only.
 
+When Lecture Summaries are enabled, selected extracted course text crosses the Gemini
+API boundary and the validated result crosses the Discord API boundary. Attendr does
+not put signed Canvas download URLs, bearer credentials, or raw lecture files in the
+summary payload. Deployers must evaluate their institution's rules before enabling it.
+
 `STUDY_SYNC_SECRET` authenticates private Worker API calls. A different
 `ATTENDR_STATE_KEY` encrypts the SQLite checkpoint with AES-GCM. The Worker's public
 URL and deployment identifiers do not authorize state access. Discord interactions
