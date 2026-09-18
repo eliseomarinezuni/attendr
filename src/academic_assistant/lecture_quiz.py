@@ -7,7 +7,7 @@ import os
 import re
 import tempfile
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -69,6 +69,7 @@ class LectureQuizRunner:
         materials_directory: str | os.PathLike[str],
         state_path: str | os.PathLike[str],
         retry_hours: int = 336,
+        max_age_minutes: int = 60,
         max_file_bytes: int | None = None,
     ) -> None:
         self.canvas = canvas
@@ -79,6 +80,9 @@ class LectureQuizRunner:
         self.state_path = Path(state_path).expanduser().resolve()
         self.store = StateStore(self.state_path) if self.state_path.suffix != ".json" else None
         self.retry_hours = retry_hours
+        if max_age_minutes < 1:
+            raise ValueError("Lecture review maximum age must be at least one minute.")
+        self.max_age_minutes = max_age_minutes
         self.max_file_bytes = max_file_bytes if max_file_bytes is not None else lecture_file_limit()
 
     def run(self, *, now: datetime | None = None, force: bool = False) -> LectureQuizReport:
@@ -110,6 +114,13 @@ class LectureQuizRunner:
             raise AIInputError("Lecture summaries require the SQLite ATTENDR_DB state store.")
         current = now or datetime.now(UTC)
         due = self.schedule.ended_lecture_sessions(current, retry_hours=self.retry_hours)
+        if not force:
+            cutoff = current.astimezone(UTC) - timedelta(minutes=self.max_age_minutes)
+            due = tuple(
+                (session, ended_at)
+                for session, ended_at in due
+                if cutoff <= ended_at.astimezone(UTC) <= current.astimezone(UTC)
+            )
         if not due:
             return LectureReviewReport(0, 0, 0, 0, 0, 0, 0, 0, ())
         state = self._load_state() if self.store is None else {"sent": {}}

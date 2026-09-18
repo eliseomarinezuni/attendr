@@ -789,6 +789,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                     / os.getenv("CANVAS_MATERIALS_DIR", "data/materials"),
                     state_path=PROJECT_ROOT / os.getenv("ATTENDR_DB", "data/attendr.db"),
                     retry_hours=int(os.getenv("LECTURE_QUIZ_RETRY_HOURS", "336")),
+                    max_age_minutes=int(os.getenv("LECTURE_REVIEW_MAX_AGE_MINUTES", "60")),
                 )
                 report = runner.process(
                     force=arguments.force,

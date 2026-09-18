@@ -42,6 +42,10 @@ class DiscordNotificationError(RuntimeError):
     """Raised when Discord does not accept a notification."""
 
 
+class DiscordQuietHoursError(DiscordNotificationError):
+    """Raised before delivery while the configured local quiet window is active."""
+
+
 class DiscordUncertainDeliveryError(DiscordNotificationError):
     """Discord may have accepted the message; operator reconciliation is required."""
 
@@ -171,6 +175,8 @@ class DiscordNotifier:
         timeout_seconds: float = 15.0,
         max_attempts: int = 4,
         max_rate_limit_wait_seconds: float = 60.0,
+        quiet_hours_start: int | None = None,
+        quiet_hours_end: int | None = None,
         session: requests.Session | Any | None = None,
         sleep: Callable[[float], None] = time.sleep,
         now_provider: Callable[[], datetime] | None = None,
@@ -188,6 +194,22 @@ class DiscordNotifier:
             raise DiscordConfigurationError("Discord max attempts must be at least one.")
         if not math.isfinite(max_rate_limit_wait_seconds) or max_rate_limit_wait_seconds < 0:
             raise DiscordConfigurationError("Discord maximum rate-limit wait cannot be negative.")
+        if (quiet_hours_start is None) != (quiet_hours_end is None):
+            raise DiscordConfigurationError(
+                "Discord quiet-hours start and end must be configured together."
+            )
+        for name, value in (
+            ("start", quiet_hours_start),
+            ("end", quiet_hours_end),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 23
+            ):
+                raise DiscordConfigurationError(
+                    f"Discord quiet-hours {name} must be an integer from 0 through 23."
+                )
+        if quiet_hours_start is not None and quiet_hours_start == quiet_hours_end:
+            raise DiscordConfigurationError("Discord quiet hours cannot span all 24 hours.")
         try:
             self.timezone = ZoneInfo(app_timezone)
         except ZoneInfoNotFoundError as error:
@@ -203,6 +225,8 @@ class DiscordNotifier:
         self.timeout_seconds = timeout_seconds
         self.max_attempts = max_attempts
         self.max_rate_limit_wait_seconds = max_rate_limit_wait_seconds
+        self.quiet_hours_start = quiet_hours_start
+        self.quiet_hours_end = quiet_hours_end
         self._session = session or requests.Session()
         self._sleep = sleep
         self._now_provider = now_provider or (lambda: datetime.now(UTC))
@@ -246,6 +270,8 @@ class DiscordNotifier:
             max_rate_limit_wait_seconds=cls._read_nonnegative_float(
                 "DISCORD_MAX_RATE_LIMIT_WAIT_SECONDS", 60.0
             ),
+            quiet_hours_start=cls._read_hour("DISCORD_QUIET_HOURS_START", 0),
+            quiet_hours_end=cls._read_hour("DISCORD_QUIET_HOURS_END", 9),
         )
 
     def send_assignment_alert(self, item: AcademicItem, *, force: bool = False) -> bool:
@@ -482,6 +508,7 @@ class DiscordNotifier:
         routed_key = f"{destination}:{event_key}"
         if not force and self.state.was_sent(routed_key, fingerprint):
             return False
+        self._assert_delivery_allowed()
         messages = discord_messages(payload)
         if isinstance(self.state, StateStore) and not force:
             keys = self.state.enqueue_messages(routed_key, fingerprint, destination, messages)
@@ -523,8 +550,11 @@ class DiscordNotifier:
     def flush_pending(self) -> int:
         if not isinstance(self.state, StateStore):
             return 0
+        pending_deliveries = self.state.pending_deliveries()
+        if pending_deliveries:
+            self._assert_delivery_allowed()
         sent = 0
-        for pending in self.state.pending_deliveries():
+        for pending in pending_deliveries:
             row = self.state.claim(pending["event_key"], pending["fingerprint"])
             if row:
                 self._deliver_claim(row)
@@ -686,6 +716,19 @@ class DiscordNotifier:
             raise DiscordConfigurationError("now_provider must return a timezone-aware datetime.")
         return current.astimezone(UTC)
 
+    def _assert_delivery_allowed(self) -> None:
+        if self.quiet_hours_start is None or self.quiet_hours_end is None:
+            return
+        local_hour = self._now_utc().astimezone(self.timezone).hour
+        start, end = self.quiet_hours_start, self.quiet_hours_end
+        quiet = (
+            start <= local_hour < end if start < end else local_hour >= start or local_hour < end
+        )
+        if quiet:
+            raise DiscordQuietHoursError(
+                f"Discord quiet hours are active until {end:02d}:00 {self.timezone.key}."
+            )
+
     @staticmethod
     def _item_color(kind: str) -> int:
         return {
@@ -745,6 +788,19 @@ class DiscordNotifier:
             raise DiscordConfigurationError(f"{name} must be a positive integer.") from error
         if value < 1:
             raise DiscordConfigurationError(f"{name} must be a positive integer.")
+        return value
+
+    @staticmethod
+    def _read_hour(name: str, default: int) -> int:
+        raw = os.getenv(name)
+        try:
+            value = default if raw is None or not raw.strip() else int(raw)
+        except ValueError as error:
+            raise DiscordConfigurationError(
+                f"{name} must be an integer from 0 through 23."
+            ) from error
+        if not 0 <= value <= 23:
+            raise DiscordConfigurationError(f"{name} must be an integer from 0 through 23.")
         return value
 
     @staticmethod

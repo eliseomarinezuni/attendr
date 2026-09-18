@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -414,13 +414,17 @@ def test_summary_delivery_never_falls_back_to_general_webhook(tmp_path):
 
 
 def test_just_ended_shared_run_downloads_and_extracts_once_for_summary_and_quiz(tmp_path):
-    review, canvas, ai, notifier, _selected, _ended_at = runner(tmp_path)
+    review, canvas, ai, notifier, _selected, ended_at = runner(tmp_path)
     from academic_assistant.lecture_content import build_lecture_content_bundle as real_build
 
     with patch(
         "academic_assistant.lecture_quiz.build_lecture_content_bundle", wraps=real_build
     ) as build:
-        report = review.process(include_summaries=True, include_quizzes=True)
+        report = review.process(
+            now=ended_at + timedelta(minutes=15),
+            include_summaries=True,
+            include_quizzes=True,
+        )
 
     assert report.summaries_sent == report.quizzes_sent == 1
     assert canvas.download_lecture_materials.call_count == 1
@@ -433,12 +437,16 @@ def test_just_ended_shared_run_downloads_and_extracts_once_for_summary_and_quiz(
 
 
 def test_transient_summary_failure_does_not_block_quiz_delivery(tmp_path):
-    review, _canvas, ai, notifier, _selected, _ended_at = runner(tmp_path)
+    review, _canvas, ai, notifier, _selected, ended_at = runner(tmp_path)
     ai.generate_lecture_summary = Mock(
         side_effect=AIProviderError("Gemini quota is temporarily exhausted.", transient=True)
     )
 
-    report = review.process(include_summaries=True, include_quizzes=True)
+    report = review.process(
+        now=ended_at + timedelta(minutes=15),
+        include_summaries=True,
+        include_quizzes=True,
+    )
 
     assert report.summaries_failed == 1
     assert report.quizzes_sent == 1
@@ -447,11 +455,12 @@ def test_transient_summary_failure_does_not_block_quiz_delivery(tmp_path):
 
 def test_failed_delivery_reuses_cached_generation_without_download_or_gemini(tmp_path):
     AI_USAGE.reset()
-    review, canvas, ai, _notifier, _selected, _ended_at = runner(tmp_path, fail_summary_once=True)
+    review, canvas, ai, _notifier, _selected, ended_at = runner(tmp_path, fail_summary_once=True)
+    now = ended_at + timedelta(minutes=15)
 
-    first = review.process(include_summaries=True, include_quizzes=False)
-    second = review.process(include_summaries=True, include_quizzes=False)
-    third = review.process(include_summaries=True, include_quizzes=False)
+    first = review.process(now=now, include_summaries=True, include_quizzes=False)
+    second = review.process(now=now, include_summaries=True, include_quizzes=False)
+    third = review.process(now=now, include_summaries=True, include_quizzes=False)
 
     assert first.summaries_failed == 1
     assert second.summaries_sent == 1
@@ -476,7 +485,7 @@ def test_yesterday_lecture_retries_when_material_appears_late(tmp_path):
     ]
     review._select_materials.side_effect = [(), (selected,)]
 
-    now = datetime(2026, 9, 15, 9, tzinfo=UTC)
+    now = datetime(2026, 9, 14, 14, 30, tzinfo=UTC)
     first = review.process(now=now, include_summaries=True, include_quizzes=False)
     second = review.process(now=now, include_summaries=True, include_quizzes=False)
 
@@ -484,6 +493,21 @@ def test_yesterday_lecture_retries_when_material_appears_late(tmp_path):
     assert first.summaries_sent == 0
     assert second.summaries_sent == 1
     assert ai.summary_calls == 1
+
+
+def test_stale_lecture_is_not_downloaded_generated_or_delivered(tmp_path):
+    review, canvas, ai, notifier, _selected, ended_at = runner(tmp_path)
+
+    report = review.process(
+        now=ended_at + timedelta(minutes=61),
+        include_summaries=True,
+        include_quizzes=True,
+    )
+
+    assert report.summaries_sent == report.quizzes_sent == 0
+    canvas.download_lecture_materials.assert_not_called()
+    assert ai.summary_calls == ai.quiz_calls == 0
+    assert notifier.calls == []
 
 
 def test_future_or_not_yet_ended_lecture_does_not_download_or_generate(tmp_path):

@@ -58,6 +58,7 @@ _EXPORTS = {
     "MaterialsSyncReport": "materials_sync",
     "DiscordConfigurationError": "notifier",
     "DiscordNotificationError": "notifier",
+    "DiscordQuietHoursError": "notifier",
     "DiscordNotifier": "notifier",
     "DiscordRateLimitError": "notifier",
     "JsonNotificationState": "notifier",

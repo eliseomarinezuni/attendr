@@ -2,13 +2,15 @@ name: Post-Class Lecture Review
 
 on:
   schedule:
-    - cron: "30 21 * * 1,4"
+    # Two chances per lecture, 15 and 45 minutes after it ends. The runtime
+    # independently rejects anything older than one hour.
+    - cron: "15,45 21 * * 1,4"
       timezone: "America/Toronto"
-    - cron: "0 11 * * 3,5"
+    - cron: "15,45 11 * * 3,5"
       timezone: "America/Toronto"
-    - cron: "0 14 * * 2,4,5"
+    - cron: "15,45 14 * * 2,4,5"
       timezone: "America/Toronto"
-    - cron: "0 17 * * 3,5"
+    - cron: "15,45 17 * * 3,5"
       timezone: "America/Toronto"
   workflow_dispatch:
 
@@ -52,4 +54,7 @@ jobs:
       - name: Send due lecture summaries and quizzes with durable cloud state
         env:
           ATTENDR_STATE_KEY: ${{ secrets.ATTENDR_STATE_KEY }}
+          LECTURE_REVIEW_MAX_AGE_MINUTES: "60"
+          DISCORD_QUIET_HOURS_START: "0"
+          DISCORD_QUIET_HOURS_END: "9"
         run: python scripts/cloud_run.py --lecture-quizzes

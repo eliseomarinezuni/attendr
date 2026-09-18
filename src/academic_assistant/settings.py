@@ -122,6 +122,7 @@ class Settings(BaseModel):
                 "CANVAS_MATERIAL_MAX_MB",
                 "CANVAS_MATERIAL_FUTURE_DAYS",
                 "LECTURE_QUIZ_RETRY_HOURS",
+                "LECTURE_REVIEW_MAX_AGE_MINUTES",
             ]
         if plan.calendar or plan.study_plan:
             numeric += ["GOOGLE_EVENT_DURATION_MINUTES"]
@@ -140,6 +141,20 @@ class Settings(BaseModel):
                     TypeAdapter(Annotated[int, Field(gt=0)]).validate_python(os.environ[key])
                 except ValueError:
                     raise ValueError(f"{key} must be a positive integer") from None
+        quiet_hours: dict[str, int] = {}
+        for key, default in (
+            ("DISCORD_QUIET_HOURS_START", "0"),
+            ("DISCORD_QUIET_HOURS_END", "9"),
+        ):
+            try:
+                hour = int(os.getenv(key, default))
+            except ValueError:
+                raise ValueError(f"{key} must be an integer from 0 through 23") from None
+            if not 0 <= hour <= 23:
+                raise ValueError(f"{key} must be an integer from 0 through 23")
+            quiet_hours[key] = hour
+        if quiet_hours["DISCORD_QUIET_HOURS_START"] == quiet_hours["DISCORD_QUIET_HOURS_END"]:
+            raise ValueError("Discord quiet hours cannot span all 24 hours")
         names = {
             "timezone": "APP_TIMEZONE",
             "database": "ATTENDR_DB",

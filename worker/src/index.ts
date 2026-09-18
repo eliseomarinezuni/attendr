@@ -16,6 +16,8 @@ interface Env {
   GITHUB_REPOSITORY?: string;
   GITHUB_WORKFLOW?: string;
   GITHUB_REF?: string;
+  DISCORD_QUIET_HOURS_START?: string;
+  DISCORD_QUIET_HOURS_END?: string;
 }
 
 interface StudySession {
@@ -468,6 +470,20 @@ function discordTimestamp(value: string): string {
   return `<t:${Math.floor(new Date(value).getTime() / 1000)}:t>`;
 }
 
+function discordQuietHoursActive(now: Date, startValue?: string, endValue?: string): boolean {
+  if (startValue === undefined && endValue === undefined) return false;
+  const start = Number(startValue);
+  const end = Number(endValue);
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start > 23 || end < 0 || end > 23 || start === end)
+    throw new Error("Invalid Discord quiet-hours configuration");
+  const hour = Number(new Intl.DateTimeFormat("en-CA", {
+    timeZone: TIME_ZONE,
+    hour: "numeric",
+    hourCycle: "h23",
+  }).format(now));
+  return start < end ? start <= hour && hour < end : hour >= start || hour < end;
+}
+
 async function sendReminder(session: StudySession, env: Env): Promise<void> {
   const response = await boundedFetch(`${DISCORD_API}/channels/${env.DISCORD_STUDY_CHANNEL_ID}/messages`, {
     method: "POST",
@@ -504,6 +520,11 @@ async function sendReminder(session: StudySession, env: Env): Promise<void> {
 }
 
 async function sendDueReminders(env: Env): Promise<void> {
+  if (discordQuietHoursActive(
+    new Date(),
+    env.DISCORD_QUIET_HOURS_START,
+    env.DISCORD_QUIET_HOURS_END,
+  )) return;
   const now = Date.now();
   const lower = new Date(now - 15 * 60_000).toISOString();
   const upper = new Date(now + 5 * 60_000).toISOString();

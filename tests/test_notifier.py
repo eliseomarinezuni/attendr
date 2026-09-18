@@ -20,8 +20,10 @@ from academic_assistant.notifier import (
     DiscordConfigurationError,
     DiscordNotificationError,
     DiscordNotifier,
+    DiscordQuietHoursError,
     DiscordRateLimitError,
 )
+from academic_assistant.state_store import StateStore
 
 UTC = timezone.utc
 NOW = datetime(2026, 9, 4, 12, 0, tzinfo=UTC)
@@ -114,13 +116,14 @@ class DiscordNotifierTests(unittest.TestCase):
             FakeSession(responses if responses is not None else [FakeResponse()]),
         )
         sleeps = []
+        now_provider = overrides.pop("now_provider", lambda: NOW)
         notifier = DiscordNotifier(
             WEBHOOK_URL,
             state_path=self.state_path,
             app_timezone="America/Toronto",
             session=session,
             sleep=sleeps.append,
-            now_provider=lambda: NOW,
+            now_provider=now_provider,
             **overrides,
         )
         return notifier, session, sleeps
@@ -181,6 +184,59 @@ class DiscordNotifierTests(unittest.TestCase):
         self.assertTrue(notifier.send_assignment_alert(item, force=True))
         self.assertTrue(notifier.send_assignment_alert(item))
         self.assertEqual(len(session.calls), 2)
+
+    def test_quiet_hours_block_all_delivery_without_enqueuing_or_marking_sent(self):
+        quiet_now = datetime(2026, 9, 18, 6, 16, tzinfo=UTC)  # 02:16 Toronto
+        notifier, session, _ = self.make_notifier(
+            quiet_hours_start=0,
+            quiet_hours_end=9,
+            now_provider=lambda: quiet_now,
+        )
+        item = make_item()
+
+        with self.assertRaisesRegex(DiscordQuietHoursError, "09:00 America/Toronto"):
+            notifier.send_assignment_alert(item, force=True)
+
+        self.assertEqual(session.calls, [])
+        self.assertEqual(StateStore(self.state_path).pending_deliveries(), [])
+        self.assertFalse(
+            StateStore(self.state_path).was_sent(
+                f"announcements:assignment:{item.uid}",
+                notifier._fingerprint(notifier.assignment_payload(item)),
+            )
+        )
+
+    def test_quiet_hours_end_is_an_inclusive_delivery_boundary(self):
+        allowed_now = datetime(2026, 9, 18, 13, 0, tzinfo=UTC)  # 09:00 Toronto
+        notifier, session, _ = self.make_notifier(
+            quiet_hours_start=0,
+            quiet_hours_end=9,
+            now_provider=lambda: allowed_now,
+        )
+
+        self.assertTrue(notifier.send_assignment_alert(make_item()))
+        self.assertEqual(len(session.calls), 1)
+
+    def test_quiet_hours_leave_pending_outbox_unclaimed(self):
+        quiet_now = datetime(2026, 9, 18, 6, 16, tzinfo=UTC)
+        store = StateStore(self.state_path)
+        store.enqueue_messages(
+            "announcements:custom:pending",
+            "fingerprint",
+            "announcements",
+            ({"content": "pending"},),
+        )
+        notifier, session, _ = self.make_notifier(
+            quiet_hours_start=0,
+            quiet_hours_end=9,
+            now_provider=lambda: quiet_now,
+        )
+
+        with self.assertRaises(DiscordQuietHoursError):
+            notifier.flush_pending()
+
+        self.assertEqual(session.calls, [])
+        self.assertEqual(len(store.pending_deliveries()), 1)
 
     def test_rate_limit_uses_retry_after_then_retries(self):
         notifier, session, sleeps = self.make_notifier(

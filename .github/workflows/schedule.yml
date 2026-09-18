@@ -4,7 +4,7 @@ on:
   schedule:
     # Avoid GitHub's documented top-of-hour scheduling congestion. The Worker
     # watchdog dispatches a recovery run if this heartbeat becomes stale.
-    - cron: "17 8-22/2 * * *"
+    - cron: "17 9-23/2 * * *"
       timezone: "America/Toronto"
   workflow_dispatch:
 
@@ -56,5 +56,7 @@ jobs:
           ATTENDR_ASK_SYNC: "true"
           LECTURE_MAX_FILE_MB: "768"
           LECTURE_QUIZ_RETRY_HOURS: "336"
+          DISCORD_QUIET_HOURS_START: "0"
+          DISCORD_QUIET_HOURS_END: "9"
           ATTENDR_STATE_KEY: ${{ secrets.ATTENDR_STATE_KEY }}
         run: python scripts/cloud_run.py

@@ -83,6 +83,9 @@ def test_valid_google_oauth_files_are_private_and_not_printed(tmp_path):
     restored = (tmp_path / ".env").read_text()
     assert "DISCORD_LECTURE_SUMMARIES_CHANNEL_ID=4" in restored
     assert "GEMINI_LECTURE_SUMMARY_MODEL=gemini-summary-test" in restored
+    assert "LECTURE_REVIEW_MAX_AGE_MINUTES=60" in restored
+    assert "DISCORD_QUIET_HOURS_START=0" in restored
+    assert "DISCORD_QUIET_HOURS_END=9" in restored
 
 
 def test_invalid_base64_fails_without_writing_token(tmp_path):

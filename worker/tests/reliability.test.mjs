@@ -6,9 +6,9 @@ import ts from 'typescript';
 import { freshDatabase } from './helpers/database.mjs';
 
 const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8') +
-  '\nexport { busyIntervals, allCalendarIds, verifyDiscord, handleButton, recoverOperations, nextSlot, automationWatchdog };';
+  '\nexport { busyIntervals, allCalendarIds, verifyDiscord, handleButton, recoverOperations, nextSlot, automationWatchdog, discordQuietHoursActive };';
 const { outputText } = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
-const { default: worker, busyIntervals, allCalendarIds, verifyDiscord, handleButton, recoverOperations, nextSlot, automationWatchdog } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
+const { default: worker, busyIntervals, allCalendarIds, verifyDiscord, handleButton, recoverOperations, nextSlot, automationWatchdog, discordQuietHoursActive } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 
@@ -40,6 +40,13 @@ function reminderRequest() {
 function reminderEnv(DB) {
   return { DB, STUDY_SYNC_SECRET: 'secret', DISCORD_BOT_TOKEN: 'bot', DISCORD_STUDY_CHANNEL_ID: 'channel' };
 }
+
+test('Toronto quiet hours block automated reminders from midnight until nine', () => {
+  assert.equal(discordQuietHoursActive(new Date('2026-09-18T06:16:00Z'), '0', '9'), true);
+  assert.equal(discordQuietHoursActive(new Date('2026-09-18T12:59:59Z'), '0', '9'), true);
+  assert.equal(discordQuietHoursActive(new Date('2026-09-18T13:00:00Z'), '0', '9'), false);
+  assert.throws(() => discordQuietHoursActive(new Date(), '9', '9'), /Invalid/);
+});
 
 for (const payload of [null, {}, { sessions: {} }, { sessions: 'bad' }, { sessions: [], replace: 'false' }]) {
   test('invalid sync envelope cannot cancel existing sessions: ' + JSON.stringify(payload), async () => {
