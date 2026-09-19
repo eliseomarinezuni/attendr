@@ -12,6 +12,12 @@ on:
       timezone: "America/Toronto"
     - cron: "15,45 17 * * 3,5"
       timezone: "America/Toronto"
+    # Temporary, quota-safe historical-summary campaign: one new Gemini summary
+    # daily at 9:30 AM, from Sep 20 through Oct 15, 2026.
+    - cron: "30 9 20-30 9 *"
+      timezone: "America/Toronto"
+    - cron: "30 9 1-15 10 *"
+      timezone: "America/Toronto"
   workflow_dispatch:
 
 permissions:
@@ -52,9 +58,25 @@ jobs:
           ATTENDR_PREFERENCES_B64: ${{ secrets.ATTENDR_PREFERENCES_B64 }}
         run: bash scripts/restore_ci_config.sh
       - name: Send due lecture summaries and quizzes with durable cloud state
+        if: github.event.schedule != '30 9 20-30 9 *' && github.event.schedule != '30 9 1-15 10 *'
         env:
           ATTENDR_STATE_KEY: ${{ secrets.ATTENDR_STATE_KEY }}
           LECTURE_REVIEW_MAX_AGE_MINUTES: "60"
           DISCORD_QUIET_HOURS_START: "0"
           DISCORD_QUIET_HOURS_END: "9"
         run: python scripts/cloud_run.py --lecture-quizzes
+      - name: Send one quota-safe historical lecture summary
+        if: github.event.schedule == '30 9 20-30 9 *' || github.event.schedule == '30 9 1-15 10 *'
+        env:
+          ATTENDR_STATE_KEY: ${{ secrets.ATTENDR_STATE_KEY }}
+          LECTURE_QUIZ_RETRY_HOURS: "8760"
+          LECTURE_REVIEW_MAX_AGE_MINUTES: "525600"
+          LECTURE_SUMMARY_MAX_GENERATIONS_PER_RUN: "1"
+          DISCORD_QUIET_HOURS_START: "0"
+          DISCORD_QUIET_HOURS_END: "9"
+        run: |
+          if [ "$(date -u +%Y)" != "2026" ]; then
+            echo "Historical lecture-summary campaign is complete."
+            exit 0
+          fi
+          python scripts/cloud_run.py --lecture-summaries

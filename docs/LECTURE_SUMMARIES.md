@@ -41,6 +41,7 @@ Gemini receives bounded text with explicit source boundaries. The structured res
 
 - A summary is eligible only after a configured lecture has ended. Labs and tutorials are excluded by the existing schedule logic.
 - Hosted runs occur 15 and 45 minutes after each lecture ends. Missing slides can retry only while the session remains inside `LECTURE_REVIEW_MAX_AGE_MINUTES` (60 minutes by default); stale quizzes and summaries are not posted later as catch-up messages.
+- The temporary Sep 20–Oct 15, 2026 historical backfill runs once daily at 9:30 AM Toronto time and permits at most one uncached Gemini summary per run. Cached or pending Discord parts do not consume that limit. It uses durable deduplication and never bypasses grounding checks.
 - All Discord routes observe `DISCORD_QUIET_HOURS_START=0` through `DISCORD_QUIET_HOURS_END=9` in `APP_TIMEZONE`. The guard runs before durable enqueueing or network delivery and also blocks `--force`.
 - The generation cache key includes the source-bundle content hash, prompt version, and selected model.
 - The validated summary, rendered Discord payload, source provenance, model, and prompt version are committed to SQLite before delivery.

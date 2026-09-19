@@ -790,6 +790,11 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                     state_path=PROJECT_ROOT / os.getenv("ATTENDR_DB", "data/attendr.db"),
                     retry_hours=int(os.getenv("LECTURE_QUIZ_RETRY_HOURS", "336")),
                     max_age_minutes=int(os.getenv("LECTURE_REVIEW_MAX_AGE_MINUTES", "60")),
+                    summary_generation_limit=(
+                        int(os.environ["LECTURE_SUMMARY_MAX_GENERATIONS_PER_RUN"])
+                        if os.getenv("LECTURE_SUMMARY_MAX_GENERATIONS_PER_RUN")
+                        else None
+                    ),
                 )
                 report = runner.process(
                     force=arguments.force,
@@ -813,7 +818,9 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 if plan.lecture_summaries:
                     summary_status = (
                         "degraded"
-                        if report.summaries_failed or report.summaries_waiting_for_slides
+                        if report.summaries_failed
+                        or report.summaries_waiting_for_slides
+                        or report.summaries_deferred
                         else "ok"
                     )
                     results.append(
@@ -823,7 +830,8 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                             f"{report.summaries_sent} sent, "
                             f"{report.summaries_already_sent} already sent, "
                             f"{report.summaries_waiting_for_slides} waiting for slides, "
-                            f"{report.summaries_failed} failed",
+                            f"{report.summaries_failed} failed, "
+                            f"{report.summaries_deferred} quota-deferred",
                         )
                     )
                 if plan.lecture_quizzes:

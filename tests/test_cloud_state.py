@@ -172,6 +172,36 @@ def test_upload_retries_uncommitted_service_failure(monkeypatch, tmp_path):
     assert puts[0] == puts[1]
 
 
+def test_upload_retries_when_put_and_verification_get_both_disconnect(monkeypatch, tmp_path):
+    path = tmp_path / "state.db"
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE sample(value TEXT)")
+    puts = []
+    failed_verification = False
+
+    def request(method, url, **kwargs):
+        nonlocal failed_verification
+        if method == "PUT":
+            puts.append(kwargs["json"])
+            if len(puts) == 1:
+                raise cloud_state.requests.ConnectionError("lost upload response")
+            return Response({"revision": 1})
+        if not failed_verification:
+            failed_verification = True
+            raise cloud_state.requests.ConnectionError("verification unavailable")
+        return Response({"revision": 0, "sha256": None})
+
+    monkeypatch.setattr(cloud_state.requests, "request", request)
+    monkeypatch.setattr(cloud_state.time, "sleep", lambda _: None)
+    client = CloudStateClient("https://state.test", "secret", "key", "a" * 32, 0)
+
+    client.upload(path)
+
+    assert client.revision == 1
+    assert len(puts) == 2
+    assert puts[0] == puts[1]
+
+
 class RemoteCheckpoint:
     def __init__(self):
         self.payload = {"revision": 0, "sha256": None, "size": 0, "chunks": []}

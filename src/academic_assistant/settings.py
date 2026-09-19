@@ -123,6 +123,7 @@ class Settings(BaseModel):
                 "CANVAS_MATERIAL_FUTURE_DAYS",
                 "LECTURE_QUIZ_RETRY_HOURS",
                 "LECTURE_REVIEW_MAX_AGE_MINUTES",
+                "LECTURE_SUMMARY_MAX_GENERATIONS_PER_RUN",
             ]
         if plan.calendar or plan.study_plan:
             numeric += ["GOOGLE_EVENT_DURATION_MINUTES"]

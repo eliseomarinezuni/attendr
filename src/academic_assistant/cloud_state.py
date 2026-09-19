@@ -163,9 +163,15 @@ class CloudStateClient:
                 response = self.request("PUT", "/api/state-store", json=payload)
                 self.revision = int(response.json()["revision"])
                 return
-            except CloudStateError:
+            except CloudStateError as upload_error:
                 # A lost response may hide a successful commit. Verify before retrying.
-                remote = self.request("GET", "/api/state-store").json()
+                try:
+                    remote = self.request("GET", "/api/state-store").json()
+                except CloudStateError:
+                    if attempt == 2:
+                        raise upload_error
+                    time.sleep(attempt + 1)
+                    continue
                 if (
                     remote.get("sha256") == payload["sha256"]
                     and remote["revision"] == self.revision + 1

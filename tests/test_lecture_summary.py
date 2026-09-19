@@ -193,7 +193,12 @@ class FakeNotifier:
         return True
 
 
-def runner(tmp_path: Path, *, fail_summary_once: bool = False):
+def runner(
+    tmp_path: Path,
+    *,
+    fail_summary_once: bool = False,
+    summary_generation_limit: int | None = None,
+):
     source = tmp_path / "trees.txt"
     source.write_text(
         "A tree organizes nodes through parent-child relationships.", encoding="utf-8"
@@ -218,6 +223,7 @@ def runner(tmp_path: Path, *, fail_summary_once: bool = False):
         schedule,
         materials_directory=tmp_path,
         state_path=store.path,
+        summary_generation_limit=summary_generation_limit,
     )
     result._select_materials = Mock(return_value=(selected,))
     return result, canvas, ai, notifier, selected, ended_at
@@ -541,6 +547,30 @@ def test_yesterday_lecture_retries_when_material_appears_late(tmp_path):
     assert first.summaries_sent == 0
     assert second.summaries_sent == 1
     assert ai.summary_calls == 1
+
+
+def test_summary_generation_limit_defers_uncached_sessions_without_using_gemini(tmp_path):
+    review, _canvas, ai, notifier, _selected, ended_at = runner(
+        tmp_path, summary_generation_limit=1
+    )
+    earlier = ended_at - timedelta(days=1)
+    review.schedule.ended_lecture_sessions.return_value = [
+        (session(), earlier),
+        (session(), ended_at),
+    ]
+    review.max_age_minutes = 10_000
+
+    report = review.process(
+        now=ended_at + timedelta(minutes=15),
+        include_summaries=True,
+        include_quizzes=False,
+    )
+
+    assert report.summaries_sent == 1
+    assert report.summaries_deferred == 1
+    assert ai.summary_calls == 1
+    assert len(notifier.calls) == 1
+    assert any("quota-safe generation limit reached" in item for item in report.warnings)
 
 
 def test_stale_lecture_is_not_downloaded_generated_or_delivered(tmp_path):

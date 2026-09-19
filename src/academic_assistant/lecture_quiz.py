@@ -51,6 +51,7 @@ class LectureReviewReport:
     summaries_already_sent: int
     summaries_waiting_for_slides: int
     summaries_failed: int
+    summaries_deferred: int
     quizzes_sent: int
     quizzes_already_sent: int
     quizzes_waiting_for_slides: int
@@ -71,6 +72,7 @@ class LectureQuizRunner:
         retry_hours: int = 336,
         max_age_minutes: int = 60,
         max_file_bytes: int | None = None,
+        summary_generation_limit: int | None = None,
     ) -> None:
         self.canvas = canvas
         self.ai = ai
@@ -84,6 +86,9 @@ class LectureQuizRunner:
             raise ValueError("Lecture review maximum age must be at least one minute.")
         self.max_age_minutes = max_age_minutes
         self.max_file_bytes = max_file_bytes if max_file_bytes is not None else lecture_file_limit()
+        if summary_generation_limit is not None and summary_generation_limit < 1:
+            raise ValueError("Lecture summary generation limit must be at least one.")
+        self.summary_generation_limit = summary_generation_limit
 
     def run(self, *, now: datetime | None = None, force: bool = False) -> LectureQuizReport:
         """Backward-compatible quiz-only entry point."""
@@ -122,7 +127,7 @@ class LectureQuizRunner:
                 if cutoff <= ended_at.astimezone(UTC) <= current.astimezone(UTC)
             )
         if not due:
-            return LectureReviewReport(0, 0, 0, 0, 0, 0, 0, 0, ())
+            return LectureReviewReport(0, 0, 0, 0, 0, 0, 0, 0, 0, ())
         state = self._load_state() if self.store is None else {"sent": {}}
         summary_records = {
             session.session_id(ended_at.date()): self._summary_record(
@@ -165,7 +170,7 @@ class LectureQuizRunner:
             )
         ]
         if not pending:
-            return LectureReviewReport(0, summary_already, 0, 0, 0, quiz_already, 0, 0, ())
+            return LectureReviewReport(0, summary_already, 0, 0, 0, 0, quiz_already, 0, 0, ())
         needs_materials = any(
             force
             or (include_summaries and not summary_records.get(session.session_id(ended_at.date())))
@@ -188,7 +193,8 @@ class LectureQuizRunner:
             if needs_materials
             else SimpleNamespace(materials=(), warnings=())
         )
-        summary_sent = summary_waiting = summary_failed = 0
+        summary_sent = summary_waiting = summary_failed = summary_deferred = 0
+        summary_generations = 0
         quiz_sent = quiz_waiting = quiz_failed = 0
         warnings = list(downloads.warnings)
         for session, ended_at in pending:
@@ -197,6 +203,18 @@ class LectureQuizRunner:
             summary_pending = include_summaries and (
                 force or not self._summary_delivered(session_id, summary_record)
             )
+            if (
+                summary_pending
+                and not summary_record
+                and self.summary_generation_limit is not None
+                and summary_generations >= self.summary_generation_limit
+            ):
+                summary_pending = False
+                summary_deferred += 1
+                warnings.append(
+                    f"Summary deferred for session {session_id}: "
+                    "quota-safe generation limit reached."
+                )
             quiz_pending = include_quizzes and (force or not self._already_sent(session_id, state))
             quiz_key = f"lecture-quiz:{session_id}"
             quiz_record = self.store.quiz(quiz_key) if self.store and not force else None
@@ -244,6 +262,7 @@ class LectureQuizRunner:
                         summary_fingerprint = summary_record["content_hash"]
                     else:
                         assert bundle is not None
+                        summary_generations += 1
                         summary_payload, summary_fingerprint = self._generate_summary(
                             bundle, force=force
                         )
@@ -311,6 +330,7 @@ class LectureQuizRunner:
             summary_already,
             summary_waiting,
             summary_failed,
+            summary_deferred,
             quiz_sent,
             quiz_already,
             quiz_waiting,
