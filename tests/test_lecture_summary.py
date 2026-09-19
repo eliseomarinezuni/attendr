@@ -12,6 +12,7 @@ import pytest
 from academic_assistant.ai_assistant import (
     AIAssistant,
     AIProviderError,
+    GeneratedLectureSummary,
     PDFTextChunk,
 )
 from academic_assistant.ai_efficiency import AI_USAGE
@@ -108,7 +109,34 @@ class FakeModels:
 
     def generate_content(self, **kwargs: object) -> SimpleNamespace:
         self.calls.append(kwargs)
-        return SimpleNamespace(text=json.dumps([self.response]))
+        return SimpleNamespace(text=json.dumps([provider_summary(self.response)]))
+
+
+def provider_summary(value: dict[str, object]) -> dict[str, object]:
+    if "points" in value:
+        return value
+    points: list[dict[str, object]] = []
+    for section in (
+        "tldr",
+        "key_concepts",
+        "teaching_sections",
+        "examples",
+        "algorithms_or_code",
+        "formulas",
+        "common_mistakes",
+        "connections",
+        "learning_objectives",
+    ):
+        section_points = value[section]
+        assert isinstance(section_points, list)
+        for point_value in section_points:
+            assert isinstance(point_value, dict)
+            points.append({"section": section, **point_value})
+    return {
+        "topic": value["topic"],
+        "points": points,
+        "source_refs": value["source_refs"],
+    }
 
 
 class FakeClient:
@@ -290,6 +318,26 @@ def test_gemini_summary_is_structured_grounded_and_low_temperature():
     call = client.models.calls[0]
     assert call["model"] == assistant.model_for_task("lecture_summary")
     assert call["config"].temperature == 0.2
+    assert call["config"].response_schema == list[GeneratedLectureSummary]
+
+
+def test_flat_provider_summary_requires_all_core_sections():
+    assistant = AIAssistant(
+        "test-key",
+        client=FakeClient(
+            {
+                "topic": "Trees",
+                "points": [],
+                "source_refs": ["S1"],
+            }
+        ),
+    )
+
+    with pytest.raises(AIProviderError, match="invalid structured data"):
+        assistant.generate_lecture_summary(
+            "SOURCE S1\nTrees have nodes.",
+            source_texts={"S1": "Trees have nodes."},
+        )
 
 
 @pytest.mark.parametrize(
@@ -471,7 +519,7 @@ def test_failed_delivery_reuses_cached_generation_without_download_or_gemini(tmp
     assert usage.cache_misses == 1
     assert usage.cache_hits == 1
     record = review.store.cache_get("lecture-summary-session:v1:2026-09-14:csc:1400")
-    assert record["prompt_version"] == 1
+    assert record["prompt_version"] == 2
     assert record["model"] == "gemini-test"
     assert record["generated_at"].endswith("+00:00")
     assert record["sources"][0]["content_hash"]

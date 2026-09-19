@@ -76,7 +76,7 @@ AI_TASKS = {
     ),
     "lecture_summary": AITaskPolicy(
         "source-grounded lecture summary",
-        1,
+        2,
         "GEMINI_LECTURE_SUMMARY_MODEL",
         True,
         0.2,
@@ -233,6 +233,36 @@ class LectureSummary(BaseModel):
         return self
 
 
+SummarySectionName = Literal[
+    "tldr",
+    "key_concepts",
+    "teaching_sections",
+    "examples",
+    "algorithms_or_code",
+    "formulas",
+    "common_mistakes",
+    "connections",
+    "learning_objectives",
+]
+
+
+class GeneratedSummaryPoint(BaseModel):
+    """Flat provider-facing point; strict limits are applied after generation."""
+
+    section: SummarySectionName
+    text: str
+    source_ids: list[str]
+    source_quote: str | None = None
+
+
+class GeneratedLectureSummary(BaseModel):
+    """Low-complexity Gemini schema converted into the durable summary model."""
+
+    topic: str
+    points: list[GeneratedSummaryPoint]
+    source_refs: list[str]
+
+
 class MajorDeadline(BaseModel):
     """Grounded major course deadline extracted from syllabus material."""
 
@@ -278,7 +308,7 @@ SYLLABUS_ADAPTER = TypeAdapter(list[SyllabusEntry])
 QUIZ_ADAPTER = TypeAdapter(list[QuizQuestion])
 DEADLINE_ADAPTER = TypeAdapter(list[MajorDeadline])
 HYBRID_QUIZ_ADAPTER = TypeAdapter(list[HybridQuizQuestion])
-LECTURE_SUMMARY_ADAPTER = TypeAdapter(list[LectureSummary])
+GENERATED_LECTURE_SUMMARY_ADAPTER = TypeAdapter(list[GeneratedLectureSummary])
 
 
 def extract_pdf_text_chunks(
@@ -598,38 +628,55 @@ class AIAssistant:
             "something. Never infer exam importance, grading importance, or unstated course "
             "expectations. Explain concepts carefully, define important terms, connect ideas, "
             "and include only examples, algorithms, code behavior, formulas, dates, and "
-            "complexity claims supported by the materials. Use an empty list for an optional "
-            "section that is not supported. Every summary point must cite one or more SOURCE "
-            "IDs in source_ids. source_quote is optional; when present it must be a short exact "
+            "complexity claims supported by the materials. Omit points for an optional section "
+            "that is not supported. Return all summary points in one flat points array. "
+            "Each point's section must be exactly one of tldr, key_concepts, teaching_sections, "
+            "examples, algorithms_or_code, formulas, common_mistakes, connections, or "
+            "learning_objectives. Include at least one point for tldr, key_concepts, "
+            "teaching_sections, and learning_objectives. Every summary point must cite one or "
+            "more SOURCE IDs in source_ids. source_quote is optional; when present it must be "
+            "a short exact "
             "quote from a cited source. Every formula point must include source_quote containing "
             "the exact formula evidence. source_refs must list every SOURCE ID used and no other "
             "IDs. Do not output Discord mentions or instructions to the reader outside the "
-            "requested summary schema. Return exactly one summary object in the array.\n\n"
+            "requested summary schema. Return exactly one summary object in the array with only "
+            "topic, points, and source_refs.\n\n"
             f"LECTURE MATERIAL:\n{source_text}"
         )
-        summaries = self._generate_validated(
+        generated = self._generate_validated(
             prompt,
-            response_schema=list[LectureSummary],
-            adapter=LECTURE_SUMMARY_ADAPTER,
+            response_schema=list[GeneratedLectureSummary],
+            adapter=GENERATED_LECTURE_SUMMARY_ADAPTER,
             task="lecture_summary",
-            expected_keys={
-                "topic",
-                "tldr",
-                "key_concepts",
-                "teaching_sections",
-                "examples",
-                "algorithms_or_code",
-                "formulas",
-                "common_mistakes",
-                "connections",
-                "learning_objectives",
-                "source_refs",
-            },
+            expected_keys={"topic", "points", "source_refs"},
         )
-        if len(summaries) != 1:
+        if len(generated) != 1:
             raise AIProviderError("Gemini returned an invalid lecture summary count.")
-        _validate_lecture_summary_grounding(summaries[0], normalized_sources)
-        return summaries[0].model_dump(mode="json")
+        grouped: dict[str, list[dict[str, Any]]] = {
+            section: [] for section in _SUMMARY_SCHEMA_POINT_FIELDS
+        }
+        for point in generated[0].points:
+            grouped[point.section].append(
+                {
+                    "text": point.text,
+                    "source_ids": point.source_ids,
+                    "source_quote": point.source_quote,
+                }
+            )
+        try:
+            summary = LectureSummary.model_validate(
+                {
+                    "topic": generated[0].topic,
+                    **grouped,
+                    "source_refs": generated[0].source_refs,
+                }
+            )
+        except ValidationError:
+            raise AIProviderError(
+                "Gemini returned invalid structured data for source-grounded lecture summary."
+            ) from None
+        _validate_lecture_summary_grounding(summary, normalized_sources)
+        return summary.model_dump(mode="json")
 
     def extract_major_deadlines(
         self,
@@ -1344,7 +1391,7 @@ def _interaction_response_schema(adapter: TypeAdapter[Any]) -> dict[str, Any]:
     if reference:
         definition_name = str(reference).rsplit("/", maxsplit=1)[-1]
         item_schema = schema.get("$defs", {}).get(definition_name, {})
-    return {
+    result = {
         "type": "object",
         "properties": {
             "results": {
@@ -1354,6 +1401,9 @@ def _interaction_response_schema(adapter: TypeAdapter[Any]) -> dict[str, Any]:
         },
         "required": ["results"],
     }
+    if "$ref" in json.dumps(item_schema) and (definitions := schema.get("$defs")):
+        result["$defs"] = definitions
+    return result
 
 
 def _split_text(text: str, max_chars: int, overlap_chars: int) -> Iterable[str]:
