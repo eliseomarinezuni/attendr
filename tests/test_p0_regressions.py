@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from google.oauth2.credentials import Credentials
+
 import sys
 import tempfile
 import unittest
@@ -155,7 +157,9 @@ class OAuthSafetyTests(unittest.TestCase):
         self.auth.token_path.unlink()
         self.auth.interactive = True
         with patch("academic_assistant.calendar_sync.InstalledAppFlow") as flow:
-            flow.from_client_secrets_file.return_value.run_local_server.return_value.to_json.return_value = "{}"
+            flow.from_client_secrets_file.return_value.run_local_server.return_value = Credentials(
+                token="test", refresh_token="refresh"
+            )
             self.auth.authenticate()
             self.assertEqual(
                 flow.from_client_secrets_file.return_value.run_local_server.call_args.kwargs[
@@ -168,7 +172,7 @@ class OAuthSafetyTests(unittest.TestCase):
         original = '{"refresh_token":"still-valid-backup"}'
         self.auth.token_path.write_text(original)
         self.auth.interactive = True
-        incomplete = Mock(refresh_token=None)
+        incomplete = Credentials(token="test", refresh_token=None)
         with (
             patch(
                 "academic_assistant.calendar_sync.Credentials.from_authorized_user_file",

@@ -9,6 +9,8 @@ import secrets
 import sqlite3
 import subprocess
 import sys
+import time
+import signal
 
 import requests
 from dotenv import load_dotenv
@@ -57,6 +59,30 @@ def recorded_status(database: Path, exit_code: int) -> str:
         return "success"
 
 
+def run_with_lease(client: CloudStateClient, command: list[str]) -> int:
+    """Renew independently of child writes; terminate the entire run on lease loss."""
+    client.request("POST", "/api/state-store/renew")
+    process = subprocess.Popen(command, cwd=ROOT, start_new_session=True)
+    next_renewal = time.monotonic() + 300
+    try:
+        while True:
+            try:
+                return process.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                if time.monotonic() >= next_renewal:
+                    client.request("POST", "/api/state-store/renew")
+                    next_renewal = time.monotonic() + 300
+    except BaseException:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+        raise
+
+
 def main() -> int:
     load_dotenv(ROOT / ".env", override=False)
     url = required("STUDY_WORKER_URL").rstrip("/")
@@ -96,7 +122,7 @@ def main() -> int:
         )
         if not restored:
             print("Initializing the first encrypted state checkpoint")
-        result = subprocess.call([sys.executable, str(ROOT / "main.py"), *sys.argv[1:]], cwd=ROOT)
+        result = run_with_lease(client, [sys.executable, str(ROOT / "main.py"), *sys.argv[1:]])
         final_status = recorded_status(database, result)
         if final_status == "ok":
             final_status = "success"

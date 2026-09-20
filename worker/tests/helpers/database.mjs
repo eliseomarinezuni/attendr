@@ -13,7 +13,7 @@ export function wrapDatabase(sqlite) {
     bind: (...args) => wrap(sql, args),
     all: async () => ({ results: sqlite.prepare(sql).all(...values) }),
     first: async () => sqlite.prepare(sql).get(...values) ?? null,
-    run: async () => sqlite.prepare(sql).run(...values),
+    run: () => ({ results: sqlite.prepare(sql).all(...values) }),
   });
   return {
     sqlite,
@@ -21,8 +21,9 @@ export function wrapDatabase(sqlite) {
     batch: async (statements) => {
       sqlite.exec('BEGIN');
       try {
-        const results = [];
-        for (const statement of statements) results.push(await statement.run());
+        // Execute without yielding: a D1 transaction cannot interleave with
+        // another request. Preserve RETURNING rows like the real batch API.
+        const results = statements.map((statement) => statement.run());
         sqlite.exec('COMMIT');
         return results;
       } catch (error) {

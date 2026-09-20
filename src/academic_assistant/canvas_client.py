@@ -353,7 +353,12 @@ class CanvasClient:
         if self.state_store:
             contexts_by_id = {context.summary.id: context for context in contexts}
             known = {item.uid: item for item in items}
+            retired = self.state_store.retired_assignments()
+            removed_uids.extend(retired)
+            known = {uid: item for uid, item in known.items() if uid not in retired}
             for tracked in self.state_store.tracked_assignments():
+                if tracked["uid"] in retired:
+                    continue
                 context = contexts_by_id.get(tracked["course_id"])
                 if context is None or tracked["uid"] in known:
                     continue

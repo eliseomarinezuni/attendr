@@ -316,6 +316,7 @@ class DiscordNotifier:
         force: bool = False,
         destination: str = "announcements",
         fixed_fingerprint: str | None = None,
+        expires_at: float | None = None,
     ) -> bool:
         """Send an application-defined payload using the existing safe webhook flow."""
         event_key = event_key.strip()
@@ -327,6 +328,7 @@ class DiscordNotifier:
             force=force,
             destination=destination,
             fixed_fingerprint=fixed_fingerprint,
+            expires_at=expires_at,
         )
 
     def send_daily_digest(
@@ -503,7 +505,10 @@ class DiscordNotifier:
         force: bool,
         fixed_fingerprint: str | None = None,
         destination: str = "announcements",
+        expires_at: float | None = None,
     ) -> bool:
+        if expires_at is not None and self._now_utc().timestamp() >= expires_at:
+            raise DiscordNotificationError("Lecture delivery expired before sending")
         fingerprint = fixed_fingerprint or self._fingerprint(payload)
         routed_key = f"{destination}:{event_key}"
         if not force and self.state.was_sent(routed_key, fingerprint):
@@ -511,7 +516,9 @@ class DiscordNotifier:
         self._assert_delivery_allowed()
         messages = discord_messages(payload)
         if isinstance(self.state, StateStore) and not force:
-            keys = self.state.enqueue_messages(routed_key, fingerprint, destination, messages)
+            keys = self.state.enqueue_messages(
+                routed_key, fingerprint, destination, messages, expires_at=expires_at
+            )
             for key in keys:
                 if self.state.was_sent(key, fingerprint):
                     continue
@@ -524,14 +531,20 @@ class DiscordNotifier:
             self.state.mark_sent(routed_key, fingerprint)
         else:
             for message in messages:
-                self._post(message, destination)
+                self._post(message, destination, expires_at=expires_at)
             if not force:
                 self.state.mark_sent(routed_key, fingerprint)
         return True
 
     def _deliver_claim(self, row: dict[str, Any]) -> None:
+        assert isinstance(self.state, StateStore)
         try:
-            remote_id = self._post(json.loads(row["payload"]), row["destination"], durable=True)
+            remote_id = self._post(
+                json.loads(row["payload"]),
+                row["destination"],
+                durable=True,
+                expires_at=row.get("expires_at"),
+            )
         except DiscordRateLimitError:
             self.state.finish(row, "pending", error="Rate limited")
             raise
@@ -541,9 +554,18 @@ class DiscordNotifier:
             )
             raise
         except DiscordNotificationError:
-            self.state.finish(
-                row, "failed", error="Discord rejected delivery; repair configuration before retry"
-            )
+            if (
+                row.get("expires_at") is not None
+                and self._now_utc().timestamp() >= row["expires_at"]
+            ):
+                self.state.finish(row, "pending", error="Lecture delivery expired")
+                self.state.discard_pending_delivery(row["event_key"], row["fingerprint"])
+            else:
+                self.state.finish(
+                    row,
+                    "failed",
+                    error="Discord rejected delivery; repair configuration before retry",
+                )
             raise
         self.state.finish(row, "sent", remote_id=remote_id)
 
@@ -551,14 +573,24 @@ class DiscordNotifier:
         if not isinstance(self.state, StateStore):
             return 0
         pending_deliveries = self.state.pending_deliveries()
-        max_lecture_age = self._read_positive_int("LECTURE_REVIEW_MAX_AGE_MINUTES", 60) * 60
         now_timestamp = self._now_utc().timestamp()
         pending_deliveries = [
             pending
             for pending in pending_deliveries
             if not (
-                pending["destination"] in {"lecture_quizzes", "lecture_summaries"}
-                and now_timestamp - float(pending["created_at"]) > max_lecture_age
+                (
+                    (
+                        pending.get("expires_at") is not None
+                        and now_timestamp >= pending["expires_at"]
+                    )
+                    or (
+                        pending.get("expires_at") is None
+                        and (
+                            pending["destination"] == "lecture_summaries"
+                            or ":lecture-quiz:" in pending["event_key"]
+                        )
+                    )
+                )
                 and self.state.discard_pending_delivery(
                     str(pending["event_key"]), str(pending["fingerprint"])
                 )
@@ -580,7 +612,12 @@ class DiscordNotifier:
         return sent
 
     def _post(
-        self, payload: Mapping[str, Any], destination: str, *, durable: bool = False
+        self,
+        payload: Mapping[str, Any],
+        destination: str,
+        *,
+        durable: bool = False,
+        expires_at: float | None = None,
     ) -> str | None:
         channel_id = self._channel_ids.get(destination)
         use_bot = bool(self._bot_token and channel_id)
@@ -597,6 +634,8 @@ class DiscordNotifier:
         if use_bot:
             outgoing.pop("username", None)
         for attempt in range(1, self.max_attempts + 1):
+            if expires_at is not None and self._now_utc().timestamp() >= expires_at:
+                raise DiscordNotificationError("Lecture delivery expired before sending")
             try:
                 response = self._session.post(
                     url,

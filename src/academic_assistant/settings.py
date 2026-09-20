@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Annotated
+from .pipeline_models import RunPlan
 from pydantic import TypeAdapter
 
 
@@ -37,7 +38,7 @@ class Settings(BaseModel):
         return value
 
     @classmethod
-    def from_env(cls, plan: object) -> Settings:
+    def from_env(cls, plan: RunPlan) -> Settings:
         def required(key: str) -> str:
             value = os.getenv(key, "").strip()
             if not value or "replace_with" in value.casefold():

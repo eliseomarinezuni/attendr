@@ -181,6 +181,7 @@ class FakeNotifier:
         force: bool = False,
         destination: str = "announcements",
         fixed_fingerprint: str | None = None,
+        expires_at: float | None = None,
     ) -> bool:
         self.calls.append((event_key, destination))
         if destination == "lecture_summaries" and self.fail_summary_once:

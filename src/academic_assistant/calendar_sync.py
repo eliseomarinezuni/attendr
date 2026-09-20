@@ -166,7 +166,7 @@ class GoogleCalendarAuthenticator:
             flow = InstalledAppFlow.from_client_secrets_file(
                 str(self.credentials_path), self.scopes
             )
-            credentials = flow.run_local_server(
+            authorized = flow.run_local_server(
                 port=0,
                 access_type="offline",
                 prompt="consent",
@@ -178,8 +178,10 @@ class GoogleCalendarAuthenticator:
                 "user, and browser access."
             ) from error
 
-        self._save_token(credentials)
-        return credentials
+        if not isinstance(authorized, Credentials):
+            raise CalendarAuthenticationError("Expected user OAuth credentials")
+        self._save_token(authorized)
+        return authorized
 
     @staticmethod
     def verify_service(service: Any) -> None:
@@ -355,6 +357,9 @@ class GoogleCalendarSync:
         *,
         delete_uids: Iterable[str] = (),
         before_write: Callable[[], None] | None = None,
+        authoritative_sources: Iterable[str] = (),
+        protected_course_ids: Iterable[int] = (),
+        now: datetime | None = None,
     ) -> CalendarSyncReport:
         """Synchronize items, updating existing events when their content changes."""
         calendar_id, calendar_name = self.resolve_calendar()
@@ -364,13 +369,37 @@ class GoogleCalendarSync:
         # Avoid duplicate writes if the caller provides the same Canvas item twice.
         unique_items = {item.uid: item for item in items}
         desired_by_uid = {uid: self._event_body(item) for uid, item in unique_items.items()}
-        for uid in set(delete_uids) - unique_items.keys():
+        sources = set(authoritative_sources)
+        protected = {str(value) for value in protected_course_ids}
+        cutoff = now or datetime.now(UTC)
+        obsolete = set(delete_uids)
+        for uid, event in existing_by_uid.items():
+            private = event.get("extendedProperties", {}).get("private", {})
+            start = event.get("start", {})
+            raw = start.get("dateTime") or start.get("date")
+            if not raw:
+                continue
+            when = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=self.timezone)
+            if (
+                private.get("canvas_source") in sources
+                and private.get("canvas_course_id") not in protected
+                and when >= cutoff
+            ):
+                obsolete.add(uid)
+        for uid in obsolete - unique_items.keys():
             existing = existing_by_uid.pop(uid, None)
             if existing is None:
                 previous = (
                     self.state_store.calendar_record(calendar_id, uid) if self.state_store else None
                 )
-                if previous and previous["status"] == "pending" and previous["action"] == "deleted":
+                if (
+                    self.state_store
+                    and previous
+                    and previous["status"] == "pending"
+                    and previous["action"] == "deleted"
+                ):
                     self.state_store.calendar_confirm(
                         previous, previous["event_id"], notify=self._source_tag == "canvas"
                     )
@@ -395,7 +424,7 @@ class GoogleCalendarSync:
                     raise self._api_error(
                         f"Could not remove replaced Attendr event {uid}", error
                     ) from None
-            if intent:
+            if intent and self.state_store:
                 self.state_store.calendar_confirm(
                     intent, existing["id"], notify=self._source_tag == "canvas"
                 )
@@ -459,6 +488,7 @@ class GoogleCalendarSync:
                     and previous["status"] == "pending"
                     and previous["fingerprint"] == fingerprint
                 ):
+                    assert self.state_store is not None
                     self.state_store.calendar_confirm(
                         previous, existing["id"], notify=self._source_tag == "canvas"
                     )
@@ -526,7 +556,7 @@ class GoogleCalendarSync:
                     raise self._api_error(
                         f"Could not sync {item.course_name} — {item.title}", error
                     ) from None
-            if intent:
+            if intent and self.state_store:
                 self.state_store.calendar_confirm(
                     intent, result["id"], notify=self._source_tag == "canvas"
                 )
@@ -556,7 +586,7 @@ class GoogleCalendarSync:
                     raise self._api_error(
                         f"Could not remove obsolete Attendr event {uid}", error
                     ) from None
-                if intent:
+                if intent and self.state_store:
                     self.state_store.calendar_confirm(
                         intent, event["id"], notify=self._source_tag == "canvas"
                     )
@@ -642,8 +672,8 @@ class GoogleCalendarSync:
         self._resolved_calendar = (calendar_id, self._calendar_name)
         return self._resolved_calendar
 
-    def _load_existing_events(self, calendar_id: str) -> dict[str, Mapping[str, Any]]:
-        events_by_uid: dict[str, Mapping[str, Any]] = {}
+    def _load_existing_events(self, calendar_id: str) -> dict[str, dict[str, Any]]:
+        events_by_uid: dict[str, dict[str, Any]] = {}
         page_token: str | None = None
         try:
             while True:

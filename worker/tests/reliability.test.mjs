@@ -1,14 +1,10 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import test, { afterEach } from 'node:test';
-import ts from 'typescript';
+import { loadWorker } from './helpers/worker.mjs';
 import { freshDatabase } from './helpers/database.mjs';
 
-const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8') +
-  '\nexport { busyIntervals, allCalendarIds, verifyDiscord, handleButton, recoverOperations, nextSlot, automationWatchdog, discordQuietHoursActive };';
-const { outputText } = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
-const { default: worker, busyIntervals, allCalendarIds, verifyDiscord, handleButton, recoverOperations, nextSlot, automationWatchdog, discordQuietHoursActive } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
+const { default: worker, busyIntervals, allCalendarIds, verifyDiscord, handleButton, recoverOperations, nextSlot, automationWatchdog, discordQuietHoursActive } = await loadWorker(['busyIntervals', 'allCalendarIds', 'verifyDiscord', 'handleButton', 'recoverOperations', 'nextSlot', 'automationWatchdog', 'discordQuietHoursActive']);
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 

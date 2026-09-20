@@ -1,0 +1,21 @@
+export interface Env {
+  DB: D1Database;
+  DISCORD_ASK_CHANNEL_ID: string;
+  GEMINI_API_KEY: string;
+  GEMINI_MODEL?: string;
+  DISCORD_APPLICATION_ID: string;
+  DISCORD_PUBLIC_KEY: string;
+  DISCORD_BOT_TOKEN: string;
+  DISCORD_STUDY_CHANNEL_ID: string;
+  DISCORD_OWNER_USER_ID: string;
+  STUDY_SYNC_SECRET: string;
+  GOOGLE_CLIENT_ID: string;
+  GOOGLE_CLIENT_SECRET: string;
+  GOOGLE_REFRESH_TOKEN: string;
+  GITHUB_ACTIONS_TOKEN?: string;
+  GITHUB_REPOSITORY?: string;
+  GITHUB_WORKFLOW?: string;
+  GITHUB_REF?: string;
+  DISCORD_QUIET_HOURS_START?: string;
+  DISCORD_QUIET_HOURS_END?: string;
+}

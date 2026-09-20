@@ -539,7 +539,7 @@ class CourseMaterialsSync:
     @staticmethod
     def _extract_docx_text(material: SyllabusMaterial) -> str:
         try:
-            document = Document(material.local_path)
+            document = Document(str(material.local_path))
         except (OSError, ValueError, KeyError, PackageNotFoundError) as error:
             raise AIInputError(
                 f"Could not read downloaded Word syllabus: {material.title}"
@@ -695,7 +695,13 @@ class CourseMaterialsSync:
 
     def _extraction_method(self) -> Literal["gemini", "deterministic", "hybrid"]:
         value = getattr(self.ai, "last_deadline_extraction_method", "gemini")
-        return value if value in {"gemini", "deterministic", "hybrid"} else "gemini"
+        return (
+            "deterministic"
+            if value == "deterministic"
+            else "hybrid"
+            if value == "hybrid"
+            else "gemini"
+        )
 
     def _task_model(self) -> str:
         method = getattr(self.ai, "model_for_task", None)

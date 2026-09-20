@@ -216,7 +216,13 @@ class CourseMaterialsSyncTests(unittest.TestCase):
                                 "course_id": material.course_id,
                                 "course_name": material.course_name,
                                 "title": material.title,
-                                "deadlines": [deadline("2026-10-20", None)],
+                                "deadlines": [
+                                    deadline(
+                                        "2026-10-20",
+                                        None,
+                                        evidence="Midterm Exam: October 20, 2026",
+                                    )
+                                ],
                                 "extraction_version": 3,
                                 "context_hash": "legacy",
                             }
@@ -312,7 +318,7 @@ class CourseMaterialsSyncTests(unittest.TestCase):
                 now_provider=lambda: NOW,
             ).sync(active_course_ids={1})
             forbidden = FakeAI([])
-            with patch("academic_assistant.materials_sync.GROUNDING_VERSION", 3):
+            with patch("academic_assistant.materials_sync.GROUNDING_VERSION", 5):
                 report = CourseMaterialsSync(
                     FakeCanvas([material]),
                     forbidden,
@@ -543,3 +549,41 @@ class CourseMaterialsSyncTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_old_untimed_cache_is_reextracted_as_timed_event(tmp_path):
+    from academic_assistant.ai_assistant import AIAssistant
+
+    path = tmp_path / "syllabus.html"
+    source = "Midterm Exam: October 20, 2026 at 23:59"
+    path.write_text(f"<p>{source}</p>")
+    material = CourseMaterialsSyncTests().make_material(path)
+    index_path = tmp_path / "index.json"
+    index_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "sources": {
+                    material.uid: {
+                        "content_sha256": material.content_sha256,
+                        "course_id": material.course_id,
+                        "course_name": material.course_name,
+                        "title": material.title,
+                        "deadlines": [deadline("2026-10-20", None, evidence=source)],
+                        "extraction_version": 3,
+                        "grounding_version": 2,
+                        "context_hash": "legacy",
+                    }
+                },
+            }
+        )
+    )
+    report = CourseMaterialsSync(
+        FakeCanvas([material]),
+        AIAssistant("test-key", client=object()),
+        index_path=index_path,
+        now_provider=lambda: NOW,
+    ).sync(active_course_ids={1})
+    assert len(report.items) == 1
+    assert report.items[0].due_at_local.isoformat() == "2026-10-20T23:59:00-04:00"
+    assert not report.items[0].all_day

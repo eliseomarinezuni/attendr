@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
-from canvasapi.exceptions import CanvasException
+from canvasapi.exceptions import CanvasException, ResourceDoesNotExist, Forbidden
 from requests import RequestException
 
 from .ai_assistant import (
@@ -313,7 +313,9 @@ class KnowledgeSync:
                     if attr(page, "url", "")
                 }
             )
-        except (CanvasException, RequestException):
+        except (CanvasException, RequestException) as error:
+            if not isinstance(error, ResourceDoesNotExist):
+                raise
             # Canvas returns 404 when a course has no Pages tab. Accessible
             # module-linked pages above are still a complete visible inventory.
             pass
@@ -325,9 +327,7 @@ class KnowledgeSync:
             except (CanvasException, RequestException):
                 # Preserve atomicity: an advertised visible module page that
                 # cannot be read makes this course snapshot incomplete.
-                if ("Page", key) in module_items:
-                    raise
-                continue
+                raise
             if not allowed(full, "Page", key):
                 continue
             text = self.canvas._html_to_text(str(attr(full, "body", "") or ""))
@@ -350,7 +350,9 @@ class KnowledgeSync:
                     if attr(file, "id", "")
                 }
             )
-        except (CanvasException, RequestException):
+        except (CanvasException, RequestException) as error:
+            if type(error) not in {Forbidden, ResourceDoesNotExist}:
+                raise
             # Canvas returns 403 when the Files tab is hidden. Published files
             # linked from visible modules remain individually accessible.
             pass
@@ -567,6 +569,7 @@ class KnowledgeSync:
                         part = {
                             **source,
                             "id": f"{source['id']}:{offset // 32}",
+                            "source_id": source["id"],
                             "chunks": source["chunks"][offset : offset + 32],
                         }
                         part["hash"] = hashlib.sha256(

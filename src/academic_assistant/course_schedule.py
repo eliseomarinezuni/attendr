@@ -46,13 +46,43 @@ class CourseSchedule:
         term = data["term"]
         self.term_start = date.fromisoformat(term["start_date"])
         self.term_end = date.fromisoformat(term["end_date"])
+        if self.term_end < self.term_start:
+            raise ValueError("Term end must follow term start")
         self.no_class_ranges = tuple(
             (date.fromisoformat(item["start"]), date.fromisoformat(item["end"]))
             for item in term.get("no_class", [])
         )
+        if any(end < start for start, end in self.no_class_ranges):
+            raise ValueError("No-class date ranges must be ordered")
         self.excluded_course_patterns = tuple(
             str(value).casefold() for value in data.get("excluded_course_patterns", [])
         )
+        course_keys = [course["key"] for course in data["courses"]]
+        if any(not isinstance(key, str) or not key.strip() for key in course_keys) or len(
+            set(course_keys)
+        ) != len(course_keys):
+            raise ValueError("Course keys must be nonempty and unique")
+        for course in data["courses"]:
+            if not course.get("match") or not all(
+                isinstance(value, str) and value.strip() for value in course["match"]
+            ):
+                raise ValueError("Each course needs nonempty match patterns")
+            seen = set()
+            for session in course["sessions"]:
+                if type(session.get("weekday")) is not int or not 0 <= session["weekday"] <= 6:
+                    raise ValueError("Session weekday must be an integer from 0 to 6")
+                start, end = (
+                    time.fromisoformat(session["start"]),
+                    time.fromisoformat(session["end"]),
+                )
+                if start.tzinfo or end.tzinfo or end <= start:
+                    raise ValueError("Session times must be local with end after start")
+                if session.get("type") not in {"lecture", "lab", "tutorial", "seminar"}:
+                    raise ValueError("Unsupported session type")
+                key = (session["weekday"], start, end, session["type"])
+                if key in seen:
+                    raise ValueError("Duplicate timetable session")
+                seen.add(key)
         self.lecture_material_rules: dict[str, dict[str, Any]] = {}
         for course in data["courses"]:
             rules = course.get("lecture_materials", {})
@@ -109,6 +139,11 @@ class CourseSchedule:
             )
             for item in data.get("academic_dates", [])
         )
+
+        if len({item.uid for item in self.academic_dates}) != len(self.academic_dates):
+            raise ValueError("Academic date IDs must be unique")
+        if any(item.end_date and item.end_date < item.start_date for item in self.academic_dates):
+            raise ValueError("Academic date ranges must be ordered")
 
     @classmethod
     def load(cls, path: str | Path) -> CourseSchedule:

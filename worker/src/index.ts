@@ -1,24 +1,7 @@
-interface Env {
-  DB: D1Database;
-  DISCORD_ASK_CHANNEL_ID: string;
-  GEMINI_API_KEY: string;
-  GEMINI_MODEL?: string;
-  DISCORD_APPLICATION_ID: string;
-  DISCORD_PUBLIC_KEY: string;
-  DISCORD_BOT_TOKEN: string;
-  DISCORD_STUDY_CHANNEL_ID: string;
-  DISCORD_OWNER_USER_ID: string;
-  STUDY_SYNC_SECRET: string;
-  GOOGLE_CLIENT_ID: string;
-  GOOGLE_CLIENT_SECRET: string;
-  GOOGLE_REFRESH_TOKEN: string;
-  GITHUB_ACTIONS_TOKEN?: string;
-  GITHUB_REPOSITORY?: string;
-  GITHUB_WORKFLOW?: string;
-  GITHUB_REF?: string;
-  DISCORD_QUIET_HOURS_START?: string;
-  DISCORD_QUIET_HOURS_END?: string;
-}
+import { DISCORD_API, TIME_ZONE, WINDOWS } from "./config";
+import type { Env } from "./env";
+import { json } from "./http";
+import { stateLease, renewState, readState, writeState } from "./cloud-state";
 
 interface StudySession {
   session_id: string;
@@ -83,26 +66,12 @@ interface DiscordInteraction {
   data?: { custom_id?: string; name?: string; options?: Array<{ name: string; type: number; value: unknown }> };
 }
 
-const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
-const DISCORD_API = "https://discord.com/api/v10";
-const TIME_ZONE = "America/Toronto";
-const WINDOWS: Record<number, Array<[number, number]>> = {
-  0: [[660, 1080]],
-  1: [[780, 990], [1125, 1170]],
-  2: [[1125, 1320]],
-  3: [[1215, 1320]],
-  4: [],
-  5: [[1215, 1320]],
-  6: [[660, 1080]],
-};
+
 
 async function boundedFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   return fetch(input, { ...init, signal: AbortSignal.timeout(15_000) });
 }
 
-function json(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), { status, headers: JSON_HEADERS });
-}
 
 function unauthorized(): Response {
   return json({ error: "Unauthorized" }, 401);
@@ -168,86 +137,6 @@ async function planLease(request: Request, env: Env, release: boolean): Promise<
   }
   const acquired = await acquireMutationLease(env, body.token, PLAN_LEASE_MS);
   return acquired ? json({ acquired: true }) : json({ error: "Another planner, reminder, or button operation is active" }, 409);
-}
-
-const STATE_LEASE_MS = 20 * 60_000;
-
-function stateLeaseToken(request: Request): string {
-  return request.headers.get("x-attendr-lease") ?? "";
-}
-
-async function stateLease(request: Request, env: Env, release: boolean): Promise<Response> {
-  let body: { token?: unknown };
-  try { body = await request.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
-  if (!body || typeof body.token !== "string" || !/^[a-f0-9]{32}$/.test(body.token)) {
-    return json({ error: "Invalid state lease token" }, 400);
-  }
-  if (release) {
-    await env.DB.prepare("UPDATE attendr_state_control SET lease_token=NULL,lease_until=0 WHERE id=1 AND lease_token=?")
-      .bind(body.token).run();
-    return json({ released: true });
-  }
-  const now = Date.now();
-  const row = await env.DB.prepare(`UPDATE attendr_state_control
-    SET lease_token=?,lease_until=? WHERE id=1 AND (lease_until<? OR lease_token=?)
-    RETURNING revision,sha256,size,chunk_count`)
-    .bind(body.token, now + STATE_LEASE_MS, now, body.token)
-    .first<{ revision: number; sha256: string | null; size: number; chunk_count: number }>();
-  return row ? json({ acquired: true, ...row }) : json({ error: "State is in use" }, 409);
-}
-
-async function readState(request: Request, env: Env): Promise<Response> {
-  const token = stateLeaseToken(request);
-  const control = await env.DB.prepare(`SELECT revision,sha256,size,chunk_count
-    FROM attendr_state_control WHERE id=1 AND lease_token=? AND lease_until>?`)
-    .bind(token, Date.now()).first<{ revision: number; sha256: string | null; size: number; chunk_count: number }>();
-  if (!control) return json({ error: "State lease missing or expired" }, 409);
-  const chunks = await env.DB.prepare(
-    "SELECT data FROM attendr_state_chunks WHERE revision=? ORDER BY chunk_index"
-  ).bind(control.revision).all<{ data: string }>();
-  if (chunks.results.length !== control.chunk_count) return json({ error: "State checkpoint incomplete" }, 500);
-  return json({ ...control, chunks: chunks.results.map((item) => item.data) });
-}
-
-async function writeState(request: Request, env: Env): Promise<Response> {
-  let body: { revision?: unknown; sha256?: unknown; size?: unknown; chunks?: unknown };
-  try { body = await request.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
-  const chunks = body?.chunks;
-  if (!Number.isInteger(body?.revision) || !Number.isInteger(body?.size) ||
-      (body.size as number) < 1 || (body.size as number) > 8 * 1024 * 1024 ||
-      typeof body?.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(body.sha256) ||
-      !Array.isArray(chunks) || chunks.length < 1 || chunks.length > 48 ||
-      !chunks.every((chunk) => typeof chunk === "string" && chunk.length > 0 && chunk.length <= 256 * 1024 && /^[A-Za-z0-9+/=]+$/.test(chunk))) {
-    return json({ error: "Invalid state checkpoint" }, 400);
-  }
-  let bytes: Uint8Array;
-  try {
-    const binary = atob(chunks.join(""));
-    bytes = new Uint8Array(binary.length);
-    for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
-  } catch {
-    return json({ error: "Invalid state checkpoint encoding" }, 400);
-  }
-  const digest = Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes.buffer as ArrayBuffer)))
-    .map((value) => value.toString(16).padStart(2, "0")).join("");
-  if (bytes.length !== body.size || digest !== body.sha256) {
-    return json({ error: "State checkpoint integrity mismatch" }, 400);
-  }
-  const token = stateLeaseToken(request);
-  const control = await env.DB.prepare("SELECT revision FROM attendr_state_control WHERE id=1 AND lease_token=? AND lease_until>?")
-    .bind(token, Date.now()).first<{ revision: number }>();
-  if (!control) return json({ error: "State lease missing or expired" }, 409);
-  if (control.revision !== body.revision) return json({ error: "State revision conflict" }, 409);
-  const revision = control.revision + 1;
-  const statements = [env.DB.prepare("DELETE FROM attendr_state_chunks")];
-  chunks.forEach((chunk, index) => statements.push(
-    env.DB.prepare("INSERT INTO attendr_state_chunks(revision,chunk_index,data) VALUES(?,?,?)").bind(revision, index, chunk)
-  ));
-  statements.push(env.DB.prepare(`UPDATE attendr_state_control
-    SET revision=?,sha256=?,size=?,chunk_count=?,lease_until=? WHERE id=1 AND lease_token=?`)
-    .bind(revision, body.sha256, body.size, chunks.length, Date.now() + STATE_LEASE_MS, token));
-  await env.DB.batch(statements);
-  return json({ revision });
 }
 
 async function getState(env: Env): Promise<Response> {
@@ -796,9 +685,27 @@ async function currentStudySessions(
 
 async function reschedule(operation: StudyOperation, session: StudySession, env: Env): Promise<string> {
   const token = await googleToken(env);
-  const slot = operation.target_start && operation.target_end
-    ? { start: new Date(operation.target_start), end: new Date(operation.target_end) }
-    : await nextSlot(session, token, env);
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(session.calendar_id)}/events/${encodeURIComponent(session.event_id)}`;
+  if (operation.target_start && operation.target_end) {
+    const current = await boundedFetch(url, { headers: { authorization: `Bearer ${token}` } });
+    if (!current.ok) throw new OperationFailure("calendar_reconcile_failed", current.status === 429 || current.status >= 500);
+    const event = await current.json() as { start?: { dateTime?: string }; end?: { dateTime?: string } };
+    if (event.start?.dateTime && event.end?.dateTime &&
+        Date.parse(event.start.dateTime) === Date.parse(operation.target_start) &&
+        Date.parse(event.end.dateTime) === Date.parse(operation.target_end)) {
+      // The prior PATCH committed; reconcile its lost response without replaying it.
+      await env.DB.prepare("UPDATE study_sessions SET start_at=?,end_at=?,notified=0,manual_override=1,message_id=NULL,updated_at=? WHERE session_id=?")
+        .bind(operation.target_start, operation.target_end, new Date().toISOString(), session.session_id).run();
+      return "↪️ The previous reschedule was confirmed in Calendar.";
+    }
+    if (!event.start?.dateTime || !event.end?.dateTime ||
+        Date.parse(event.start.dateTime) !== Date.parse(session.start_at) ||
+        Date.parse(event.end.dateTime) !== Date.parse(session.end_at)) {
+      throw new OperationFailure("calendar_changed_since_reschedule", false);
+    }
+  }
+  // Availability, due date, profile and current time are checked on every attempt.
+  const slot = await nextSlot(session, token, env);
   if (!slot) {
     return "⚠️ No acceptable free slot was found before the deadline.";
   }
@@ -806,7 +713,6 @@ async function reschedule(operation: StudyOperation, session: StudySession, env:
     .bind(slot.start.toISOString(), slot.end.toISOString(), operation.interaction_id).run();
   operation.target_start = slot.start.toISOString();
   operation.target_end = slot.end.toISOString();
-  const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(session.calendar_id)}/events/${encodeURIComponent(session.event_id)}`;
   const response = await boundedFetch(url, {
     method: "PATCH",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
@@ -835,7 +741,17 @@ function operationFailure(error: unknown): OperationFailure {
 interface OperationOutcome { status: OperationStatus | "queued"; message: string; }
 
 async function performOperation(operation: StudyOperation, env: Env): Promise<string> {
-  const session = JSON.parse(operation.payload) as StudySession;
+  const original = JSON.parse(operation.payload) as StudySession;
+  const session = operation.action === "reschedule"
+    ? await env.DB.prepare("SELECT * FROM study_sessions WHERE session_id=? AND status='scheduled'").bind(original.session_id).first<StudySession>()
+    : original;
+  if (!session) throw new OperationFailure("session_no_longer_scheduled", false);
+  if (operation.action === "reschedule" && (
+      session.event_id !== original.event_id || session.calendar_id !== original.calendar_id ||
+      ((Date.parse(session.start_at) !== Date.parse(original.start_at) || Date.parse(session.end_at) !== Date.parse(original.end_at)) &&
+       (Date.parse(session.start_at) !== Date.parse(operation.target_start ?? "") || Date.parse(session.end_at) !== Date.parse(operation.target_end ?? ""))))) {
+    throw new OperationFailure("session_changed_since_request", false);
+  }
   if (operation.action === "complete") return completeSession(operation, session, env);
   if (operation.action === "task") return completeTask(operation, session, env);
   return reschedule(operation, session, env);
@@ -1040,6 +956,9 @@ export default {
     if ((url.pathname === "/api/state-store/acquire" || url.pathname === "/api/state-store/release") && request.method === "POST") {
       return isAuthorized(request, env) ? stateLease(request, env, url.pathname.endsWith("release")) : unauthorized();
     }
+    if (url.pathname === "/api/state-store/renew" && request.method === "POST") {
+      return isAuthorized(request, env) ? renewState(request, env) : unauthorized();
+    }
     if (url.pathname === "/api/state-store" && request.method === "GET") {
       return isAuthorized(request, env) ? readState(request, env) : unauthorized();
     }
@@ -1081,7 +1000,7 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 interface AskCourse { key: string; name: string; code?: string; match: string[]; aliases?: string[]; sessions?: Array<{ weekday: number; start: string; end: string; type: string }>; term?: { start_date: string; end_date: string; no_class?: Array<{ start: string; end: string }> } }
-interface AskSource { id: string; hash: string; title: string; type: string; url: string | null; updated_at: string | null; module: unknown; chunks: string[]; deadline: string | null }
+interface AskSource { id: string; source_id?: string; hash: string; title: string; type: string; url: string | null; updated_at: string | null; module: unknown; chunks: string[]; deadline: string | null }
 interface AskHit { title: string; url: string | null; text: string; deadline: string | null; source_id: string; updated_at: string | null }
 
 function normalizeAsk(value: string): string {
@@ -1128,6 +1047,7 @@ async function syncKnowledge(request: Request, env: Env, mode = "replace"): Prom
   const ids = new Set<string>();
   for (const r of payload.records) {
     if (!r || typeof r.id !== "string" || !r.id || r.id.length > 240 || ids.has(r.id) ||
+        (r.source_id !== undefined && (typeof r.source_id !== "string" || !r.source_id || r.source_id.length > 240)) ||
         typeof r.hash !== "string" || !/^[a-f0-9]{64}$/.test(r.hash) || typeof r.title !== "string" || r.title.length > 300 ||
         typeof r.type !== "string" || r.type.length > 40 || !(r.url === null || (typeof r.url === "string" && r.url.length <= 2048 && /^https:\/\//.test(r.url))) ||
         !(r.updated_at === null || (typeof r.updated_at === "string" && Number.isFinite(Date.parse(r.updated_at)))) ||
@@ -1194,11 +1114,13 @@ async function retrieveAsk(env: Env, course: AskCourse, question: string): Promi
     dateArgs.push(zonedToUtc(start.year, start.month, start.day, 0, 0).toISOString(), zonedToUtc(end.year, end.month, end.day, 0, 0).toISOString());
     dateFilter = " AND julianday(json_extract(s.record,'$.deadline'))>=julianday(?) AND julianday(json_extract(s.record,'$.deadline'))<julianday(?)";
   }
-  const rows = await env.DB.prepare(`SELECT s.source_id,json_extract(s.record,'$.title') title,json_extract(s.record,'$.url') url,
-    json_extract(s.record,'$.deadline') deadline,json_extract(s.record,'$.updated_at') updated_at,j.value text,(${rank}) score
+  const rows = await env.DB.prepare(`WITH ranked AS (SELECT COALESCE(json_extract(s.record,'$.source_id'),s.source_id) source_id,json_extract(s.record,'$.title') title,json_extract(s.record,'$.url') url,
+    json_extract(s.record,'$.deadline') deadline,json_extract(s.record,'$.updated_at') updated_at,j.value text,(${rank}) score,
+    ROW_NUMBER() OVER (PARTITION BY COALESCE(json_extract(s.record,'$.source_id'),s.source_id) ORDER BY (${rank}) DESC,j.key) source_rank
     FROM ask_sources s, json_each(s.record,'$.chunks') j
     WHERE s.course_key=? AND ${terms.length ? "1=1" : "json_extract(s.record,'$.deadline') IS NOT NULL"}${dateFilter}
-    ORDER BY score DESC,julianday(json_extract(s.record,'$.deadline')),s.source_id,j.key LIMIT 24`).bind(...terms.map(t => `%${t}%`), course.key, ...dateArgs).all<AskHit & { score: number }>();
+     ) SELECT * FROM ranked WHERE source_rank=1
+    ORDER BY score DESC,julianday(deadline),source_id LIMIT 24`).bind(...terms.map(t => `%${t}%`), ...terms.map(t => `%${t}%`), course.key, ...dateArgs).all<AskHit & { score: number }>();
   let hits = rows.results.filter(r => r.score > 0 && !INJECTION.test(r.text) && !INJECTION.test(r.title));
   if (terms.some(t => /midterm|exam|quiz|test/.test(t))) {
     const targets = terms.filter(t => /midterm|exam|quiz|test/.test(t));

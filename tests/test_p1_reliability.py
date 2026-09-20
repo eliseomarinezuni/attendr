@@ -274,7 +274,7 @@ def test_force_lecture_quiz_does_not_consume_quiz_state(store):
     schedule.ended_lecture_sessions.return_value = [
         (Mock(session_id=Mock(return_value="session")), datetime.now(timezone.utc))
     ]
-    canvas, ai, notifier = Mock(), Mock(), Mock()
+    canvas, ai, notifier = Mock(), Mock(max_input_chars=120_000), Mock()
     canvas.download_lecture_materials.return_value = SimpleNamespace(warnings=(), materials=())
     runner = LectureQuizRunner(
         canvas, ai, notifier, schedule, materials_directory=store.path.parent, state_path=store.path
@@ -430,7 +430,7 @@ def test_failed_lecture_quiz_is_reported_and_remains_retryable(store):
     schedule.ended_lecture_sessions.return_value = [
         (Mock(session_id=Mock(return_value="session")), datetime.now(timezone.utc))
     ]
-    canvas, ai, notifier = Mock(), Mock(), Mock()
+    canvas, ai, notifier = Mock(), Mock(max_input_chars=120_000), Mock()
     canvas.download_lecture_materials.return_value = SimpleNamespace(warnings=(), materials=())
     ai.generate_hybrid_quiz.side_effect = AIProviderError(
         "Gemini returned an empty response for hybrid quiz generation."
@@ -450,3 +450,25 @@ def test_failed_lecture_quiz_is_reported_and_remains_retryable(store):
     assert ai.generate_hybrid_quiz.call_count == 2
     notifier.send_custom_notification.assert_not_called()
     assert store.quiz("lecture-quiz:session") is None
+
+
+def test_confirmed_assignment_retirement_resolves_permanent_404(store):
+    from canvasapi.exceptions import ResourceDoesNotExist
+    from academic_assistant.canvas_client import CanvasClient, CourseSummary, _CourseContext
+
+    item = academic_item()
+    GoogleCalendarSync(FakeCalendarService(), state_store=store).sync_items([item])
+    store.retire_assignment(item.uid)
+    canvas = CanvasClient("https://canvas.example", "fake", canvas=Mock(), state_store=store)
+    resource = Mock()
+    resource.get_assignment.side_effect = ResourceDoesNotExist("not found")
+    context = _CourseContext(summary=CourseSummary(7, "Algorithms", None, None), resource=resource)
+    with (
+        patch.object(canvas, "validate_credentials", return_value=("1", "User")),
+        patch.object(canvas, "_get_active_course_contexts", return_value=(context,)),
+        patch.object(canvas, "_fetch_upcoming_items", return_value=()),
+        patch.object(canvas, "_fetch_announcements", return_value=()),
+    ):
+        snapshot = canvas.fetch_snapshot()
+    assert snapshot.complete and snapshot.removed_uids == (item.uid,)
+    resource.get_assignment.assert_not_called()

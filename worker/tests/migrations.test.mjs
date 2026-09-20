@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import test, { afterEach } from 'node:test';
-import ts from 'typescript';
+import { loadWorker } from './helpers/worker.mjs';
 
 import {
   applyMigration,
@@ -13,14 +12,7 @@ import {
   schemaSignature,
 } from './helpers/database.mjs';
 
-const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8') +
-  '\nexport { answerAsk, automationWatchdog };';
-const { outputText } = ts.transpileModule(source, {
-  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
-});
-const { default: worker, answerAsk, automationWatchdog } = await import(
-  `data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`
-);
+const { default: worker, answerAsk, automationWatchdog } = await loadWorker(['answerAsk', 'automationWatchdog']);
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
 

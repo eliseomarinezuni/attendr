@@ -18,6 +18,7 @@ from academic_assistant.calendar_sync import (
 )
 from academic_assistant.google_slides import SLIDES_SCOPE
 from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2.credentials import Credentials
 
 
 def main() -> int:
@@ -70,6 +71,8 @@ def main() -> int:
             credentials = flow.run_local_server(
                 port=0, access_type="offline", prompt="select_account consent", timeout_seconds=120
             )
+            if not isinstance(credentials, Credentials):
+                raise CalendarAuthenticationError("Expected user OAuth credentials")
             authenticator._save_token(credentials)
         elif args.reauthorize:
             flow = InstalledAppFlow.from_client_secrets_file(
@@ -81,6 +84,8 @@ def main() -> int:
                 prompt="select_account consent",
                 timeout_seconds=120,
             )
+            if not isinstance(credentials, Credentials):
+                raise CalendarAuthenticationError("Expected user OAuth credentials")
             authenticator._save_token(credentials)
         else:
             authenticator.authenticate()

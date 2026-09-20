@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from datetime import date, timedelta
 
 from .ai_assistant import MajorDeadline
+from .deadline_times import explicit_times
+from .deadline_semantics import excluded_deadline
 
-GROUNDING_VERSION = 2
+GROUNDING_VERSION = 4
 
 _MONTHS = {
     "january": 1,
@@ -64,6 +66,8 @@ def ground_deadline(
     """Prove that evidence, date, and optional time occur in one tight source context."""
     source = unicodedata.normalize("NFKC", source_text).casefold()
     evidence = unicodedata.normalize("NFKC", deadline.source_evidence).casefold()
+    if excluded_deadline(evidence):
+        return GroundingResult(False, "source evidence excludes this deadline")
     source_words = _words(source)
     evidence_values = [word.value for word in _words(evidence)]
     if not source_words or not evidence_values:
@@ -81,8 +85,12 @@ def ground_deadline(
     ):
         return GroundingResult(False, "source evidence conflicts with the extracted date")
     expected_minutes = _time_minutes(deadline.due_time) if deadline.due_time is not None else None
+    evidence_times, invalid_time = explicit_times(evidence)
+    if invalid_time:
+        return GroundingResult(False, "source evidence contains an invalid time")
+    if expected_minutes is None and evidence_times:
+        return GroundingResult(False, "the extracted deadline omits an explicit time")
     if expected_minutes is not None:
-        evidence_times = _times_in_context(evidence, evidence_words)
         if evidence_times and (
             expected_minutes not in evidence_times
             or any(candidate != expected_minutes for candidate in evidence_times)
@@ -115,6 +123,8 @@ def ground_deadline(
     match_start = source_words[start].start
     match_end = source_words[start + length - 1].end
     context_text, locator = _local_context(source, match_start, match_end, expected, reference_date)
+    if excluded_deadline(context_text):
+        return GroundingResult(False, "the local source excludes this deadline", locator)
     context = _words(context_text)
     dates, ambiguous = _dates_in_context(context_text, context, expected, reference_date)
     if ambiguous and expected not in dates:
@@ -124,8 +134,12 @@ def ground_deadline(
     if any(candidate != expected for candidate in dates):
         return GroundingResult(False, "the local source unit contains conflicting dates", locator)
 
+    times, invalid_time = explicit_times(context_text)
+    if invalid_time:
+        return GroundingResult(False, "the local source unit contains an invalid time", locator)
+    if expected_minutes is None and times:
+        return GroundingResult(False, "the extracted deadline omits an explicit time", locator)
     if expected_minutes is not None:
-        times = _times_in_context(context_text, context)
         if expected_minutes not in times:
             return GroundingResult(False, "the extracted time is not supported locally", locator)
         if any(candidate != expected_minutes for candidate in times):
@@ -318,38 +332,3 @@ def _safe_date(year: int, month: int, day: int) -> date | None:
 def _time_minutes(value: str) -> int:
     hour, minute = value.split(":", 1)
     return int(hour) * 60 + int(minute)
-
-
-def _times_in_context(source: str, words: list[_Word]) -> set[int]:
-    found: set[int] = set()
-    for index, word in enumerate(words):
-        hour = _number(word.value)
-        if hour is None or hour > 23:
-            continue
-        minute = 0
-        suffix_index = index + 1
-        if index + 1 < len(words) and _separator(source, word, words[index + 1]) == ":":
-            parsed_minute = _number(words[index + 1].value)
-            if parsed_minute is None or parsed_minute > 59:
-                continue
-            minute = parsed_minute
-            suffix_index = index + 2
-        suffix = words[suffix_index].value if suffix_index < len(words) else ""
-        if (
-            suffix in {"a", "p"}
-            and suffix_index + 1 < len(words)
-            and words[suffix_index + 1].value == "m"
-        ):
-            suffix += "m"
-        if suffix in {"am", "pm"}:
-            if not 1 <= hour <= 12:
-                continue
-            hour = hour % 12 + (12 if suffix == "pm" else 0)
-            found.add(hour * 60 + minute)
-        elif (
-            minute
-            or ":"
-            in source[word.end : words[index + 1].start if index + 1 < len(words) else word.end]
-        ):
-            found.add(hour * 60 + minute)
-    return found

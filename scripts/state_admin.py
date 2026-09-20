@@ -19,6 +19,7 @@ def main() -> None:
     migrate = sub.add_parser("migrate")
     migrate.add_argument("--legacy-directory", type=Path, default=Path("data"))
     sub.add_parser("list")
+    sub.add_parser("maintain", help="Evict disposable payloads while preserving delivery markers")
     resolve = sub.add_parser("resolve")
     resolve.add_argument("event_key")
     resolve.add_argument("fingerprint")
@@ -29,6 +30,12 @@ def main() -> None:
         required=True,
         help="Use sent after confirming delivery, or pending after confirming absence.",
     )
+    retire = sub.add_parser(
+        "retire-assignment", help="Retire a confirmed deleted tracked assignment"
+    )
+    retire.add_argument("uid")
+    restore = sub.add_parser("restore-assignment", help="Resume tracking a retired assignment")
+    restore.add_argument("uid")
     backup = sub.add_parser("backup")
     backup.add_argument("destination", type=Path)
     args = parser.parse_args()
@@ -42,12 +49,18 @@ def main() -> None:
                 store.migrate_notifications(path)
         store.migrate_quizzes(args.legacy_directory / "lecture_quiz_state.json")
         print("Migration complete; legacy files preserved.")
+    elif args.command == "maintain":
+        store.maintain()
+        print("State maintenance complete.")
     elif args.command == "list":
         with store.connect() as db:
             for row in db.execute(
                 "SELECT event_key,fingerprint,status,attempts,last_error FROM delivery_outbox WHERE status!='sent'"
             ):
                 print(json.dumps(dict(row)))
+    elif args.command in {"retire-assignment", "restore-assignment"}:
+        store.retire_assignment(args.uid, restore=args.command == "restore-assignment")
+        print("Assignment tracking updated; Calendar reconciles on the next run.")
     elif args.command == "resolve":
         with store.connect() as db:
             changed = db.execute(

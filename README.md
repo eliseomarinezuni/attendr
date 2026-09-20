@@ -105,7 +105,7 @@ Check it with `crontab -l`. The Mac must be awake and online.
 
 ## GitHub Actions automation
 
-Scheduled sync and post-lecture review workflows run on GitHub-hosted Linux runners, so the Mac may remain off. A Cloudflare D1 lease serializes runs and stores an AES-256-GCM-encrypted SQLite checkpoint after each committed mutation. `STUDY_SYNC_SECRET` authenticates Worker requests; an independent `ATTENDR_STATE_KEY` encrypts the checkpoint. D1 never receives plaintext application state. Existing installations must follow the one-time key-separation procedure in [P1 reliability and rollout](docs/P1_RELIABILITY.md#one-time-checkpoint-key-separation) before changing the GitHub secret.
+Scheduled sync and post-lecture review workflows run on GitHub-hosted Linux runners, so the Mac may remain off. A Cloudflare D1 lease serializes runs and stores an AES-256-GCM-encrypted SQLite checkpoint after each durable state mutation. Recomputable text-cache writes are batched into the next durable checkpoint. The parent runner renews the lease every five minutes, independently of downloads and extraction, and terminates the child process group if renewal fails. `STUDY_SYNC_SECRET` authenticates Worker requests; an independent `ATTENDR_STATE_KEY` encrypts the checkpoint. D1 never receives plaintext application state. Existing installations must follow the one-time key-separation procedure in [P1 reliability and rollout](docs/P1_RELIABILITY.md#one-time-checkpoint-key-separation) before changing the GitHub secret.
 
 The main cron runs at minute 17 to avoid top-of-hour GitHub congestion. Each hosted run records an authenticated heartbeat in D1. The Worker's five-minute cron dispatches a recovery run when the academic heartbeat is more than 150 minutes old during the 8:00 AM–10:00 PM Toronto window. Configure a fine-grained GitHub token with Actions write access as the Worker secret `GITHUB_ACTIONS_TOKEN`; repository, workflow, and ref are non-secret Wrangler variables.
 
@@ -300,3 +300,20 @@ all inherit `GEMINI_MODEL` when blank. Scheduled Python requests are serialized 
 and verified-cache hits make no provider request and do not sleep.
 - **Reply delivery failed:** Discord rejected or timed out on both message edits;
   ask again. Attendr logs only a generic failure and never persists interaction tokens.
+
+
+### Audit fixes and state maintenance
+
+See [audit completion and rollout](docs/AUDIT_COMPLETION.md) for the September reliability fixes, validation, and deployment order.
+
+After confirming that a tracked assignment was permanently deleted, retire it explicitly on the authoritative SQLite database:
+
+```sh
+python scripts/state_admin.py --db /path/to/attendr.db retire-assignment canvas:assignment:COURSE_ID:ASSIGNMENT_ID
+python scripts/state_admin.py --db /path/to/attendr.db restore-assignment canvas:assignment:COURSE_ID:ASSIGNMENT_ID
+python scripts/state_admin.py --db /path/to/attendr.db maintain
+```
+
+Retirement takes effect during the next sync; restore resumes normal tracking. A Canvas 404 alone never authorizes deletion. Healthy courses can still update their academic events while a failed course's events are preserved. Global study-plan replacement still waits for complete task data.
+
+Maintenance runs automatically at startup. It caps recomputable extracted text at 2 MiB, clears confirmed-delivery payloads after 30 days and completed quiz payloads after 180 days, and removes finished run logs after 90 days. Delivery deduplication markers, pending/uncertain work, reconciliation indexes, and review cards are retained. Checkpoint size is logged, warns above 75% of the upload limit, and fails before upload if too large.

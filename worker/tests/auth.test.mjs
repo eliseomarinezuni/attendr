@@ -1,13 +1,8 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import test from 'node:test';
-import ts from 'typescript';
+import { loadWorker } from './helpers/worker.mjs';
 
-const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
-const { outputText } = ts.transpileModule(source, {
-  compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
-});
-const { default: worker } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
+const { default: worker } = await loadWorker([]);
 
 for (const secret of [undefined, '', '   ']) {
   test(`missing or blank secret fails closed: ${JSON.stringify(secret)}`, async () => {

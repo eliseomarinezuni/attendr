@@ -4,7 +4,7 @@ import json
 
 import pytest
 import requests
-from canvasapi.exceptions import Unauthorized
+from canvasapi.exceptions import Forbidden, ResourceDoesNotExist
 
 from academic_assistant.knowledge_sync import (
     KnowledgeSync,
@@ -195,8 +195,10 @@ def test_disabled_pages_and_files_tabs_still_use_visible_module_items(tmp_path):
         ],
     )
     context.resource.get_modules = lambda: [module]
-    context.resource.get_pages = lambda: (_ for _ in ()).throw(Unauthorized("pages disabled"))
-    context.resource.get_files = lambda: (_ for _ in ()).throw(Unauthorized("files disabled"))
+    context.resource.get_pages = lambda: (_ for _ in ()).throw(
+        ResourceDoesNotExist("pages disabled")
+    )
+    context.resource.get_files = lambda: (_ for _ in ()).throw(Forbidden("files disabled"))
     context.resource.get_file = lambda key: file
     material = NS(
         uid="file:8",
@@ -218,7 +220,7 @@ def test_syllabus_linked_file_is_indexed_when_files_tab_is_disabled(tmp_path):
     sync.canvas._canvas.get_course = lambda *a, **kw: NS(
         syllabus_body='<a href="/courses/1/files/44">Course outline</a>'
     )
-    context.resource.get_files = lambda: (_ for _ in ()).throw(Unauthorized("files disabled"))
+    context.resource.get_files = lambda: (_ for _ in ()).throw(Forbidden("files disabled"))
     linked = NS(id=44, display_name="course-outline.pdf", published=True)
     fetched = []
     context.resource.get_file = lambda key: fetched.append(str(key)) or linked
@@ -481,3 +483,18 @@ def test_oversized_source_is_explicitly_excluded_without_blocking_course(tmp_pat
     assert sync.session.calls[-1][0].endswith("/publish")
     assert "SOURCE_TOO_LARGE" in caplog.text
     assert "large-slides.pptx" not in caplog.text
+
+
+@pytest.mark.parametrize("method", ["get_pages", "get_files", "get_page"])
+def test_transient_inventory_failure_never_publishes_partial_course(tmp_path, method):
+    sync, context, *_ = build(tmp_path)
+    sync.sync()
+    sync.session.calls.clear()
+
+    def unavailable(*args, **kwargs):
+        raise requests.Timeout("temporary")
+
+    setattr(context.resource, method, unavailable)
+    with pytest.raises(KnowledgeSyncError, match="preserved"):
+        sync.sync()
+    assert not any("/api/knowledge/sync" in url for url, _ in sync.session.calls)

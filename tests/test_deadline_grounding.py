@@ -217,3 +217,30 @@ def test_evidence_copied_from_different_table_row_is_rejected():
 
     assert not result.accepted
     assert "date" in result.reason
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("14:30", "14:30"),
+        ("23:59", "23:59"),
+        ("noon", "12:00"),
+        ("midnight", "00:00"),
+        ("00:00", "00:00"),
+        ("12 p.m.", "12:00"),
+    ],
+)
+def test_explicit_time_must_be_preserved(value, expected):
+    source = f"Midterm Exam: October 20, 2026 at {value}"
+    assert ground_deadline(source, item(due_time=expected, evidence=source)).accepted
+    assert not ground_deadline(source, item(evidence=source)).accepted
+    # Omitting the time from the evidence must not bypass the local source check.
+    assert not ground_deadline(source, item()).accepted
+    assert not ground_deadline(source, item(due_time="01:15", evidence=source)).accepted
+
+
+@pytest.mark.parametrize("value", ["24:30", "14:99", "13 PM", "noon or midnight"])
+def test_invalid_or_conflicting_time_is_rejected(value):
+    source = f"Midterm Exam: October 20, 2026 at {value}"
+    assert not ground_deadline(source, item(evidence=source)).accepted
+    assert not ground_deadline(source, item(due_time="12:00", evidence=source)).accepted

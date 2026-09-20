@@ -163,7 +163,7 @@ class StudyRemoteState:
     @staticmethod
     def _task_deadline(item: AcademicItem) -> str | None:
         marker = "Deadline: "
-        if marker not in item.description_html:
+        if not item.description_html or marker not in item.description_html:
             return None
         value = item.description_html.rsplit(marker, 1)[1].removesuffix(".").strip()
         try:

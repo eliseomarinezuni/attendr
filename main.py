@@ -13,7 +13,7 @@ import re
 import sys
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -87,36 +87,7 @@ KNOWN_ERRORS = (
 PIPELINE_LOGGER = logging.getLogger("attendr.pipeline")
 
 
-@dataclass(frozen=True, slots=True)
-class RunPlan:
-    announcements: bool
-    materials: bool
-    calendar: bool
-    digest: bool
-    quiz: bool
-    lecture_quizzes: bool
-    study_plan: bool
-    review: bool = False
-    lecture_summaries: bool = False
-
-    @property
-    def needs_canvas(self) -> bool:
-        return (
-            self.announcements
-            or self.materials
-            or self.calendar
-            or self.digest
-            or self.lecture_quizzes
-            or self.lecture_summaries
-            or self.study_plan
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class StepResult:
-    name: str
-    status: str
-    detail: str
+from academic_assistant.pipeline_models import RunPlan, StepResult
 
 
 def unexpected_step_result(name: str, error: Exception) -> StepResult:
@@ -366,6 +337,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
     if plan.needs_canvas:
         try:
             schedule = CourseSchedule.load(schedule_path)
+            assert schedule is not None
             if schedule.timezone.key != os.getenv("APP_TIMEZONE", "America/Toronto"):
                 raise ValueError("Course schedule timezone must match APP_TIMEZONE")
         except (OSError, ValueError, KeyError, TypeError) as error:
@@ -378,10 +350,13 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
             notifier = DiscordNotifier.from_env(PROJECT_ROOT / ".env")
         return notifier
 
+    calendar_sources_complete = inputs_complete
     if plan.needs_canvas:
         try:
             canvas_client = CanvasClient.from_env(PROJECT_ROOT / ".env")
+            assert canvas_client is not None
             snapshot = canvas_client.fetch_snapshot()
+            assert snapshot is not None
             for warning in snapshot.warnings:
                 logging.getLogger("attendr.snapshot").warning("%s", warning)
             if schedule is not None:
@@ -412,6 +387,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                         else not (set(snapshot.incomplete_course_ids) - excluded_ids)
                     ),
                 )
+            assert snapshot is not None
             inputs_complete = inputs_complete and snapshot.complete
             results.append(
                 StepResult(
@@ -518,6 +494,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                     canvas_client, PROJECT_ROOT / ".env"
                 ).sync(active_course_ids={course.id for course in snapshot.courses})
                 inputs_complete = inputs_complete and materials_report.complete
+                calendar_sources_complete = calendar_sources_complete and materials_report.complete
                 for warning in materials_report.warnings:
                     logging.getLogger("attendr.materials_report").warning("%s", warning)
                 allowed_course_ids = {course.id for course in snapshot.courses}
@@ -546,9 +523,11 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 )
             except KNOWN_ERRORS as error:
                 inputs_complete = False
+                calendar_sources_complete = False
                 results.append(StepResult("Materials", "failed", str(error)))
             except Exception as error:  # noqa: BLE001 - isolate pipeline steps.
                 inputs_complete = False
+                calendar_sources_complete = False
                 results.append(unexpected_step_result("Materials", error))
 
     if (plan.calendar or plan.study_plan) and canvas_client is not None and snapshot is not None:
@@ -572,6 +551,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 course_schedule=schedule,
             ).sync(recent_announcements)
             inputs_complete = inputs_complete and date_report.complete
+            calendar_sources_complete = calendar_sources_complete and date_report.complete
             for warning in date_report.warnings:
                 logging.getLogger("attendr.date_report").warning("%s", warning)
             announcement_date_items = tuple(
@@ -596,9 +576,11 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
             )
         except KNOWN_ERRORS as error:
             inputs_complete = False
+            calendar_sources_complete = False
             results.append(StepResult("Announcement dates", "failed", str(error)))
         except Exception as error:
             inputs_complete = False
+            calendar_sources_complete = False
             results.append(unexpected_step_result("Announcement dates", error))
 
     if plan.calendar:
@@ -606,7 +588,9 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
             results.append(StepResult("Calendar", "skipped", "Canvas data unavailable"))
         elif google_auth_error is not None:
             results.append(StepResult("Calendar", "failed", str(google_auth_error)))
-        elif not inputs_complete:
+        elif not calendar_sources_complete or (
+            not snapshot.complete and not snapshot.incomplete_course_ids
+        ):
             results.append(
                 StepResult(
                     "Calendar", "failed", "Incomplete source data; existing calendar preserved"
@@ -615,15 +599,23 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
         else:
 
             def sync_calendar() -> str:
-                canvas_items = snapshot.items
+                assert snapshot is not None
+                protected = set(snapshot.incomplete_course_ids)
+                canvas_items = tuple(
+                    item for item in snapshot.items if item.course_id not in protected
+                )
                 derived = prefer_announcement_dates(material_items, announcement_date_items)
                 derived = filter_material_duplicates(canvas_items, derived)
                 university_dates = (
                     schedule.academic_calendar_items() if schedule is not None else ()
                 )
-                academic_items = canvas_items + derived + university_dates
+                academic_items = (
+                    canvas_items
+                    + tuple(item for item in derived if item.course_id not in protected)
+                    + university_dates
+                )
                 replaced_exam_uids: frozenset[str] = frozenset()
-                if schedule is not None and plan.materials:
+                if schedule is not None and plan.materials and snapshot.complete:
                     calendar_items, replaced_exam_uids = schedule.merge_with_class_schedule(
                         academic_items
                     )
@@ -634,6 +626,15 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 ).sync_items(
                     calendar_items,
                     delete_uids=replaced_exam_uids | frozenset(snapshot.removed_uids),
+                    authoritative_sources=(
+                        ({"syllabus_deadline"} if plan.materials else set())
+                        | (
+                            {"class_schedule", "university_schedule"}
+                            if schedule is not None and plan.materials and snapshot.complete
+                            else set()
+                        )
+                    ),
+                    protected_course_ids=protected,
                 )
                 return (
                     f"{len(report.created)} created, {len(report.updated)} updated, "
@@ -887,6 +888,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ["ATTENDR_DB"] = str((PROJECT_ROOT / settings.database).resolve())
     store = StateStore(os.environ["ATTENDR_DB"])
     with store.run_lock():
+        store.maintain()
         return run_recorded(arguments, store)
 
 

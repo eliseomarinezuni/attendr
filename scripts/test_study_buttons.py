@@ -63,12 +63,19 @@ def main() -> int:
     )
     event_id = str(event["id"])
     headers = {"Authorization": f"Bearer {secret}"}
+    lease = secrets.token_hex(16)
+    acquired = False
     try:
+        requests.post(
+            f"{worker}/api/plan/acquire", headers=headers, json={"token": lease}, timeout=30
+        ).raise_for_status()
+        acquired = True
         sync = requests.post(
             f"{worker}/api/sessions/sync",
             headers=headers,
             json={
                 "replace": False,
+                "plan_token": lease,
                 "sessions": [
                     {
                         "session_id": session_id,
@@ -86,12 +93,21 @@ def main() -> int:
             timeout=30,
         )
         sync.raise_for_status()
+        requests.post(
+            f"{worker}/api/plan/release", headers=headers, json={"token": lease}, timeout=30
+        ).raise_for_status()
+        acquired = False
         reminder = requests.post(f"{worker}/api/reminders/run", headers=headers, timeout=30)
         reminder.raise_for_status()
     except requests.RequestException:
         service.events().delete(calendarId=calendar_id, eventId=event_id).execute()
         print("The live button test failed; its temporary event was removed.", file=sys.stderr)
         return 1
+    finally:
+        if acquired:
+            requests.post(
+                f"{worker}/api/plan/release", headers=headers, json={"token": lease}, timeout=30
+            ).raise_for_status()
     print("Test alert sent to #study-sessions. Press Session complete to finish the test.")
     return 0
 

@@ -101,3 +101,63 @@ def test_cache_key_ignores_source_identity_but_tracks_prompt_version():
     changed_prompt = deadline_cache_key(**values, prompt_version=6)
     assert first == same_content_other_path
     assert first != changed_prompt
+
+
+def test_explicit_times_survive_deterministic_extraction():
+    from academic_assistant.ai_assistant import AIAssistant
+
+    assistant = AIAssistant("test-key", client=object())
+    for source_time, expected in [
+        ("14:30", "14:30"),
+        ("23:59", "23:59"),
+        ("noon", "12:00"),
+        ("midnight", "00:00"),
+        ("00:00", "00:00"),
+        ("9:05", "09:05"),
+        ("12 a.m.", "00:00"),
+        ("12 p.m.", "12:00"),
+        ("2:30 PM", "14:30"),
+    ]:
+        for source in [
+            f"Assignment 1 | Due September 28, 2026 at {source_time}",
+            f"Assignment 1 | Due at {source_time} on September 28, 2026",
+        ]:
+            result = assistant.extract_major_deadlines(
+                source,
+                course_name="Algorithms",
+                source_title="Syllabus",
+                current_date=date(2026, 9, 1),
+            )
+            assert result[0]["due_time"] == expected
+            assert assistant.last_deadline_extraction_method == "deterministic"
+
+
+def test_invalid_and_conflicting_times_do_not_report_deterministic_success():
+    for value in ["24:30", "14:99", "13 PM", "14:30 or 23:59", "noon or midnight"]:
+        result = preprocess_deadlines(
+            f"Assignment 1 | Due September 28, 2026 at {value}",
+            reference_date=date(2026, 9, 1),
+            max_chars=10_000,
+        )
+        assert not result.deterministic_complete
+        assert not result.candidates
+
+
+def test_cache_key_tracks_parser_and_grounding_versions(monkeypatch):
+    import academic_assistant.deadline_candidates as candidates
+
+    args = dict(
+        text="Assignment due September 28 at noon",
+        scope="test",
+        model="test",
+        prompt_version=1,
+        course_name="Algorithms",
+        schedule_context=None,
+        academic_year=2026,
+    )
+    original = deadline_cache_key(**args)
+    monkeypatch.setattr(candidates, "DETERMINISTIC_EXTRACTION_VERSION", 999)
+    assert deadline_cache_key(**args) != original
+    parser_changed = deadline_cache_key(**args)
+    monkeypatch.setattr(candidates, "GROUNDING_VERSION", 999)
+    assert deadline_cache_key(**args) != parser_changed

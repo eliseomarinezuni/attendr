@@ -6,12 +6,15 @@ import re
 from dataclasses import dataclass
 from datetime import date
 from hashlib import sha256
+from typing import Literal
 
 from .ai_assistant import MajorDeadline
-from .deadline_grounding import ground_deadline
+from .deadline_grounding import GROUNDING_VERSION, ground_deadline
+from .deadline_times import explicit_times
+from .deadline_semantics import excluded_deadline
 
 DEADLINE_CONTEXT_VERSION = 1
-DETERMINISTIC_EXTRACTION_VERSION = 1
+DETERMINISTIC_EXTRACTION_VERSION = 3
 
 _KEYWORD = re.compile(
     r"\b(?:due|deadline|assignment|quiz|exam|midterm|final|project|presentation|lab|test)\b",
@@ -51,12 +54,9 @@ _DATE = re.compile(
     r"(?P<slash>\b\d{1,2}/\d{1,2}/\d{4}\b)",
     re.IGNORECASE,
 )
-_TIME = re.compile(
-    r"\b(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<suffix>a\.?m\.?|p\.?m\.?)\b", re.I
-)
 _AMBIGUOUS_DATE_JOIN = re.compile(r"(?:&|\band\b|\bor\b)\s*\d{1,2}\b", re.I)
 _TITLE_SPLIT = re.compile(r"\s*(?:\||:|—|–|-|\bdue\b|\bdeadline\b)\s*", re.I)
-_KIND = (
+_KIND: tuple[tuple[Literal["exam", "quiz", "assignment"], re.Pattern[str]], ...] = (
     ("exam", re.compile(r"\b(?:exam|midterm|final|test)\b", re.I)),
     ("quiz", re.compile(r"\bquiz\b", re.I)),
     ("assignment", re.compile(r"\b(?:assignment|project|presentation|lab)\b", re.I)),
@@ -94,6 +94,8 @@ def deadline_cache_key(
                 content_hash,
                 model,
                 prompt_version,
+                DETERMINISTIC_EXTRACTION_VERSION,
+                GROUNDING_VERSION,
                 course_name.casefold(),
                 schedule_context,
                 academic_year,
@@ -124,9 +126,13 @@ def preprocess_deadlines(
 
     candidates: list[MajorDeadline] = []
     unresolved = False
+    excluded = False
     for index in relevant:
         line = lines[index]
         if not _KEYWORD.search(line):
+            continue
+        if excluded_deadline(line):
+            excluded = True
             continue
         parsed = _parse_line(line, reference_date)
         if parsed is None:
@@ -139,7 +145,7 @@ def preprocess_deadlines(
     unique = {candidate.model_dump_json(): candidate for candidate in candidates}
     meaningful = [line for line in lines if not _looks_like_heading(line)]
     deterministic_complete = (
-        bool(candidates)
+        (bool(candidates) or excluded)
         and not unresolved
         and all(_KEYWORD.search(line) or not _DATE.search(line) for line in meaningful)
     )
@@ -167,19 +173,16 @@ def _parse_line(line: str, reference_date: date) -> MajorDeadline | None:
     title = _TITLE_SPLIT.split(prefix)[0].strip()
     if not title or len(title) > 100 or not _KEYWORD.search(title):
         return None
-    kind = next((name for name, pattern in _KIND if pattern.search(title)), "other")
-    time_match = _TIME.search(line[matches[0].end() :])
-    due_time = None
-    if time_match:
-        hour = int(time_match.group("hour"))
-        minute = int(time_match.group("minute") or 0)
-        if not 1 <= hour <= 12 or minute > 59:
-            return None
-        if time_match.group("suffix").casefold().startswith("p") and hour != 12:
-            hour += 12
-        elif time_match.group("suffix").casefold().startswith("a") and hour == 12:
-            hour = 0
-        due_time = f"{hour:02d}:{minute:02d}"
+    kind: Literal["exam", "quiz", "assignment", "other"] = "other"
+    for name, pattern in _KIND:
+        if pattern.search(title):
+            kind = name
+            break
+    times, invalid_time = explicit_times(line)
+    if invalid_time or len(times) > 1:
+        return None
+    minutes = next(iter(times), None)
+    due_time = f"{minutes // 60:02d}:{minutes % 60:02d}" if minutes is not None else None
     return MajorDeadline(
         title=title,
         due_date=actual.isoformat(),

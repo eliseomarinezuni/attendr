@@ -188,7 +188,7 @@ def test_schema_upgrade_preserves_existing_notifications(store):
     upgraded = StateStore(store.path)
     assert upgraded.was_sent("event", "fingerprint")
     with upgraded.connect() as db:
-        assert db.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 2
+        assert db.execute("SELECT max(version) FROM schema_migrations").fetchone()[0] == 3
 
 
 def test_grading_cancels_unsent_reminder_for_old_revision(store):

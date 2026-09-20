@@ -11,25 +11,7 @@ line-length = 100
 select = ["E9", "F"]
 
 [tool.pyright]
-include = [
-    "src/academic_assistant/ai_assistant.py",
-    "src/academic_assistant/announcement_dates.py",
-    "src/academic_assistant/calendar_client.py",
-    "src/academic_assistant/canvas_client.py",
-    "src/academic_assistant/cloud_state.py",
-    "src/academic_assistant/course_schedule.py",
-    "src/academic_assistant/deadline_grounding.py",
-    "src/academic_assistant/delivery.py",
-    "src/academic_assistant/google_slides.py",
-    "src/academic_assistant/http_client.py",
-    "src/academic_assistant/knowledge_sync.py",
-    "src/academic_assistant/lecture_files.py",
-    "src/academic_assistant/logging_config.py",
-    "src/academic_assistant/preferences.py",
-    "src/academic_assistant/review.py",
-    "src/academic_assistant/study_generator.py",
-    "src/academic_assistant/triage.py",
-]
+include = ["main.py", "runner.py", "src", "scripts"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
 

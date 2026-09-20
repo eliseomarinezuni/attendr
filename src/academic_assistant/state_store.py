@@ -19,7 +19,7 @@ class StateStore:
         with self.connect() as db:
             db.execute("CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY)")
             version = db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-            if version is not None and version not in (1, 2):
+            if version is not None and version not in (1, 2, 3):
                 raise ValueError(
                     "Unsupported Attendr database version; use the matching application version"
                 )
@@ -71,10 +71,18 @@ class StateStore:
                 INSERT OR IGNORE INTO schema_migrations VALUES(2);
                 COMMIT;
             """)
+            if "expires_at" not in {
+                row[1] for row in db.execute("PRAGMA table_info(delivery_outbox)")
+            }:
+                db.execute("ALTER TABLE delivery_outbox ADD COLUMN expires_at REAL")
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS retired_assignments(uid TEXT PRIMARY KEY, retired_at REAL NOT NULL)"
+            )
+            db.execute("INSERT OR IGNORE INTO schema_migrations VALUES(3)")
         self.path.chmod(0o600)
 
     @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
+    def connect(self, *, checkpoint: bool = True) -> Iterator[sqlite3.Connection]:
         db = sqlite3.connect(self.path, timeout=30)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
@@ -87,12 +95,12 @@ class StateStore:
             changed = db.total_changes != before
         finally:
             db.close()
-        if changed:
+        if changed and checkpoint:
             from .cloud_state import client_from_env
 
-            checkpoint = client_from_env(self.path)
-            if checkpoint is not None:
-                checkpoint.upload(self.path)
+            client = client_from_env(self.path)
+            if client is not None:
+                client.upload(self.path)
 
     def was_sent(self, event_key: str, fingerprint: str) -> bool:
         with self.connect() as db:
@@ -129,7 +137,13 @@ class StateStore:
             )
 
     def enqueue_messages(
-        self, key: str, fingerprint: str, destination: str, messages: list[dict[str, Any]]
+        self,
+        key: str,
+        fingerprint: str,
+        destination: str,
+        messages: list[dict[str, Any]],
+        *,
+        expires_at: float | None = None,
     ) -> list[str]:
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -148,15 +162,21 @@ class StateStore:
             keys = [f"{key}:revision:{revision}:part:{index}" for index in range(len(messages))]
             for part_key, message in zip(keys, messages):
                 db.execute(
-                    "INSERT OR IGNORE INTO delivery_outbox(event_key,fingerprint,destination,payload,created_at) VALUES(?,?,?,?,?)",
+                    "INSERT OR IGNORE INTO delivery_outbox(event_key,fingerprint,destination,payload,created_at,expires_at) VALUES(?,?,?,?,?,?)",
                     (
                         part_key,
                         fingerprint,
                         destination,
                         json.dumps(message, sort_keys=True),
                         time.time(),
+                        expires_at,
                     ),
                 )
+                if expires_at is not None:
+                    db.execute(
+                        "UPDATE delivery_outbox SET expires_at=CASE WHEN expires_at IS NULL THEN ? ELSE MIN(expires_at,?) END WHERE event_key=? AND fingerprint=? AND status='pending'",
+                        (expires_at, expires_at, part_key, fingerprint),
+                    )
             return keys
 
     def claim(self, key: str, fingerprint: str) -> dict[str, Any] | None:
@@ -238,7 +258,9 @@ class StateStore:
                 "INSERT OR IGNORE INTO quiz_history(quiz_key,payload) VALUES(?,?)",
                 (key, json.dumps(payload)),
             )
-        return self.quiz(key)["payload"]
+        saved = self.quiz(key)
+        assert saved is not None
+        return saved["payload"]
 
     def complete_quiz(self, key: str) -> None:
         with self.connect() as db:
@@ -251,11 +273,53 @@ class StateStore:
             ).fetchone()
             return json.loads(row[0]) if row else None
 
+    @staticmethod
+    def _disposable_cache(key: str) -> bool:
+        return key.startswith(("ask-extract-v1:", "lecture-text-v2:", "google-slides-text-v1:"))
+
     def cache_set(self, key: str, payload: Any) -> None:
-        with self.connect() as db:
+        # Recomputable text can wait for the next durable write. Delivery intents,
+        # confirmations and reconciliation indexes always checkpoint immediately.
+        disposable = self._disposable_cache(key)
+        with self.connect(checkpoint=not disposable) as db:
             db.execute(
                 "INSERT OR REPLACE INTO extraction_cache VALUES(?,?)", (key, json.dumps(payload))
             )
+            if disposable:
+                self._evict_text_cache(db)
+
+    def _evict_text_cache(self, db: sqlite3.Connection) -> None:
+        rows = db.execute(
+            "SELECT cache_key,length(CAST(payload AS BLOB)) size FROM extraction_cache ORDER BY rowid DESC"
+        ).fetchall()
+        used = 0
+        for row in rows:
+            if self._disposable_cache(row["cache_key"]):
+                if used + row["size"] > 2 * 1024 * 1024:
+                    db.execute(
+                        "DELETE FROM extraction_cache WHERE cache_key=?",
+                        (row["cache_key"],),
+                    )
+                else:
+                    used += row["size"]
+
+    def maintain(self) -> None:
+        """Trim payloads, retaining idempotency markers and unresolved work."""
+        with self.connect() as db:
+            self._evict_text_cache(db)
+            db.execute(
+                "UPDATE delivery_outbox SET payload='{}' WHERE status='sent' AND created_at<? AND payload!='{}'",
+                (time.time() - 30 * 86400,),
+            )
+            db.execute(
+                "UPDATE quiz_history SET payload='{}' WHERE sent_at<datetime('now','-180 days') AND payload!='{}'"
+            )
+            db.execute("DELETE FROM runs WHERE finished_at<?", (time.time() - 90 * 86400,))
+        from .cloud_state import client_from_env
+
+        client = client_from_env(self.path)
+        if client is not None:
+            client.upload(self.path)
 
     def migrate_notifications(self, path: Path) -> None:
         if not path.exists():
@@ -401,6 +465,19 @@ class StateStore:
                     ("lecture-quiz:" + key, "{}", record["sent_at"]),
                 )
             db.execute("INSERT INTO imported_files VALUES(?)", (str(path.resolve()),))
+
+    def retire_assignment(self, uid: str, *, restore: bool = False) -> None:
+        with self.connect() as db:
+            if restore:
+                db.execute("DELETE FROM retired_assignments WHERE uid=?", (uid,))
+            else:
+                db.execute(
+                    "INSERT OR REPLACE INTO retired_assignments VALUES(?,?)", (uid, time.time())
+                )
+
+    def retired_assignments(self) -> set[str]:
+        with self.connect() as db:
+            return {row[0] for row in db.execute("SELECT uid FROM retired_assignments")}
 
     def tracked_assignments(self) -> list[dict[str, Any]]:
         with self.connect() as db:

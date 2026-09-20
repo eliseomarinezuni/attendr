@@ -76,23 +76,30 @@ class LectureContentBundle:
         """Keep source boundaries and broad structural coverage within the model limit."""
         if len(self.combined_text) <= limit:
             return self.combined_text
-        allowance = max(1_000, limit // max(1, len(self.sources)) - 180)
+        separator = "\n\n[... material condensed ...]\n\n"
+        overhead = sum(len(_source_section(source, "")) for source in self.sources)
+        overhead += max(0, len(self.sources) - 1) * len("\n\n---\n\n")
+        allowance = (limit - overhead) // max(1, len(self.sources))
+        if allowance < 100:
+            raise AIInputError("Too many lecture sources for the configured input limit.")
         sections: list[str] = []
         for source in self.sources:
             blocks = _structural_blocks(source.text)
-            chosen: list[str] = []
+            chosen: dict[int, str] = {}
             used = 0
             for index in _coverage_indices(len(blocks)):
                 block = blocks[index]
-                if used + len(block) > allowance:
+                size = len(block) + (len(separator) if chosen else 0)
+                if used + size > allowance:
                     continue
-                chosen.append(block)
-                used += len(block)
-            if not chosen:
-                chosen = [_bounded_prefix(source.text, allowance)]
-            sections.append(
-                _source_section(source, "\n\n[... material condensed ...]\n\n".join(chosen))
+                chosen[index] = block
+                used += size
+            text = (
+                separator.join(chosen[index] for index in sorted(chosen))
+                if chosen
+                else _bounded_prefix(source.text, allowance)
             )
+            sections.append(_source_section(source, text))
         value = "\n\n---\n\n".join(sections)
         if len(value) > limit:
             raise AIInputError("Lecture material cannot be reduced safely to the configured limit.")

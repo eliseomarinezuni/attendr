@@ -1,11 +1,9 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test, { afterEach } from 'node:test';
-import ts from 'typescript';
+import { loadWorker } from './helpers/worker.mjs';
 import { freshDatabase } from './helpers/database.mjs';
-const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8') + '\nexport { detectCourses, answerAsk, retrieveAsk, handleAsk, scheduleAsk };';
-const { outputText } = ts.transpileModule(source.replace('import("@google/genai")', `import(${JSON.stringify(import.meta.resolve('@google/genai'))})`), { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } });
-const { default: worker, detectCourses, answerAsk, retrieveAsk, handleAsk, scheduleAsk } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString('base64')}`);
+const { default: worker, detectCourses, answerAsk, retrieveAsk, handleAsk, scheduleAsk } = await loadWorker(['detectCourses', 'answerAsk', 'retrieveAsk', 'handleAsk', 'scheduleAsk']);
 const courses = JSON.parse(readFileSync(new URL('../../data/course_schedule.example.json', import.meta.url))).courses;
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -209,4 +207,17 @@ test('staged updates and removals preserve the active snapshot until complete pu
   await staged(DB, 'publish', [], { count: 2, synced_at: old });
   assert.equal(DB.sqlite.prepare('SELECT count(*) n FROM ask_sources').get().n, 1);
   DB.sqlite.close();
+});
+
+test('deadline retrieval ranks distinct sources before applying limits, including split records', async () => {
+  const DB = database();
+  const records = Array.from({length:30}, (_, i) => sourceRecord({
+    id:`midterm:${i}`, source_id:'midterm', title:'Midterm Exam',
+    deadline:'2026-10-20T14:00:00Z', chunks:Array(32).fill('Midterm exam deadline'),
+  }));
+  records.push(sourceRecord({id:'final', title:'Final Exam', deadline:'2026-12-20T14:00:00Z', chunks:['Final exam deadline']}));
+  await sync(DB, records);
+  const hits = await retrieveAsk({DB}, course, 'example web exam deadlines');
+  assert.equal(hits.length, 2);
+  assert.deepEqual(new Set(hits.map(h => h.title)), new Set(['Midterm Exam', 'Final Exam']));
 });

@@ -6,6 +6,7 @@ import base64
 import binascii
 import hashlib
 import json
+import logging
 import os
 import sqlite3
 import tempfile
@@ -33,6 +34,7 @@ class CloudStateClient:
         self.secret = secret
         self.lease_token = lease_token
         self.revision = revision
+        self._last_digest: bytes | None = None
         if not key:
             raise CloudStateError("ATTENDR_STATE_KEY must be configured")
         raw_key = hashlib.sha256(b"attendr-state-key-v1\0" + key.encode("utf-8")).digest()
@@ -132,8 +134,12 @@ class CloudStateClient:
         with tempfile.NamedTemporaryFile(suffix=".db") as snapshot:
             with sqlite3.connect(path) as source, sqlite3.connect(snapshot.name) as target:
                 source.backup(target)
+                target.execute("VACUUM")
             plaintext = Path(snapshot.name).read_bytes()
-        self._upload_plaintext(plaintext)
+        digest = hashlib.sha256(plaintext).digest()
+        if digest != self._last_digest:
+            self._upload_plaintext(plaintext)
+            self._last_digest = digest
 
     def upload_exact(self, path: Path) -> None:
         """Upload the exact verified SQLite bytes, used only for key rotation."""
@@ -147,6 +153,18 @@ class CloudStateClient:
         chunks = [
             encoded[index : index + _CHUNK_BYTES] for index in range(0, len(encoded), _CHUNK_BYTES)
         ]
+        limit = min(8 * 1024 * 1024, 48 * _CHUNK_BYTES * 3 // 4)
+        logging.getLogger("attendr.state").info(
+            "Checkpoint size: %d bytes (%d%% of limit)",
+            len(encrypted),
+            len(encrypted) * 100 // limit,
+        )
+        if len(encrypted) > limit:
+            raise CloudStateError(
+                "Encrypted state exceeds the checkpoint limit; preserve the local database and run state maintenance"
+            )
+        if len(encrypted) > limit * 0.75:
+            logging.getLogger("attendr.state").warning("Checkpoint is above 75%% of its size limit")
         payload = {
             "revision": self.revision,
             "sha256": hashlib.sha256(encrypted).hexdigest(),

@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, TypedDict
 
 from .ai_assistant import (
     AI_TASKS,
@@ -34,6 +35,11 @@ from .notifier import DiscordNotificationError, DiscordNotifier
 from .state_store import StateStore
 
 UTC = timezone.utc
+
+
+class SummaryRecord(TypedDict):
+    payload: dict[str, Any]
+    content_hash: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,7 +134,7 @@ class LectureQuizRunner:
             )
         if not due:
             return LectureReviewReport(0, 0, 0, 0, 0, 0, 0, 0, 0, ())
-        state = self._load_state() if self.store is None else {"sent": {}}
+        state: dict[str, Any] = self._load_state() if self.store is None else {"sent": {}}
         summary_records = {
             session.session_id(ended_at.date()): self._summary_record(
                 session.session_id(ended_at.date())
@@ -271,6 +277,9 @@ class LectureQuizRunner:
                         summary_payload,
                         force=force,
                         destination="lecture_summaries",
+                        expires_at=None
+                        if force
+                        else (ended_at + timedelta(minutes=self.max_age_minutes)).timestamp(),
                         fixed_fingerprint=summary_fingerprint,
                     )
                     if delivered:
@@ -290,7 +299,9 @@ class LectureQuizRunner:
                         quiz_payload = quiz_record["payload"]
                     else:
                         assert bundle is not None
-                        questions = self.ai.generate_hybrid_quiz(bundle.combined_text)
+                        questions = self.ai.generate_hybrid_quiz(
+                            bundle.summary_context(getattr(self.ai, "max_input_chars", 120_000))
+                        )
                         quiz_payload = hybrid_quiz_discord_payload(bundle.title, questions)
                         if self.store and not force:
                             quiz_payload = self.store.save_quiz(quiz_key, quiz_payload)
@@ -299,6 +310,9 @@ class LectureQuizRunner:
                         quiz_payload,
                         force=force,
                         destination="lecture_quizzes",
+                        expires_at=None
+                        if force
+                        else (ended_at + timedelta(minutes=self.max_age_minutes)).timestamp(),
                         fixed_fingerprint="session",
                     )
                     if delivered:
@@ -380,7 +394,7 @@ class LectureQuizRunner:
             ).hexdigest(),
         )
 
-    def _summary_record(self, session_id: str) -> dict[str, object] | None:
+    def _summary_record(self, session_id: str) -> SummaryRecord | None:
         if not self.store:
             return None
         value = self.store.cache_get(f"lecture-summary-session:v1:{session_id}")
@@ -390,9 +404,9 @@ class LectureQuizRunner:
             value.get("content_hash"), str
         ):
             return None
-        return value
+        return {"payload": value["payload"], "content_hash": value["content_hash"]}
 
-    def _summary_delivered(self, session_id: str, record: dict[str, object] | None) -> bool:
+    def _summary_delivered(self, session_id: str, record: SummaryRecord | None) -> bool:
         if not self.store or not record:
             return False
         return self.store.was_sent(
@@ -463,7 +477,7 @@ class LectureQuizRunner:
             for source in bundle.sources
         ]
 
-    def _already_sent(self, session_id: str, state: dict[str, object]) -> bool:
+    def _already_sent(self, session_id: str, state: dict[str, Any]) -> bool:
         if self.store:
             cached = self.store.quiz(f"lecture-quiz:{session_id}")
             return bool(cached and cached["sent_at"])
@@ -623,7 +637,7 @@ class LectureQuizRunner:
         return self._sort_materials(selected)
 
     def _override_materials(
-        self, override: dict[str, object], materials: tuple[LectureMaterial, ...]
+        self, override: dict[str, Any], materials: tuple[LectureMaterial, ...]
     ) -> tuple[LectureMaterial, ...]:
         module_id = str(override.get("module_id", "")).strip()
         module_name = str(override.get("module", "")).strip().casefold()
@@ -713,7 +727,7 @@ class LectureQuizRunner:
         text, _, _ = extract_lecture_material(material)
         return text
 
-    def _load_state(self) -> dict[str, object]:
+    def _load_state(self) -> dict[str, Any]:
         if not self.state_path.exists():
             return {"version": 1, "sent": {}}
         try:
@@ -728,7 +742,7 @@ class LectureQuizRunner:
         except (OSError, json.JSONDecodeError) as error:
             raise ValueError("Lecture quiz state is unreadable") from error
 
-    def _save_state(self, state: dict[str, object]) -> None:
+    def _save_state(self, state: dict[str, Any]) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, raw_path = tempfile.mkstemp(
             prefix=f".{self.state_path.name}.", dir=self.state_path.parent, text=True
