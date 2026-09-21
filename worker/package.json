@@ -9,12 +9,12 @@
     "db:init:local": "wrangler d1 execute attendr-study --local --file=schema.sql"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260914.1",
-    "esbuild": "0.28.1",
+    "@cloudflare/workers-types": "^5.20260918.1",
+    "esbuild": "0.28.2",
     "typescript": "^5.9.2",
-    "wrangler": "^4.129.0"
+    "wrangler": "^4.135.0"
   },
   "dependencies": {
-    "@google/genai": "^2.21.0"
+    "@google/genai": "^2.23.0"
   }
 }
