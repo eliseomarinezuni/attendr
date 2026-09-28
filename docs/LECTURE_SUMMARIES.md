@@ -25,7 +25,7 @@
    ```
 
 5. Optionally set `GEMINI_LECTURE_SUMMARY_MODEL`. A blank value inherits `GEMINI_MODEL`. If configured for hosted runs, add the same-named GitHub Actions secret.
-6. Run `python main.py --lecture-summaries` locally or manually dispatch **Post-Class Lecture Review** in GitHub Actions. Verify the result in `#lecture-summaries`, not `#lecture-quizzes`.
+6. Run `python main.py --lecture-summaries` locally when explicitly needed. The scheduled GitHub lecture-review workflow has been retired. Verify the result in `#lecture-summaries`, not `#lecture-quizzes`.
 
 No new Discord application, webhook, Worker route, Cloudflare secret, or Google OAuth scope is required.
 

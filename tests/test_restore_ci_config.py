@@ -81,9 +81,9 @@ def test_valid_google_oauth_files_are_private_and_not_printed(tmp_path):
     assert (tmp_path / "data/course_schedule.json").stat().st_mode & 0o777 == 0o600
     assert (tmp_path / "data/preferences.json").stat().st_mode & 0o777 == 0o600
     restored = (tmp_path / ".env").read_text()
-    assert "DISCORD_LECTURE_SUMMARIES_CHANNEL_ID=4" in restored
-    assert "GEMINI_LECTURE_SUMMARY_MODEL=gemini-summary-test" in restored
-    assert "LECTURE_REVIEW_MAX_AGE_MINUTES=60" in restored
+    assert "DISCORD_LECTURE_SUMMARIES_CHANNEL_ID" not in restored
+    assert "DISCORD_QUIZ_CHANNEL_ID" not in restored
+    assert "GEMINI_LECTURE_SUMMARY_MODEL" not in restored
     assert "DISCORD_QUIET_HOURS_START=0" in restored
     assert "DISCORD_QUIET_HOURS_END=9" in restored
 

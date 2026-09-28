@@ -5,7 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
-PRODUCTION_WORKFLOWS = ("schedule.yml", "class-quizzes.yml")
+PRODUCTION_WORKFLOWS = ("schedule.yml",)
 PRIVATE_DATA_FILES = (
     "announcement_dates_index.json",
     "course_schedule.json",

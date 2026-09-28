@@ -488,7 +488,7 @@ class PlannerSafetyTests(unittest.TestCase):
             with self.assertRaises(CalendarAPIError):
                 StudyRemoteState.from_env()
 
-    def test_failed_google_preflight_blocks_calendar_and_study_writes_once(self):
+    def test_failed_google_preflight_blocks_calendar_without_study_planning(self):
         snapshot = CanvasSnapshot("1", "Test", (), (), (), (), NOW, complete=True)
         canvas = Mock()
         canvas.fetch_snapshot.return_value = snapshot
@@ -542,9 +542,8 @@ class PlannerSafetyTests(unittest.TestCase):
         self.assertEqual(by_name["Materials"].status, "degraded")
         self.assertEqual(by_name["Announcement dates"].status, "ok")
         self.assertEqual(by_name["Calendar"].status, "failed")
-        self.assertEqual(by_name["Study plan"].status, "failed")
+        self.assertNotIn("Study plan", by_name)
         self.assertIn("GOOGLE_TOKEN_B64", by_name["Calendar"].detail)
-        self.assertIn("existing study plan preserved", by_name["Study plan"].detail)
 
     def test_pipeline_preserves_calendar_on_each_incomplete_source(self):
         for source in ("canvas", "materials", "announcements"):

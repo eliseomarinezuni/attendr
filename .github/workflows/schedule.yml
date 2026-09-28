@@ -35,16 +35,11 @@ jobs:
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           DISCORD_ANNOUNCEMENTS_CHANNEL_ID: ${{ secrets.DISCORD_ANNOUNCEMENTS_CHANNEL_ID }}
           DISCORD_CALENDAR_CHANNEL_ID: ${{ secrets.DISCORD_CALENDAR_CHANNEL_ID }}
-          DISCORD_QUIZ_CHANNEL_ID: ${{ secrets.DISCORD_QUIZ_CHANNEL_ID }}
-          DISCORD_LECTURE_SUMMARIES_CHANNEL_ID: ${{ secrets.DISCORD_LECTURE_SUMMARIES_CHANNEL_ID }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_LECTURE_SUMMARY_MODEL: ${{ secrets.GEMINI_LECTURE_SUMMARY_MODEL }}
           GOOGLE_CREDENTIALS_B64: ${{ secrets.GOOGLE_CREDENTIALS_B64 }}
-          GOOGLE_SLIDES_TOKEN_B64: ${{ secrets.GOOGLE_SLIDES_TOKEN_B64 }}
           GOOGLE_TOKEN_B64: ${{ secrets.GOOGLE_TOKEN_B64 }}
           GOOGLE_CALENDAR_ID: ${{ secrets.GOOGLE_CALENDAR_ID }}
           GOOGLE_CALENDAR_NAME: ${{ secrets.GOOGLE_CALENDAR_NAME }}
-          GOOGLE_STUDY_CALENDAR_NAME: ${{ secrets.GOOGLE_STUDY_CALENDAR_NAME }}
           STUDY_WORKER_URL: ${{ secrets.STUDY_WORKER_URL }}
           STUDY_SYNC_SECRET: ${{ secrets.STUDY_SYNC_SECRET }}
           COURSE_SCHEDULE_B64: ${{ secrets.COURSE_SCHEDULE_B64 }}
@@ -53,9 +48,6 @@ jobs:
         run: bash scripts/restore_ci_config.sh
       - name: Run with durable cloud state
         env:
-          ATTENDR_ASK_SYNC: "true"
-          LECTURE_MAX_FILE_MB: "768"
-          LECTURE_QUIZ_RETRY_HOURS: "336"
           DISCORD_QUIET_HOURS_START: "0"
           DISCORD_QUIET_HOURS_END: "9"
           ATTENDR_STATE_KEY: ${{ secrets.ATTENDR_STATE_KEY }}

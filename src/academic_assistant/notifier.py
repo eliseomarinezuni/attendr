@@ -569,9 +569,10 @@ class DiscordNotifier:
             raise
         self.state.finish(row, "sent", remote_id=remote_id)
 
-    def flush_pending(self) -> int:
+    def flush_pending(self, *, allowed_destinations: Iterable[str] | None = None) -> int:
         if not isinstance(self.state, StateStore):
             return 0
+        allowed = set(allowed_destinations) if allowed_destinations is not None else None
         pending_deliveries = self.state.pending_deliveries()
         now_timestamp = self._now_utc().timestamp()
         pending_deliveries = [
@@ -596,6 +597,10 @@ class DiscordNotifier:
                 )
             )
         ]
+        if allowed is not None:
+            pending_deliveries = [
+                pending for pending in pending_deliveries if pending["destination"] in allowed
+            ]
         if pending_deliveries:
             self._assert_delivery_allowed()
         sent = 0
@@ -604,7 +609,7 @@ class DiscordNotifier:
             if row:
                 self._deliver_claim(row)
                 sent += 1
-        blocked = self.state.blocked_deliveries()
+        blocked = self.state.blocked_deliveries(allowed)
         if blocked:
             raise DiscordNotificationError(
                 f"{blocked} outbox delivery(s) need review; run scripts/state_admin.py list."

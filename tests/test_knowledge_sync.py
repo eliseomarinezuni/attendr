@@ -279,20 +279,13 @@ def test_setup_reuses_channel_and_preserves_other_commands(existing):
         assert creates[0][2]["json"]["permission_overwrites"][0]["deny"] == "1024"
 
 
-def test_scheduled_sync_keeps_encrypted_runner():
-    workflows = [
-        (ROOT / ".github/workflows/schedule.yml").read_text(),
-        (ROOT / ".github/workflows/class-quizzes.yml").read_text(),
-    ]
-    assert 'ATTENDR_ASK_SYNC: "true"' in workflows[0]
-    assert all("python scripts/cloud_run.py" in workflow for workflow in workflows)
-    assert all(
-        "ATTENDR_STATE_KEY: ${{ secrets.ATTENDR_STATE_KEY }}" in workflow for workflow in workflows
-    )
-    assert all(
-        "ATTENDR_STATE_KEY: ${{ secrets.STUDY_SYNC_SECRET }}" not in workflow
-        for workflow in workflows
-    )
+def test_scheduled_sync_only_runs_core_pipeline_with_encrypted_state():
+    workflow = (ROOT / ".github/workflows/schedule.yml").read_text()
+    assert 'ATTENDR_ASK_SYNC: "true"' not in workflow
+    assert not (ROOT / ".github/workflows/class-quizzes.yml").exists()
+    assert "python scripts/cloud_run.py" in workflow
+    assert "ATTENDR_STATE_KEY: ${{ secrets.ATTENDR_STATE_KEY }}" in workflow
+    assert "ATTENDR_STATE_KEY: ${{ secrets.STUDY_SYNC_SECRET }}" not in workflow
 
 
 def test_large_course_batches_preserve_every_chunk_before_publish(tmp_path):

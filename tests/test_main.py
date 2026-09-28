@@ -70,7 +70,7 @@ class MainRunnerTests(unittest.TestCase):
                 self.assertEqual(status, expected_exit)
                 self.assertEqual(recorded, expected_status)
 
-    def test_default_plan_runs_daily_pipeline_without_quiz(self):
+    def test_default_plan_only_runs_announcements_and_calendar(self):
         arguments = attendr_main.build_parser().parse_args([])
 
         self.assertEqual(
@@ -79,13 +79,20 @@ class MainRunnerTests(unittest.TestCase):
                 True,
                 True,
                 True,
-                True,
                 False,
-                True,
-                True,
-                lecture_summaries=True,
+                False,
+                False,
+                False,
             ),
         )
+
+    def test_sync_only_does_not_create_study_sessions(self):
+        arguments = attendr_main.build_parser().parse_args(["--sync-only"])
+
+        plan = attendr_main.resolve_plan(arguments)
+
+        self.assertTrue(plan.calendar)
+        self.assertFalse(plan.study_plan)
 
     def test_lecture_summary_mode_does_not_enable_quizzes(self):
         arguments = attendr_main.build_parser().parse_args(["--lecture-summaries"])
@@ -119,7 +126,7 @@ class MainRunnerTests(unittest.TestCase):
 
         self.assertEqual(
             attendr_main.resolve_plan(arguments),
-            attendr_main.RunPlan(False, True, True, False, False, False, True),
+            attendr_main.RunPlan(False, True, True, False, False, False, False),
         )
 
     def test_no_materials_disables_syllabus_sync(self):

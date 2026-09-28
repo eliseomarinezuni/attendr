@@ -110,15 +110,16 @@ def test_one_failed_course_does_not_freeze_healthy_calendar(pipeline):
     assert call.kwargs["protected_course_ids"] == {2}
     assert "class_schedule" not in call.kwargs["authoritative_sources"]
     assert next(result for result in results if result.name == "Calendar").status == "ok"
-    # Planner still needs complete availability/task data before global replacement.
+    # Calendar sync never starts the retired automatic planner.
     pipeline.planner.sync.assert_not_called()
 
 
-def test_complete_default_run_keeps_independent_outputs(pipeline):
+def test_complete_default_run_only_sends_announcements_and_calendar_updates(pipeline):
     results = main.run_pipeline(main.build_parser().parse_args([]))
     assert all(result.status in {"ok", "skipped"} for result in results)
-    pipeline.notifier.send_daily_digest.assert_called_once()
-    pipeline.reviews.process.assert_called_once()
+    pipeline.notifier.send_daily_digest.assert_not_called()
+    pipeline.reviews.process.assert_not_called()
+    pipeline.planner.sync.assert_not_called()
     assert {
         "class_schedule",
         "university_schedule",
@@ -126,7 +127,44 @@ def test_complete_default_run_keeps_independent_outputs(pipeline):
     } == pipeline.calendar.sync_items.call_args.kwargs["authoritative_sources"]
 
 
-@pytest.mark.parametrize("component", ["materials", "dates", "canvas", "reviews"])
+def test_study_sessions_require_explicit_manual_mode(pipeline):
+    main.run_pipeline(main.build_parser().parse_args(["--study-plan-only"]))
+
+    pipeline.planner.sync.assert_called_once()
+    pipeline.calendar.sync_items.assert_not_called()
+    pipeline.reviews.process.assert_not_called()
+
+
+def test_lecture_reviews_require_explicit_manual_mode(pipeline):
+    main.run_pipeline(main.build_parser().parse_args(["--lecture-quizzes"]))
+
+    pipeline.reviews.process.assert_called_once_with(
+        force=False, include_summaries=True, include_quizzes=True
+    )
+    pipeline.calendar.sync_items.assert_not_called()
+    pipeline.planner.sync.assert_not_called()
+
+
+def test_manual_summary_failure_does_not_start_calendar_or_quizzes(pipeline):
+    pipeline.reviews.process.side_effect = ValueError("source unavailable")
+
+    results = main.run_pipeline(main.build_parser().parse_args(["--lecture-summaries"]))
+
+    assert (
+        next(result for result in results if result.name == "Lecture summaries").status == "failed"
+    )
+    assert not any(result.name == "Lecture quizzes" for result in results)
+    pipeline.calendar.sync_items.assert_not_called()
+
+
+def test_digest_requires_explicit_manual_mode(pipeline):
+    main.run_pipeline(main.build_parser().parse_args(["--digest-only"]))
+
+    pipeline.notifier.send_daily_digest.assert_called_once()
+    pipeline.calendar.sync_items.assert_not_called()
+
+
+@pytest.mark.parametrize("component", ["materials", "dates", "canvas"])
 @pytest.mark.parametrize(
     "error", [ValueError("invalid source"), RuntimeError("unexpected failure")]
 )
@@ -138,15 +176,11 @@ def test_dependency_failures_preserve_calendar_but_do_not_abort_reporting(
         "materials": "sync",
         "dates": "sync",
         "canvas": "fetch_snapshot",
-        "reviews": "process",
     }[component]
     getattr(target, method).side_effect = error
     results = main.run_pipeline(main.build_parser().parse_args([]))
     assert any(result.status == "failed" for result in results)
-    if component in {"materials", "dates", "canvas"}:
-        pipeline.calendar.sync_items.assert_not_called()
-    else:
-        pipeline.calendar.sync_items.assert_called_once()
+    pipeline.calendar.sync_items.assert_not_called()
     assert any(result.name == "Delivery outbox" for result in results)
 
 

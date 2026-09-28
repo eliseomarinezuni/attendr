@@ -257,6 +257,39 @@ class DiscordNotifierTests(unittest.TestCase):
         self.assertEqual(session.calls, [])
         self.assertEqual(store.pending_deliveries(), [])
 
+    def test_core_outbox_skips_retired_lecture_messages_and_blockers(self):
+        store = StateStore(self.state_path)
+        store.enqueue_messages(
+            "announcements:custom:room",
+            "announcement-fingerprint",
+            "announcements",
+            ({"content": "Room changed"},),
+        )
+        store.enqueue_messages(
+            "lecture_quizzes:custom:queued",
+            "quiz-fingerprint",
+            "lecture_quizzes",
+            ({"content": "Old quiz"},),
+        )
+        store.enqueue_messages(
+            "lecture_summaries:custom:blocked",
+            "summary-fingerprint",
+            "lecture_summaries",
+            ({"content": "Old summary"},),
+        )
+        with store.connect() as database:
+            database.execute(
+                "UPDATE delivery_outbox SET status='failed' WHERE destination='lecture_summaries'"
+            )
+        notifier, session, _ = self.make_notifier(now_provider=lambda: NOW + timedelta(hours=2))
+
+        self.assertEqual(notifier.flush_pending(allowed_destinations={"announcements"}), 1)
+        self.assertEqual(len(session.calls), 1)
+        self.assertEqual(session.calls[0][1]["json"]["content"], "Room changed")
+        self.assertEqual(
+            {row["destination"] for row in store.pending_deliveries()}, {"lecture_quizzes"}
+        )
+
     def test_rate_limit_uses_retry_after_then_retries(self):
         notifier, session, sleeps = self.make_notifier(
             [FakeResponse(429, {"retry_after": 1.25}), FakeResponse(204)]

@@ -992,10 +992,9 @@ export default {
   },
 
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(Promise.all([
-      recoverOperations(env).then(() => sendDueReminders(env)),
+    ctx.waitUntil(
       automationWatchdog(env).catch(() => console.error("Academic workflow watchdog unavailable")),
-    ]).then(() => undefined));
+    );
   },
 } satisfies ExportedHandler<Env>;
 

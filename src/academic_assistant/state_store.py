@@ -241,8 +241,18 @@ class StateStore:
             )
             return result.rowcount == 1
 
-    def blocked_deliveries(self) -> int:
+    def blocked_deliveries(self, allowed_destinations: set[str] | None = None) -> int:
         with self.connect() as db:
+            if allowed_destinations is not None:
+                if not allowed_destinations:
+                    return 0
+                destinations = tuple(sorted(allowed_destinations))
+                placeholders = ",".join("?" for _ in destinations)
+                return db.execute(
+                    "SELECT count(*) FROM delivery_outbox "
+                    f"WHERE status IN ('uncertain','failed') AND destination IN ({placeholders})",
+                    destinations,
+                ).fetchone()[0]
             return db.execute(
                 "SELECT count(*) FROM delivery_outbox WHERE status IN ('uncertain','failed')"
             ).fetchone()[0]

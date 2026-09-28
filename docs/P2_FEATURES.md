@@ -36,7 +36,7 @@ This is deterministic, rule-based triage, not an AI judgment or a claim that eve
 
 Successfully delivered daily and lecture quizzes become review cards, one per question. Existing completed quiz payloads are imported once; migration-only legacy completion records without questions produce no cards. The first review is due on the local calendar day after the original quiz was sent.
 
-The normal scheduled pipeline sends due cards to the existing lecture-quiz destination, with answers still hidden behind spoilers. Each local day has a fixed selection of at most `review_daily_limit` cards (1–10). Repeated runs do not send that selection again. Sending a card never changes its learning interval: ungraded cards remain due and can be selected on a later day.
+Only the explicit `main.py --review-only` command sends due cards to the existing lecture-quiz destination, with answers still hidden behind spoilers. Each local day has a fixed selection of at most `review_daily_limit` cards (1–10). Repeated runs do not send that selection again. Sending a card never changes its learning interval: ungraded cards remain due and can be selected on a later day.
 
 Send reviews without initializing Canvas, Google, or Gemini:
 

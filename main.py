@@ -153,7 +153,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-study-plan",
         action="store_true",
-        help="Skip automatic focused study-session planning.",
+        help="Legacy compatibility flag; study sessions are no longer automatic.",
     )
     quiz_source = parser.add_mutually_exclusive_group()
     quiz_source.add_argument("--topic", help="Lecture topic or text used for the quiz.")
@@ -177,7 +177,7 @@ def resolve_plan(arguments: argparse.Namespace) -> RunPlan:
             False,
             False,
             False,
-            not arguments.no_study_plan,
+            False,
         )
     if arguments.announcements_only:
         return RunPlan(True, False, False, False, False, False, False)
@@ -213,11 +213,10 @@ def resolve_plan(arguments: argparse.Namespace) -> RunPlan:
         True,
         not arguments.no_materials,
         True,
-        True,
+        False,
         bool(arguments.daily_quiz),
-        True,
-        not arguments.no_study_plan,
-        lecture_summaries=True,
+        False,
+        False,
     )
 
 
@@ -689,9 +688,21 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
         or plan.lecture_summaries
         or plan.review
     ):
+        active_destinations: set[str] = set()
+        if plan.announcements or plan.digest:
+            active_destinations.add("announcements")
+        if plan.calendar:
+            active_destinations.add("calendar_updates")
+        if plan.quiz or plan.lecture_quizzes or plan.review:
+            active_destinations.add("lecture_quizzes")
+        if plan.lecture_summaries:
+            active_destinations.add("lecture_summaries")
         results.append(
             run_step(
-                "Delivery outbox", lambda: f"{get_notifier().flush_pending()} recovered delivery(s)"
+                "Delivery outbox",
+                lambda: (
+                    f"{get_notifier().flush_pending(allowed_destinations=active_destinations)} recovered delivery(s)"
+                ),
             )
         )
 
@@ -852,9 +863,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                         )
                     )
 
-    if preferences.review_enabled and (
-        plan.review or (plan.announcements and not arguments.announcements_only)
-    ):
+    if preferences.review_enabled and plan.review:
 
         def send_reviews() -> str:
             store = StateStore(PROJECT_ROOT / os.getenv("ATTENDR_DB", "data/attendr.db"))
