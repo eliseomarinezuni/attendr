@@ -10,6 +10,7 @@ import main
 from academic_assistant.canvas_client import CanvasSnapshot, CourseSummary
 from academic_assistant.preferences import Preferences
 from academic_assistant.course_schedule import CourseSchedule
+from academic_assistant.notifier import DiscordQuietHoursError
 from test_calendar_sync import academic_item
 from test_audit_completion import schedule_data
 
@@ -162,6 +163,19 @@ def test_digest_requires_explicit_manual_mode(pipeline):
 
     pipeline.notifier.send_daily_digest.assert_called_once()
     pipeline.calendar.sync_items.assert_not_called()
+
+
+def test_quiet_hours_defer_pending_delivery_without_failing_sync(pipeline):
+    pipeline.notifier.flush_pending.side_effect = DiscordQuietHoursError(
+        "Discord quiet hours are active until 09:00 America/Toronto."
+    )
+
+    results = main.run_pipeline(main.build_parser().parse_args([]))
+
+    assert (
+        next(result for result in results if result.name == "Delivery outbox").status == "skipped"
+    )
+    assert next(result for result in results if result.name == "Calendar").status == "ok"
 
 
 @pytest.mark.parametrize("component", ["materials", "dates", "canvas"])

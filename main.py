@@ -43,6 +43,7 @@ from academic_assistant import (
     CourseSchedule,
     DiscordConfigurationError,
     DiscordNotificationError,
+    DiscordQuietHoursError,
     DiscordNotifier,
     GoogleCalendarSync,
     GoogleCalendarAuthenticator,
@@ -296,9 +297,16 @@ def resolve_quiz_source(arguments: argparse.Namespace) -> tuple[str, str]:
     )
 
 
-def run_step(name: str, operation: Callable[[], str]) -> StepResult:
+def run_step(
+    name: str,
+    operation: Callable[[], str],
+    *,
+    deferred_errors: tuple[type[Exception], ...] = (),
+) -> StepResult:
     try:
         return StepResult(name, "ok", operation())
+    except deferred_errors as error:
+        return StepResult(name, "skipped", str(error))
     except KNOWN_ERRORS as error:
         return StepResult(name, "failed", str(error))
     except Exception as error:  # noqa: BLE001 - isolate independent pipeline steps.
@@ -703,6 +711,7 @@ def run_pipeline(arguments: argparse.Namespace) -> list[StepResult]:
                 lambda: (
                     f"{get_notifier().flush_pending(allowed_destinations=active_destinations)} recovered delivery(s)"
                 ),
+                deferred_errors=(DiscordQuietHoursError,),
             )
         )
 
